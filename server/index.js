@@ -2,14 +2,24 @@ import express from 'express'
 import cors from 'cors'
 import axios from 'axios'
 import dotenv from 'dotenv'
+import jsonServer from 'json-server'
+import path from 'path'
+import { fileURLToPath } from 'url'
 
 dotenv.config()
 
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+
 const app = express()
-const PORT = process.env.PORT || 3002
+const PORT = process.env.PORT || 3001
 
 // Middleware
-app.use(cors())
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}))
 app.use(express.json())
 
 // Settings API configuration
@@ -78,9 +88,6 @@ app.get('/api/settings/schema', async (req, res) => {
 app.get('/api/settings/values/:boatId', async (req, res) => {
   try {
     const { boatId } = req.params
-
-    // TODO: Implement actual API call when endpoint is available
-    // For now, return empty values
     res.json({
       success: true,
       data: {},
@@ -102,13 +109,8 @@ app.put('/api/settings/:boatId/:settingId', async (req, res) => {
   try {
     const { boatId, settingId } = req.params
     const { value } = req.body
-
-    // TODO: Implement actual API call when endpoint is available
     console.log(`Updating setting ${settingId} to ${value} for boat ${boatId}`)
-
-    res.json({
-      success: true,
-    })
+    res.json({ success: true })
   } catch (error) {
     console.error('Settings update error:', error.message)
     res.status(500).json({
@@ -121,8 +123,16 @@ app.put('/api/settings/:boatId/:settingId', async (req, res) => {
   }
 })
 
+// JSON Server for mock API
+const router = jsonServer.router(path.join(__dirname, 'db.json'))
+const middlewares = jsonServer.defaults({ noCors: true })
+
+app.use(middlewares)
+app.use(router)
+
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`)
+  console.log(`🚀 Server running on port ${PORT}`)
   console.log(`📡 Settings API: http://${SETTINGS_API.host}:${SETTINGS_API.port}${SETTINGS_API.basePath}`)
+  console.log(`📦 Mock API endpoints: /boats, /reservoirs, /points, /deliveries, /shares, /distributors`)
 })

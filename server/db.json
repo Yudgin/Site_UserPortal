@@ -1,0 +1,456 @@
+{
+  "boats": [
+    {
+      "id": "BOAT001",
+      "password": "test123",
+      "name": "My Bait Boat",
+      "firmware": "v2.5.1"
+    },
+    {
+      "id": "BOAT002",
+      "password": "demo456",
+      "name": "Demo Boat",
+      "firmware": "v2.4.0"
+    }
+  ],
+  "reservoirs": [
+    {
+      "id": "res-1",
+      "number": 1,
+      "name": "Озеро Синевир",
+      "basePoint": {
+        "lat": 48.6167,
+        "lng": 23.6833
+      },
+      "pointsCount": 7,
+      "boatId": "BOAT001",
+      "boatPassword": "test123"
+    },
+    {
+      "id": "res-2",
+      "number": 2,
+      "name": "Карпатське озеро",
+      "basePoint": {
+        "lat": 48.45,
+        "lng": 24.0167
+      },
+      "pointsCount": 4,
+      "boatId": "BOAT001",
+      "boatPassword": "test123"
+    },
+    {
+      "id": "res-3",
+      "number": 3,
+      "name": "Рибальський став",
+      "basePoint": {
+        "lat": 50.4501,
+        "lng": 30.5234
+      },
+      "pointsCount": 8,
+      "boatId": "BOAT001"
+    }
+  ],
+  "points": [
+    {
+      "id": "pt-1",
+      "reservoirId": "res-1",
+      "number": 1,
+      "name": "Точка біля берега",
+      "coordinates": {
+        "lat": 48.617,
+        "lng": 23.684
+      },
+      "depth": 3.5,
+      "createdAt": "2024-01-15T10:00:00Z"
+    },
+    {
+      "id": "pt-2",
+      "reservoirId": "res-1",
+      "number": 2,
+      "name": "Глибока точка",
+      "coordinates": {
+        "lat": 48.6175,
+        "lng": 23.685
+      },
+      "depth": 7.2,
+      "createdAt": "2024-01-15T10:30:00Z"
+    },
+    {
+      "id": "pt-3",
+      "reservoirId": "res-1",
+      "number": 3,
+      "name": "Під деревом",
+      "coordinates": {
+        "lat": 48.616,
+        "lng": 23.682
+      },
+      "depth": 4,
+      "createdAt": "2024-01-16T08:00:00Z"
+    },
+    {
+      "id": "pt-7",
+      "reservoirId": "res-1",
+      "number": 4,
+      "name": "Очеретяна затока",
+      "coordinates": {
+        "lat": 48.6155,
+        "lng": 23.686
+      },
+      "depth": 5.5,
+      "createdAt": "2024-01-17T11:00:00Z"
+    },
+    {
+      "id": "pt-8",
+      "reservoirId": "res-1",
+      "number": 5,
+      "name": "Глибоке місце",
+      "coordinates": {
+        "lat": 48.618,
+        "lng": 23.6825
+      },
+      "depth": 8,
+      "createdAt": "2024-01-18T09:00:00Z"
+    },
+    {
+      "id": "pt-4",
+      "reservoirId": "res-2",
+      "number": 1,
+      "name": "Стартова позиція",
+      "coordinates": {
+        "lat": 48.4505,
+        "lng": 24.017
+      },
+      "depth": 2.5,
+      "createdAt": "2024-02-01T09:00:00Z"
+    },
+    {
+      "id": "pt-5",
+      "reservoirId": "res-2",
+      "number": 2,
+      "name": "Коряга",
+      "coordinates": {
+        "lat": 48.451,
+        "lng": 24.018
+      },
+      "depth": 5,
+      "createdAt": "2024-02-01T09:30:00Z"
+    },
+    {
+      "id": "pt-9",
+      "reservoirId": "res-2",
+      "number": 3,
+      "name": "Камені",
+      "coordinates": {
+        "lat": 48.4495,
+        "lng": 24.0175
+      },
+      "depth": 3.5,
+      "createdAt": "2024-02-02T10:00:00Z"
+    },
+    {
+      "id": "pt-6",
+      "reservoirId": "res-3",
+      "number": 1,
+      "name": "Місце 1",
+      "coordinates": {
+        "lat": 50.4505,
+        "lng": 30.524
+      },
+      "depth": 3,
+      "createdAt": "2024-03-10T12:00:00Z"
+    },
+    {
+      "id": "pt-10",
+      "reservoirId": "res-3",
+      "number": 2,
+      "name": "Місце 2",
+      "coordinates": {
+        "lat": 50.451,
+        "lng": 30.525
+      },
+      "depth": 4,
+      "createdAt": "2024-03-10T12:30:00Z"
+    },
+    {
+      "id": "pt-11",
+      "reservoirId": "res-3",
+      "number": 3,
+      "name": "Місце 3",
+      "coordinates": {
+        "lat": 50.4495,
+        "lng": 30.523
+      },
+      "depth": 2.5,
+      "createdAt": "2024-03-10T13:00:00Z"
+    },
+    {
+      "id": "pt-12",
+      "reservoirId": "res-3",
+      "number": 4,
+      "name": "Місце 4",
+      "coordinates": {
+        "lat": 50.4515,
+        "lng": 30.5225
+      },
+      "depth": 5,
+      "createdAt": "2024-03-10T13:30:00Z"
+    },
+    {
+      "id": "pt-13",
+      "reservoirId": "res-3",
+      "number": 5,
+      "name": "Місце 5",
+      "coordinates": {
+        "lat": 50.449,
+        "lng": 30.5245
+      },
+      "depth": 3.5,
+      "createdAt": "2024-03-10T14:00:00Z"
+    },
+    {
+      "id": "pt-14",
+      "reservoirId": "res-3",
+      "number": 6,
+      "name": "Місце 6",
+      "coordinates": {
+        "lat": 50.4508,
+        "lng": 30.526
+      },
+      "depth": 4.5,
+      "createdAt": "2024-03-10T14:30:00Z"
+    },
+    {
+      "id": "pt-15",
+      "reservoirId": "res-3",
+      "number": 7,
+      "name": "Місце 7",
+      "coordinates": {
+        "lat": 50.4498,
+        "lng": 30.5255
+      },
+      "depth": 6,
+      "createdAt": "2024-03-10T15:00:00Z"
+    },
+    {
+      "id": "pt-16",
+      "reservoirId": "res-3",
+      "number": 8,
+      "name": "Місце 8",
+      "coordinates": {
+        "lat": 50.4512,
+        "lng": 30.5238
+      },
+      "depth": 5.5,
+      "createdAt": "2024-03-10T15:30:00Z"
+    },
+    {
+      "id": "pt-1764447267486",
+      "reservoirId": "res-2",
+      "number": 4,
+      "name": "4",
+      "coordinates": {
+        "lat": 48.450183227610566,
+        "lng": 24.018387794494632
+      },
+      "createdAt": "2025-11-29T20:14:27.486Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123"
+    },
+    {
+      "id": "pt-1764447823976",
+      "reservoirId": "res-1",
+      "number": 1,
+      "name": "2",
+      "coordinates": {
+        "lat": 48.616934744926276,
+        "lng": 23.684724860660225
+      },
+      "createdAt": "2025-11-29T20:23:43.976Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123"
+    },
+    {
+      "id": "pt-1764447830071",
+      "reservoirId": "res-1",
+      "number": 2,
+      "name": "7",
+      "coordinates": {
+        "lat": 48.617633373761414,
+        "lng": 23.68138432502747
+      },
+      "createdAt": "2025-11-29T20:23:50.071Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123"
+    }
+  ],
+  "deliveries": [
+    {
+      "id": "del-1",
+      "pointId": "pt-1",
+      "timestamp": "2024-11-20T08:30:00Z",
+      "duration": 180,
+      "distance": 45,
+      "status": "completed"
+    },
+    {
+      "id": "del-2",
+      "pointId": "pt-1",
+      "timestamp": "2024-11-20T10:15:00Z",
+      "duration": 165,
+      "distance": 45,
+      "status": "completed"
+    },
+    {
+      "id": "del-3",
+      "pointId": "pt-2",
+      "timestamp": "2024-11-21T07:00:00Z",
+      "duration": 240,
+      "distance": 78,
+      "status": "completed"
+    },
+    {
+      "id": "del-4",
+      "pointId": "pt-2",
+      "timestamp": "2024-11-21T09:00:00Z",
+      "duration": 120,
+      "distance": 78,
+      "status": "aborted"
+    },
+    {
+      "id": "del-5",
+      "pointId": "pt-3",
+      "timestamp": "2024-11-22T14:00:00Z",
+      "duration": 200,
+      "distance": 55,
+      "status": "completed"
+    }
+  ],
+  "distributors": [
+    {
+      "id": "dist-1",
+      "name": "Fishing Pro Ukraine",
+      "region": "Ukraine"
+    },
+    {
+      "id": "dist-2",
+      "name": "Carp Master DE",
+      "region": "Germany"
+    },
+    {
+      "id": "dist-3",
+      "name": "Bait Boats Poland",
+      "region": "Poland"
+    },
+    {
+      "id": "dist-4",
+      "name": "Fish Hunter RO",
+      "region": "Romania"
+    }
+  ],
+  "distributorBoats": [
+    {
+      "id": "db-1",
+      "distributorId": "dist-1",
+      "boatId": "BOAT001",
+      "boatName": "My Bait Boat",
+      "ownerEmail": "user1@example.com",
+      "permissions": {
+        "viewSettings": true,
+        "editSettings": true,
+        "viewReservoirs": true
+      }
+    },
+    {
+      "id": "db-2",
+      "distributorId": "dist-1",
+      "boatId": "BOAT002",
+      "boatName": "Demo Boat",
+      "ownerEmail": "user2@example.com",
+      "permissions": {
+        "viewSettings": true,
+        "editSettings": false,
+        "viewReservoirs": true
+      }
+    }
+  ],
+  "shares": [
+    {
+      "id": "share-1",
+      "shareKey": "abc123xyz",
+      "reservoirId": "res-1",
+      "expiresAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "shareKey": "qkav9xfeb7",
+      "reservoirId": "res-1",
+      "expiresAt": "2025-12-06T20:01:52.528Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123",
+      "id": "txlzb7w"
+    },
+    {
+      "shareKey": "63u0485e6bf",
+      "reservoirId": "res-1",
+      "expiresAt": "2025-12-06T20:02:01.063Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123",
+      "id": "URl82uK"
+    },
+    {
+      "shareKey": "vkbko0lzjf",
+      "reservoirId": "res-1",
+      "expiresAt": "2025-12-06T20:04:58.857Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123",
+      "id": "slzvwrX"
+    },
+    {
+      "shareKey": "o6h3kuqumym",
+      "reservoirId": "res-2",
+      "expiresAt": "2025-12-06T20:10:55.469Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123",
+      "id": "-58rKED"
+    },
+    {
+      "shareKey": "yjga4yy3sth",
+      "reservoirId": "res-2",
+      "expiresAt": "2025-12-06T20:11:15.385Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123",
+      "id": "IzRvhcm"
+    },
+    {
+      "shareKey": "423c15zug8e",
+      "reservoirId": "res-2",
+      "expiresAt": "2025-12-06T20:11:46.696Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123",
+      "id": "t0nfdOT"
+    },
+    {
+      "shareKey": "tnlvjyd4gqq",
+      "reservoirId": "res-2",
+      "expiresAt": "2025-12-06T20:52:06.065Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123",
+      "id": "t_JOxWW"
+    },
+    {
+      "shareKey": "bglpthz9cyi",
+      "reservoirId": "res-3",
+      "expiresAt": "2025-12-07T11:09:16.486Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123",
+      "id": "1fGmqJ7"
+    },
+    {
+      "shareKey": "m0mev4y6xb",
+      "reservoirId": "res-1",
+      "expiresAt": "2025-12-07T21:01:32.513Z",
+      "boatId": "BOAT001",
+      "boatPassword": "test123",
+      "id": "Tngtddk"
+    }
+  ]
+}
