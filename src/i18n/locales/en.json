@@ -1,0 +1,136 @@
+{
+  "app": {
+    "title": "Bait Boat Control Portal",
+    "loading": "Loading..."
+  },
+  "auth": {
+    "login": "Login",
+    "logout": "Logout",
+    "register": "Register",
+    "email": "Email",
+    "password": "Password",
+    "confirmPassword": "Confirm Password",
+    "forgotPassword": "Forgot password?",
+    "loginWithGoogle": "Sign in with Google",
+    "loginWithFacebook": "Sign in with Facebook",
+    "noAccount": "Don't have an account?",
+    "hasAccount": "Already have an account?",
+    "signUp": "Sign up",
+    "signIn": "Sign in"
+  },
+  "boat": {
+    "connect": "Connect boat",
+    "disconnect": "Disconnect boat",
+    "boatId": "Boat ID",
+    "boatPassword": "Boat password",
+    "connected": "Boat connected",
+    "notConnected": "Boat not connected",
+    "invalidCredentials": "Invalid boat ID or password",
+    "connectionSuccess": "Boat connected successfully"
+  },
+  "reservoirs": {
+    "title": "Reservoirs",
+    "noReservoirs": "No reservoirs found",
+    "rename": "Rename",
+    "delete": "Delete",
+    "share": "Share",
+    "newName": "New name",
+    "basePoint": "Base point",
+    "pointsCount": "Points count"
+  },
+  "points": {
+    "title": "Points",
+    "noPoints": "No points found",
+    "add": "Add point",
+    "name": "Name",
+    "coordinates": "Coordinates",
+    "latitude": "Latitude",
+    "longitude": "Longitude",
+    "depth": "Depth",
+    "import": "Import",
+    "importByKey": "Import by key",
+    "clickToSelect": "Click on the map to select location",
+    "selectLocation": "Please select a location on the map or enter coordinates manually"
+  },
+  "deliveries": {
+    "title": "Delivery history",
+    "noDeliveries": "No deliveries found",
+    "date": "Date",
+    "duration": "Duration",
+    "distance": "Distance",
+    "status": "Status",
+    "completed": "Completed",
+    "aborted": "Aborted",
+    "failed": "Failed"
+  },
+  "map": {
+    "satellite": "Satellite",
+    "street": "Map",
+    "zoomIn": "Zoom in",
+    "zoomOut": "Zoom out",
+    "myLocation": "My location"
+  },
+  "share": {
+    "title": "Share reservoir",
+    "description": "Share the link or key to allow others to import this reservoir with all points",
+    "generateLink": "Generate link",
+    "copyLink": "Copy link",
+    "copy": "Copy",
+    "link": "Link",
+    "linkCopied": "Link copied",
+    "keyCopied": "Key copied",
+    "importTitle": "Import reservoir",
+    "importDescription": "Do you want to import this reservoir with points?",
+    "enterKey": "Enter the key you received from another user to import their reservoir",
+    "importKey": "Key",
+    "import": "Import",
+    "accept": "Accept",
+    "cancel": "Cancel",
+    "loginRequired": "You need to log in to import this reservoir",
+    "importTo": "Import to boat"
+  },
+  "settings": {
+    "title": "Settings",
+    "autopilot": "Autopilot",
+    "boatSettings": "Boat Settings",
+    "access": "Access",
+    "language": "Language",
+    "distributor": "Distributor",
+    "permissions": "Permissions",
+    "viewSettings": "View settings",
+    "editSettings": "Edit settings",
+    "viewReservoirs": "View reservoirs",
+    "parameters": "parameters",
+    "noSettings": "No settings available"
+  },
+  "distributor": {
+    "title": "Distributor Panel",
+    "description": "Manage boats that have granted you access",
+    "boats": "Available Boats",
+    "noBoats": "No boats have granted you access yet",
+    "permissions": "Your Permissions",
+    "noSettingsAccess": "You do not have permission to view settings for this boat"
+  },
+  "common": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "close": "Close",
+    "delete": "Delete",
+    "edit": "Edit",
+    "confirm": "Confirm",
+    "back": "Back",
+    "next": "Next",
+    "error": "Error",
+    "success": "Success",
+    "loading": "Loading...",
+    "meters": "m",
+    "seconds": "sec",
+    "readOnly": "Read Only"
+  },
+  "errors": {
+    "networkError": "Network error",
+    "serverError": "Server error",
+    "unauthorized": "Authorization required",
+    "notFound": "Not found"
+  }
+}

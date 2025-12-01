@@ -1,0 +1,127 @@
+{
+  "app": {
+    "title": "Portal sterowania łódką zanętową",
+    "loading": "Ładowanie..."
+  },
+  "auth": {
+    "login": "Zaloguj się",
+    "logout": "Wyloguj się",
+    "register": "Rejestracja",
+    "email": "Email",
+    "password": "Hasło",
+    "confirmPassword": "Potwierdź hasło",
+    "forgotPassword": "Zapomniałeś hasła?",
+    "loginWithGoogle": "Zaloguj przez Google",
+    "loginWithFacebook": "Zaloguj przez Facebook",
+    "noAccount": "Nie masz konta?",
+    "hasAccount": "Masz już konto?",
+    "signUp": "Zarejestruj się",
+    "signIn": "Zaloguj się"
+  },
+  "boat": {
+    "connect": "Połącz łódkę",
+    "disconnect": "Odłącz łódkę",
+    "boatId": "ID łódki",
+    "boatPassword": "Hasło łódki",
+    "connected": "Łódka połączona",
+    "notConnected": "Łódka niepołączona",
+    "invalidCredentials": "Nieprawidłowe ID lub hasło łódki",
+    "connectionSuccess": "Łódka połączona pomyślnie"
+  },
+  "reservoirs": {
+    "title": "Zbiorniki wodne",
+    "noReservoirs": "Nie znaleziono zbiorników",
+    "rename": "Zmień nazwę",
+    "delete": "Usuń",
+    "share": "Udostępnij",
+    "newName": "Nowa nazwa",
+    "basePoint": "Punkt bazowy",
+    "pointsCount": "Liczba punktów"
+  },
+  "points": {
+    "title": "Punkty",
+    "noPoints": "Nie znaleziono punktów",
+    "add": "Dodaj punkt",
+    "name": "Nazwa",
+    "coordinates": "Współrzędne",
+    "latitude": "Szerokość",
+    "longitude": "Długość",
+    "depth": "Głębokość",
+    "import": "Importuj",
+    "importByKey": "Importuj według klucza",
+    "clickToSelect": "Kliknij na mapę, aby wybrać lokalizację",
+    "selectLocation": "Wybierz lokalizację na mapie lub wprowadź współrzędne ręcznie"
+  },
+  "deliveries": {
+    "title": "Historia dostaw",
+    "noDeliveries": "Nie znaleziono dostaw",
+    "date": "Data",
+    "duration": "Czas trwania",
+    "distance": "Odległość",
+    "status": "Status",
+    "completed": "Zakończone",
+    "aborted": "Przerwane",
+    "failed": "Nieudane"
+  },
+  "map": {
+    "satellite": "Satelita",
+    "street": "Mapa",
+    "zoomIn": "Powiększ",
+    "zoomOut": "Pomniejsz",
+    "myLocation": "Moja lokalizacja"
+  },
+  "share": {
+    "title": "Udostępnij zbiornik",
+    "description": "Udostępnij link lub klucz, aby inni mogli zaimportować zbiornik ze wszystkimi punktami",
+    "generateLink": "Wygeneruj link",
+    "copyLink": "Skopiuj link",
+    "copy": "Skopiuj",
+    "link": "Link",
+    "linkCopied": "Link skopiowany",
+    "keyCopied": "Klucz skopiowany",
+    "importTitle": "Importuj zbiornik",
+    "importDescription": "Czy chcesz zaimportować ten zbiornik z punktami?",
+    "enterKey": "Wprowadź klucz otrzymany od innego użytkownika, aby zaimportować jego zbiornik",
+    "importKey": "Klucz",
+    "import": "Importuj",
+    "accept": "Akceptuj",
+    "cancel": "Anuluj",
+    "loginRequired": "Musisz się zalogować, aby zaimportować ten zbiornik",
+    "importTo": "Importuj do łódki"
+  },
+  "settings": {
+    "title": "Ustawienia",
+    "autopilot": "Autopilot",
+    "boatSettings": "Ustawienia łódki",
+    "access": "Dostęp",
+    "language": "Język",
+    "distributor": "Dystrybutor",
+    "permissions": "Uprawnienia",
+    "viewSettings": "Podgląd ustawień",
+    "editSettings": "Edycja ustawień",
+    "viewReservoirs": "Podgląd zbiorników",
+    "parameters": "parametrów",
+    "noSettings": "Brak dostępnych ustawień"
+  },
+  "common": {
+    "save": "Zapisz",
+    "cancel": "Anuluj",
+    "close": "Zamknij",
+    "delete": "Usuń",
+    "edit": "Edytuj",
+    "confirm": "Potwierdź",
+    "back": "Wstecz",
+    "next": "Dalej",
+    "error": "Błąd",
+    "success": "Sukces",
+    "loading": "Ładowanie...",
+    "meters": "m",
+    "seconds": "sek"
+  },
+  "errors": {
+    "networkError": "Błąd sieci",
+    "serverError": "Błąd serwera",
+    "unauthorized": "Wymagana autoryzacja",
+    "notFound": "Nie znaleziono"
+  }
+}

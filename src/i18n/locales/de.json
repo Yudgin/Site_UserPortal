@@ -1,0 +1,127 @@
+{
+  "app": {
+    "title": "Futterboot-Steuerungsportal",
+    "loading": "Wird geladen..."
+  },
+  "auth": {
+    "login": "Anmelden",
+    "logout": "Abmelden",
+    "register": "Registrieren",
+    "email": "E-Mail",
+    "password": "Passwort",
+    "confirmPassword": "Passwort bestätigen",
+    "forgotPassword": "Passwort vergessen?",
+    "loginWithGoogle": "Mit Google anmelden",
+    "loginWithFacebook": "Mit Facebook anmelden",
+    "noAccount": "Noch kein Konto?",
+    "hasAccount": "Bereits ein Konto?",
+    "signUp": "Registrieren",
+    "signIn": "Anmelden"
+  },
+  "boat": {
+    "connect": "Boot verbinden",
+    "disconnect": "Boot trennen",
+    "boatId": "Boot-ID",
+    "boatPassword": "Boot-Passwort",
+    "connected": "Boot verbunden",
+    "notConnected": "Boot nicht verbunden",
+    "invalidCredentials": "Ungültige Boot-ID oder Passwort",
+    "connectionSuccess": "Boot erfolgreich verbunden"
+  },
+  "reservoirs": {
+    "title": "Gewässer",
+    "noReservoirs": "Keine Gewässer gefunden",
+    "rename": "Umbenennen",
+    "delete": "Löschen",
+    "share": "Teilen",
+    "newName": "Neuer Name",
+    "basePoint": "Basispunkt",
+    "pointsCount": "Anzahl Punkte"
+  },
+  "points": {
+    "title": "Punkte",
+    "noPoints": "Keine Punkte gefunden",
+    "add": "Punkt hinzufügen",
+    "name": "Name",
+    "coordinates": "Koordinaten",
+    "latitude": "Breitengrad",
+    "longitude": "Längengrad",
+    "depth": "Tiefe",
+    "import": "Importieren",
+    "importByKey": "Nach Schlüssel importieren",
+    "clickToSelect": "Klicken Sie auf die Karte, um den Standort auszuwählen",
+    "selectLocation": "Wählen Sie einen Standort auf der Karte oder geben Sie die Koordinaten manuell ein"
+  },
+  "deliveries": {
+    "title": "Lieferverlauf",
+    "noDeliveries": "Keine Lieferungen gefunden",
+    "date": "Datum",
+    "duration": "Dauer",
+    "distance": "Entfernung",
+    "status": "Status",
+    "completed": "Abgeschlossen",
+    "aborted": "Abgebrochen",
+    "failed": "Fehlgeschlagen"
+  },
+  "map": {
+    "satellite": "Satellit",
+    "street": "Karte",
+    "zoomIn": "Vergrößern",
+    "zoomOut": "Verkleinern",
+    "myLocation": "Mein Standort"
+  },
+  "share": {
+    "title": "Gewässer teilen",
+    "description": "Teilen Sie den Link oder Schlüssel, damit andere das Gewässer mit allen Punkten importieren können",
+    "generateLink": "Link generieren",
+    "copyLink": "Link kopieren",
+    "copy": "Kopieren",
+    "link": "Link",
+    "linkCopied": "Link kopiert",
+    "keyCopied": "Schlüssel kopiert",
+    "importTitle": "Gewässer importieren",
+    "importDescription": "Möchten Sie dieses Gewässer mit Punkten importieren?",
+    "enterKey": "Geben Sie den Schlüssel ein, den Sie von einem anderen Benutzer erhalten haben, um sein Gewässer zu importieren",
+    "importKey": "Schlüssel",
+    "import": "Importieren",
+    "accept": "Akzeptieren",
+    "cancel": "Abbrechen",
+    "loginRequired": "Sie müssen sich anmelden, um dieses Gewässer zu importieren",
+    "importTo": "Importieren ins Boot"
+  },
+  "settings": {
+    "title": "Einstellungen",
+    "autopilot": "Autopilot",
+    "boatSettings": "Bootseinstellungen",
+    "access": "Zugriff",
+    "language": "Sprache",
+    "distributor": "Händler",
+    "permissions": "Berechtigungen",
+    "viewSettings": "Einstellungen anzeigen",
+    "editSettings": "Einstellungen bearbeiten",
+    "viewReservoirs": "Gewässer anzeigen",
+    "parameters": "Parameter",
+    "noSettings": "Keine Einstellungen verfügbar"
+  },
+  "common": {
+    "save": "Speichern",
+    "cancel": "Abbrechen",
+    "close": "Schließen",
+    "delete": "Löschen",
+    "edit": "Bearbeiten",
+    "confirm": "Bestätigen",
+    "back": "Zurück",
+    "next": "Weiter",
+    "error": "Fehler",
+    "success": "Erfolg",
+    "loading": "Wird geladen...",
+    "meters": "m",
+    "seconds": "Sek"
+  },
+  "errors": {
+    "networkError": "Netzwerkfehler",
+    "serverError": "Serverfehler",
+    "unauthorized": "Autorisierung erforderlich",
+    "notFound": "Nicht gefunden"
+  }
+}

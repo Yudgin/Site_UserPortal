@@ -1,0 +1,127 @@
+{
+  "app": {
+    "title": "Portal de control barcă momeală",
+    "loading": "Se încarcă..."
+  },
+  "auth": {
+    "login": "Autentificare",
+    "logout": "Deconectare",
+    "register": "Înregistrare",
+    "email": "Email",
+    "password": "Parolă",
+    "confirmPassword": "Confirmă parola",
+    "forgotPassword": "Ai uitat parola?",
+    "loginWithGoogle": "Conectare cu Google",
+    "loginWithFacebook": "Conectare cu Facebook",
+    "noAccount": "Nu ai cont?",
+    "hasAccount": "Ai deja cont?",
+    "signUp": "Înregistrează-te",
+    "signIn": "Conectează-te"
+  },
+  "boat": {
+    "connect": "Conectează barca",
+    "disconnect": "Deconectează barca",
+    "boatId": "ID barcă",
+    "boatPassword": "Parola bărcii",
+    "connected": "Barcă conectată",
+    "notConnected": "Barcă neconectată",
+    "invalidCredentials": "ID sau parolă barcă invalidă",
+    "connectionSuccess": "Barcă conectată cu succes"
+  },
+  "reservoirs": {
+    "title": "Rezervoare",
+    "noReservoirs": "Nu s-au găsit rezervoare",
+    "rename": "Redenumește",
+    "delete": "Șterge",
+    "share": "Partajează",
+    "newName": "Nume nou",
+    "basePoint": "Punct de bază",
+    "pointsCount": "Număr puncte"
+  },
+  "points": {
+    "title": "Puncte",
+    "noPoints": "Nu s-au găsit puncte",
+    "add": "Adaugă punct",
+    "name": "Nume",
+    "coordinates": "Coordonate",
+    "latitude": "Latitudine",
+    "longitude": "Longitudine",
+    "depth": "Adâncime",
+    "import": "Importă",
+    "importByKey": "Importă după cheie",
+    "clickToSelect": "Faceți clic pe hartă pentru a selecta locația",
+    "selectLocation": "Selectați o locație pe hartă sau introduceți coordonatele manual"
+  },
+  "deliveries": {
+    "title": "Istoric livrări",
+    "noDeliveries": "Nu s-au găsit livrări",
+    "date": "Data",
+    "duration": "Durată",
+    "distance": "Distanță",
+    "status": "Status",
+    "completed": "Finalizat",
+    "aborted": "Anulat",
+    "failed": "Eșuat"
+  },
+  "map": {
+    "satellite": "Satelit",
+    "street": "Hartă",
+    "zoomIn": "Mărește",
+    "zoomOut": "Micșorează",
+    "myLocation": "Locația mea"
+  },
+  "share": {
+    "title": "Partajează rezervor",
+    "description": "Partajați linkul sau cheia pentru ca alții să poată importa rezervorul cu toate punctele",
+    "generateLink": "Generează link",
+    "copyLink": "Copiază link",
+    "copy": "Copiază",
+    "link": "Link",
+    "linkCopied": "Link copiat",
+    "keyCopied": "Cheie copiată",
+    "importTitle": "Importă rezervor",
+    "importDescription": "Doriți să importați acest rezervor cu puncte?",
+    "enterKey": "Introduceți cheia primită de la alt utilizator pentru a importa rezervorul său",
+    "importKey": "Cheie",
+    "import": "Importă",
+    "accept": "Acceptă",
+    "cancel": "Anulează",
+    "loginRequired": "Trebuie să vă autentificați pentru a importa acest rezervor",
+    "importTo": "Importă în barca"
+  },
+  "settings": {
+    "title": "Setări",
+    "autopilot": "Autopilot",
+    "boatSettings": "Setări barcă",
+    "access": "Acces",
+    "language": "Limbă",
+    "distributor": "Distribuitor",
+    "permissions": "Permisiuni",
+    "viewSettings": "Vizualizare setări",
+    "editSettings": "Editare setări",
+    "viewReservoirs": "Vizualizare rezervoare",
+    "parameters": "parametri",
+    "noSettings": "Nicio setare disponibilă"
+  },
+  "common": {
+    "save": "Salvează",
+    "cancel": "Anulează",
+    "close": "Închide",
+    "delete": "Șterge",
+    "edit": "Editează",
+    "confirm": "Confirmă",
+    "back": "Înapoi",
+    "next": "Înainte",
+    "error": "Eroare",
+    "success": "Succes",
+    "loading": "Se încarcă...",
+    "meters": "m",
+    "seconds": "sec"
+  },
+  "errors": {
+    "networkError": "Eroare de rețea",
+    "serverError": "Eroare de server",
+    "unauthorized": "Autorizare necesară",
+    "notFound": "Nu a fost găsit"
+  }
+}
