@@ -3,7 +3,7 @@ import { useBoatStore } from '@/store/boatStore'
 
 const USE_MOCK = import.meta.env.VITE_USE_MOCK_API === 'true'
 const API_BASE_URL = USE_MOCK
-  ? 'http://localhost:3001'
+  ? (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001')
   : import.meta.env.VITE_API_BASE_URL || 'https://portal.runferry.com/api/hs/'
 
 export const apiClient: AxiosInstance = axios.create({
