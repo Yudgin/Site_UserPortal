@@ -17,10 +17,10 @@
     {
       "id": "res-1",
       "number": 1,
-      "name": "Озеро Синевир",
+      "name": "Озеро біля Канева",
       "basePoint": {
-        "lat": 48.6167,
-        "lng": 23.6833
+        "lat": 49.7500,
+        "lng": 31.4700
       },
       "pointsCount": 7,
       "boatId": "BOAT001",
@@ -29,24 +29,24 @@
     {
       "id": "res-2",
       "number": 2,
-      "name": "Карпатське озеро",
+      "name": "Ставок на Полтавщині",
       "basePoint": {
-        "lat": 48.45,
-        "lng": 24.0167
+        "lat": 49.5900,
+        "lng": 34.5500
       },
-      "pointsCount": 4,
+      "pointsCount": 5,
       "boatId": "BOAT001",
       "boatPassword": "test123"
     },
     {
       "id": "res-3",
       "number": 3,
-      "name": "Рибальський став",
+      "name": "Водосховище під Вінницею",
       "basePoint": {
-        "lat": 50.4501,
-        "lng": 30.5234
+        "lat": 49.2300,
+        "lng": 28.4700
       },
-      "pointsCount": 8,
+      "pointsCount": 6,
       "boatId": "BOAT001"
     }
   ],
@@ -55,232 +55,217 @@
       "id": "pt-1",
       "reservoirId": "res-1",
       "number": 1,
-      "name": "Точка біля берега",
+      "name": "Ближня точка",
       "coordinates": {
-        "lat": 48.617,
-        "lng": 23.684
+        "lat": 49.7500,
+        "lng": 31.4707
       },
-      "depth": 3.5,
+      "depth": 2.5,
       "createdAt": "2024-01-15T10:00:00Z"
     },
     {
       "id": "pt-2",
       "reservoirId": "res-1",
       "number": 2,
-      "name": "Глибока точка",
+      "name": "Середня 1",
       "coordinates": {
-        "lat": 48.6175,
-        "lng": 23.685
+        "lat": 49.7500,
+        "lng": 31.4710
       },
-      "depth": 7.2,
+      "depth": 3.8,
       "createdAt": "2024-01-15T10:30:00Z"
     },
     {
       "id": "pt-3",
       "reservoirId": "res-1",
       "number": 3,
-      "name": "Під деревом",
+      "name": "Середня 2",
       "coordinates": {
-        "lat": 48.616,
-        "lng": 23.682
+        "lat": 49.7500,
+        "lng": 31.4713
       },
-      "depth": 4,
+      "depth": 4.5,
       "createdAt": "2024-01-16T08:00:00Z"
+    },
+    {
+      "id": "pt-4",
+      "reservoirId": "res-1",
+      "number": 4,
+      "name": "Середня 3",
+      "coordinates": {
+        "lat": 49.7500,
+        "lng": 31.4716
+      },
+      "depth": 5.2,
+      "createdAt": "2024-01-17T11:00:00Z"
+    },
+    {
+      "id": "pt-5",
+      "reservoirId": "res-1",
+      "number": 5,
+      "name": "Глибока 1",
+      "coordinates": {
+        "lat": 49.7500,
+        "lng": 31.4719
+      },
+      "depth": 6.0,
+      "createdAt": "2024-01-18T09:00:00Z"
+    },
+    {
+      "id": "pt-6",
+      "reservoirId": "res-1",
+      "number": 6,
+      "name": "Глибока 2",
+      "coordinates": {
+        "lat": 49.7500,
+        "lng": 31.4722
+      },
+      "depth": 7.5,
+      "createdAt": "2024-01-19T09:00:00Z"
     },
     {
       "id": "pt-7",
       "reservoirId": "res-1",
-      "number": 4,
-      "name": "Очеретяна затока",
+      "number": 7,
+      "name": "Дальня точка",
       "coordinates": {
-        "lat": 48.6155,
-        "lng": 23.686
+        "lat": 49.7500,
+        "lng": 31.4725
       },
-      "depth": 5.5,
-      "createdAt": "2024-01-17T11:00:00Z"
+      "depth": 8.0,
+      "createdAt": "2024-01-20T09:00:00Z"
     },
     {
       "id": "pt-8",
-      "reservoirId": "res-1",
-      "number": 5,
-      "name": "Глибоке місце",
-      "coordinates": {
-        "lat": 48.618,
-        "lng": 23.6825
-      },
-      "depth": 8,
-      "createdAt": "2024-01-18T09:00:00Z"
-    },
-    {
-      "id": "pt-4",
       "reservoirId": "res-2",
       "number": 1,
-      "name": "Стартова позиція",
+      "name": "Ближня",
       "coordinates": {
-        "lat": 48.4505,
-        "lng": 24.017
+        "lat": 49.5905,
+        "lng": 34.5500
       },
-      "depth": 2.5,
+      "depth": 2.0,
       "createdAt": "2024-02-01T09:00:00Z"
-    },
-    {
-      "id": "pt-5",
-      "reservoirId": "res-2",
-      "number": 2,
-      "name": "Коряга",
-      "coordinates": {
-        "lat": 48.451,
-        "lng": 24.018
-      },
-      "depth": 5,
-      "createdAt": "2024-02-01T09:30:00Z"
     },
     {
       "id": "pt-9",
       "reservoirId": "res-2",
-      "number": 3,
-      "name": "Камені",
+      "number": 2,
+      "name": "Точка 2",
       "coordinates": {
-        "lat": 48.4495,
-        "lng": 24.0175
+        "lat": 49.5907,
+        "lng": 34.5500
       },
-      "depth": 3.5,
-      "createdAt": "2024-02-02T10:00:00Z"
-    },
-    {
-      "id": "pt-6",
-      "reservoirId": "res-3",
-      "number": 1,
-      "name": "Місце 1",
-      "coordinates": {
-        "lat": 50.4505,
-        "lng": 30.524
-      },
-      "depth": 3,
-      "createdAt": "2024-03-10T12:00:00Z"
+      "depth": 3.2,
+      "createdAt": "2024-02-01T09:30:00Z"
     },
     {
       "id": "pt-10",
-      "reservoirId": "res-3",
-      "number": 2,
-      "name": "Місце 2",
+      "reservoirId": "res-2",
+      "number": 3,
+      "name": "Точка 3",
       "coordinates": {
-        "lat": 50.451,
-        "lng": 30.525
+        "lat": 49.5909,
+        "lng": 34.5500
       },
-      "depth": 4,
-      "createdAt": "2024-03-10T12:30:00Z"
+      "depth": 4.0,
+      "createdAt": "2024-02-02T10:00:00Z"
     },
     {
       "id": "pt-11",
-      "reservoirId": "res-3",
-      "number": 3,
-      "name": "Місце 3",
+      "reservoirId": "res-2",
+      "number": 4,
+      "name": "Точка 4",
       "coordinates": {
-        "lat": 50.4495,
-        "lng": 30.523
+        "lat": 49.5911,
+        "lng": 34.5500
       },
-      "depth": 2.5,
-      "createdAt": "2024-03-10T13:00:00Z"
+      "depth": 5.5,
+      "createdAt": "2024-02-02T10:30:00Z"
     },
     {
       "id": "pt-12",
-      "reservoirId": "res-3",
-      "number": 4,
-      "name": "Місце 4",
+      "reservoirId": "res-2",
+      "number": 5,
+      "name": "Дальня",
       "coordinates": {
-        "lat": 50.4515,
-        "lng": 30.5225
+        "lat": 49.5913,
+        "lng": 34.5500
       },
-      "depth": 5,
-      "createdAt": "2024-03-10T13:30:00Z"
+      "depth": 6.0,
+      "createdAt": "2024-02-02T11:00:00Z"
     },
     {
       "id": "pt-13",
       "reservoirId": "res-3",
-      "number": 5,
-      "name": "Місце 5",
+      "number": 1,
+      "name": "Точка біля берега",
       "coordinates": {
-        "lat": 50.449,
-        "lng": 30.5245
+        "lat": 49.2294,
+        "lng": 28.4700
       },
-      "depth": 3.5,
-      "createdAt": "2024-03-10T14:00:00Z"
+      "depth": 2.8,
+      "createdAt": "2024-03-10T12:00:00Z"
     },
     {
       "id": "pt-14",
       "reservoirId": "res-3",
-      "number": 6,
-      "name": "Місце 6",
+      "number": 2,
+      "name": "Робоча 1",
       "coordinates": {
-        "lat": 50.4508,
-        "lng": 30.526
+        "lat": 49.2292,
+        "lng": 28.4700
       },
-      "depth": 4.5,
-      "createdAt": "2024-03-10T14:30:00Z"
+      "depth": 3.5,
+      "createdAt": "2024-03-10T12:30:00Z"
     },
     {
       "id": "pt-15",
       "reservoirId": "res-3",
-      "number": 7,
-      "name": "Місце 7",
+      "number": 3,
+      "name": "Робоча 2",
       "coordinates": {
-        "lat": 50.4498,
-        "lng": 30.5255
+        "lat": 49.2290,
+        "lng": 28.4700
       },
-      "depth": 6,
-      "createdAt": "2024-03-10T15:00:00Z"
+      "depth": 4.2,
+      "createdAt": "2024-03-10T13:00:00Z"
     },
     {
       "id": "pt-16",
       "reservoirId": "res-3",
-      "number": 8,
-      "name": "Місце 8",
-      "coordinates": {
-        "lat": 50.4512,
-        "lng": 30.5238
-      },
-      "depth": 5.5,
-      "createdAt": "2024-03-10T15:30:00Z"
-    },
-    {
-      "id": "pt-1764447267486",
-      "reservoirId": "res-2",
       "number": 4,
-      "name": "4",
+      "name": "Робоча 3",
       "coordinates": {
-        "lat": 48.450183227610566,
-        "lng": 24.018387794494632
+        "lat": 49.2288,
+        "lng": 28.4700
       },
-      "createdAt": "2025-11-29T20:14:27.486Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123"
+      "depth": 5.0,
+      "createdAt": "2024-03-10T13:30:00Z"
     },
     {
-      "id": "pt-1764447823976",
-      "reservoirId": "res-1",
-      "number": 1,
-      "name": "2",
+      "id": "pt-17",
+      "reservoirId": "res-3",
+      "number": 5,
+      "name": "Глибока",
       "coordinates": {
-        "lat": 48.616934744926276,
-        "lng": 23.684724860660225
+        "lat": 49.2286,
+        "lng": 28.4700
       },
-      "createdAt": "2025-11-29T20:23:43.976Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123"
+      "depth": 6.5,
+      "createdAt": "2024-03-10T14:00:00Z"
     },
     {
-      "id": "pt-1764447830071",
-      "reservoirId": "res-1",
-      "number": 2,
-      "name": "7",
+      "id": "pt-18",
+      "reservoirId": "res-3",
+      "number": 6,
+      "name": "Дальня точка",
       "coordinates": {
-        "lat": 48.617633373761414,
-        "lng": 23.68138432502747
+        "lat": 49.2284,
+        "lng": 28.4700
       },
-      "createdAt": "2025-11-29T20:23:50.071Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123"
+      "depth": 7.0,
+      "createdAt": "2024-03-10T14:30:00Z"
     }
   ],
   "deliveries": [
@@ -288,40 +273,40 @@
       "id": "del-1",
       "pointId": "pt-1",
       "timestamp": "2024-11-20T08:30:00Z",
-      "duration": 180,
-      "distance": 45,
+      "duration": 120,
+      "distance": 50,
       "status": "completed"
     },
     {
       "id": "del-2",
-      "pointId": "pt-1",
+      "pointId": "pt-5",
       "timestamp": "2024-11-20T10:15:00Z",
-      "duration": 165,
-      "distance": 45,
+      "duration": 210,
+      "distance": 135,
       "status": "completed"
     },
     {
       "id": "del-3",
-      "pointId": "pt-2",
+      "pointId": "pt-7",
       "timestamp": "2024-11-21T07:00:00Z",
-      "duration": 240,
-      "distance": 78,
+      "duration": 280,
+      "distance": 175,
       "status": "completed"
     },
     {
       "id": "del-4",
-      "pointId": "pt-2",
+      "pointId": "pt-8",
       "timestamp": "2024-11-21T09:00:00Z",
-      "duration": 120,
-      "distance": 78,
-      "status": "aborted"
+      "duration": 95,
+      "distance": 55,
+      "status": "completed"
     },
     {
       "id": "del-5",
-      "pointId": "pt-3",
+      "pointId": "pt-12",
       "timestamp": "2024-11-22T14:00:00Z",
-      "duration": 200,
-      "distance": 55,
+      "duration": 240,
+      "distance": 145,
       "status": "completed"
     }
   ],
@@ -373,84 +358,5 @@
       }
     }
   ],
-  "shares": [
-    {
-      "id": "share-1",
-      "shareKey": "abc123xyz",
-      "reservoirId": "res-1",
-      "expiresAt": "2025-01-01T00:00:00Z"
-    },
-    {
-      "shareKey": "qkav9xfeb7",
-      "reservoirId": "res-1",
-      "expiresAt": "2025-12-06T20:01:52.528Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123",
-      "id": "txlzb7w"
-    },
-    {
-      "shareKey": "63u0485e6bf",
-      "reservoirId": "res-1",
-      "expiresAt": "2025-12-06T20:02:01.063Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123",
-      "id": "URl82uK"
-    },
-    {
-      "shareKey": "vkbko0lzjf",
-      "reservoirId": "res-1",
-      "expiresAt": "2025-12-06T20:04:58.857Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123",
-      "id": "slzvwrX"
-    },
-    {
-      "shareKey": "o6h3kuqumym",
-      "reservoirId": "res-2",
-      "expiresAt": "2025-12-06T20:10:55.469Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123",
-      "id": "-58rKED"
-    },
-    {
-      "shareKey": "yjga4yy3sth",
-      "reservoirId": "res-2",
-      "expiresAt": "2025-12-06T20:11:15.385Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123",
-      "id": "IzRvhcm"
-    },
-    {
-      "shareKey": "423c15zug8e",
-      "reservoirId": "res-2",
-      "expiresAt": "2025-12-06T20:11:46.696Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123",
-      "id": "t0nfdOT"
-    },
-    {
-      "shareKey": "tnlvjyd4gqq",
-      "reservoirId": "res-2",
-      "expiresAt": "2025-12-06T20:52:06.065Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123",
-      "id": "t_JOxWW"
-    },
-    {
-      "shareKey": "bglpthz9cyi",
-      "reservoirId": "res-3",
-      "expiresAt": "2025-12-07T11:09:16.486Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123",
-      "id": "1fGmqJ7"
-    },
-    {
-      "shareKey": "m0mev4y6xb",
-      "reservoirId": "res-1",
-      "expiresAt": "2025-12-07T21:01:32.513Z",
-      "boatId": "BOAT001",
-      "boatPassword": "test123",
-      "id": "Tngtddk"
-    }
-  ]
+  "shares": []
 }
