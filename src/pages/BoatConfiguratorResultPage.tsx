@@ -30,13 +30,21 @@ import {
   type StickerGroup,
 } from './BoatConfiguratorPage'
 
-// Render sticker with clipPath for results view
+// Get sticker path with color folder
+const getStickerPath = (viewType: 'left' | 'top' | 'back', group: string | null, num: number, colorFolder?: string) => {
+  const colorPath = colorFolder && colorFolder !== 'none' ? `${colorFolder}/` : ''
+  if (viewType === 'left' && group) {
+    return `/boat/left/${group}/${colorPath}sticker-${num}.png`
+  }
+  return `/boat/${viewType}/${colorPath}sticker-${num}.png`
+}
+
+// Render sticker with clipPath for results view (no filter - uses pre-colored images)
 const renderStickerWithClipPath = (
   stickerNum: number,
   src: string,
   pos: StickerPosition,
   config: StickerGroup,
-  filter: string,
   groupPrefix?: string
 ) => {
   const { viewBox } = config
@@ -52,7 +60,6 @@ const renderStickerWithClipPath = (
         width: '100%',
         height: '100%',
         pointerEvents: 'none',
-        filter: filter,
       }}
       preserveAspectRatio="xMidYMid meet"
     >
@@ -154,20 +161,18 @@ export default function BoatConfiguratorResultPage() {
               {config.leftGroup1.sticker && LEFT_GROUP1.stickers[config.leftGroup1.sticker] &&
                 renderStickerWithClipPath(
                   config.leftGroup1.sticker,
-                  `/boat/left/group1/sticker-${config.leftGroup1.sticker}.png`,
+                  getStickerPath('left', 'group1', config.leftGroup1.sticker, STICKER_COLOR_OPTIONS[config.leftGroup1.colorIndex]?.filter),
                   LEFT_GROUP1.stickers[config.leftGroup1.sticker],
                   LEFT_GROUP1,
-                  STICKER_COLOR_OPTIONS[config.leftGroup1.colorIndex]?.filter || 'none',
                   'result-g1'
                 )
               }
               {config.leftGroup2.sticker && LEFT_GROUP2.stickers[config.leftGroup2.sticker] &&
                 renderStickerWithClipPath(
                   config.leftGroup2.sticker,
-                  `/boat/left/group2/sticker-${config.leftGroup2.sticker}.png`,
+                  getStickerPath('left', 'group2', config.leftGroup2.sticker, STICKER_COLOR_OPTIONS[config.leftGroup2.colorIndex]?.filter),
                   LEFT_GROUP2.stickers[config.leftGroup2.sticker],
                   LEFT_GROUP2,
-                  STICKER_COLOR_OPTIONS[config.leftGroup2.colorIndex]?.filter || 'none',
                   'result-g2'
                 )
               }
@@ -178,10 +183,9 @@ export default function BoatConfiguratorResultPage() {
           {viewType === 'top' && config.topSticker.sticker && TOP_CONFIG.stickers[config.topSticker.sticker] &&
             renderStickerWithClipPath(
               config.topSticker.sticker,
-              `/boat/top/sticker-${config.topSticker.sticker}.png`,
+              getStickerPath('top', null, config.topSticker.sticker, STICKER_COLOR_OPTIONS[config.topSticker.colorIndex]?.filter),
               TOP_CONFIG.stickers[config.topSticker.sticker],
               TOP_CONFIG,
-              STICKER_COLOR_OPTIONS[config.topSticker.colorIndex]?.filter || 'none',
               'result-top'
             )
           }
@@ -190,10 +194,9 @@ export default function BoatConfiguratorResultPage() {
           {viewType === 'back' && config.backSticker.sticker && BACK_CONFIG.stickers[config.backSticker.sticker] &&
             renderStickerWithClipPath(
               config.backSticker.sticker,
-              `/boat/back/sticker-${config.backSticker.sticker}.png`,
+              getStickerPath('back', null, config.backSticker.sticker, STICKER_COLOR_OPTIONS[config.backSticker.colorIndex]?.filter),
               BACK_CONFIG.stickers[config.backSticker.sticker],
               BACK_CONFIG,
-              STICKER_COLOR_OPTIONS[config.backSticker.colorIndex]?.filter || 'none',
               'result-back'
             )
           }

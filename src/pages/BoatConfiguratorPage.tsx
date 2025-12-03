@@ -95,20 +95,20 @@ export const BOAT_COLOR_OPTIONS: ColorOption[] = [
   { name: 'graphite', filter: 'saturate(0) brightness(0.5)', displayColor: '#4A4A4A' },
 ]
 
-// Color options for stickers (gray/white images with orange accents)
-// Using invert + sepia + saturate + hue-rotate for accurate colors
+// Color options for stickers - using pre-generated colored images
+// folder: folder name for pre-colored images (null = use original sticker)
 export const STICKER_COLOR_OPTIONS: ColorOption[] = [
   { name: 'original', filter: 'none', displayColor: '#888888' },
-  { name: 'red', filter: 'brightness(0.9) sepia(1) hue-rotate(-50deg) saturate(6)', displayColor: '#FF0000' },
-  { name: 'orange', filter: 'brightness(1) sepia(1) hue-rotate(-15deg) saturate(4)', displayColor: '#FF6B00' },
-  { name: 'yellow', filter: 'brightness(1.1) sepia(1) hue-rotate(10deg) saturate(4)', displayColor: '#FFD700' },
-  { name: 'green', filter: 'brightness(0.95) sepia(1) hue-rotate(70deg) saturate(5)', displayColor: '#00CC00' },
-  { name: 'cyan', filter: 'brightness(1) sepia(1) hue-rotate(120deg) saturate(5)', displayColor: '#00CCCC' },
-  { name: 'blue', filter: 'brightness(0.9) sepia(1) hue-rotate(170deg) saturate(6)', displayColor: '#0066FF' },
-  { name: 'purple', filter: 'brightness(0.9) sepia(1) hue-rotate(220deg) saturate(6)', displayColor: '#9900FF' },
-  { name: 'pink', filter: 'brightness(1) sepia(1) hue-rotate(280deg) saturate(5)', displayColor: '#FF00CC' },
-  { name: 'white', filter: 'brightness(2) saturate(0)', displayColor: '#FFFFFF' },
-  { name: 'black', filter: 'brightness(0.15) saturate(0)', displayColor: '#333333' },
+  { name: 'red', filter: 'red', displayColor: '#FF0000' },
+  { name: 'orange', filter: 'orange', displayColor: '#FF6B00' },
+  { name: 'yellow', filter: 'yellow', displayColor: '#FFD700' },
+  { name: 'green', filter: 'green', displayColor: '#00CC00' },
+  { name: 'cyan', filter: 'cyan', displayColor: '#00CCCC' },
+  { name: 'blue', filter: 'blue', displayColor: '#0066FF' },
+  { name: 'purple', filter: 'purple', displayColor: '#9900FF' },
+  { name: 'pink', filter: 'pink', displayColor: '#FF00CC' },
+  { name: 'white', filter: 'white', displayColor: '#FFFFFF' },
+  { name: 'black', filter: 'black', displayColor: '#333333' },
 ]
 
 export interface StickerPosition {
@@ -323,12 +323,13 @@ export default function BoatConfiguratorPage() {
     navigate(`/configurator/result/${code}`)
   }
 
-  // Get sticker image path
-  const getStickerPath = (viewType: ViewType, group: string | null, num: number) => {
+  // Get sticker image path - with optional color folder
+  const getStickerPath = (viewType: ViewType, group: string | null, num: number, colorFolder?: string) => {
+    const colorPath = colorFolder && colorFolder !== 'none' ? `${colorFolder}/` : ''
     if (viewType === 'left' && group) {
-      return `/boat/left/${group}/sticker-${num}.png`
+      return `/boat/left/${group}/${colorPath}sticker-${num}.png`
     }
-    return `/boat/${viewType}/sticker-${num}.png`
+    return `/boat/${viewType}/${colorPath}sticker-${num}.png`
   }
 
   // Render sticker preview with clipPath - zoomed to sticker area
@@ -336,7 +337,6 @@ export default function BoatConfiguratorPage() {
     num: number,
     config: StickerGroup,
     src: string,
-    filter: string,
     group: string
   ) => {
     const pos = config.stickers[num]
@@ -358,7 +358,6 @@ export default function BoatConfiguratorPage() {
         style={{
           width: '100%',
           height: '100%',
-          filter: filter,
         }}
         preserveAspectRatio="xMidYMid meet"
       >
@@ -443,20 +442,18 @@ export default function BoatConfiguratorPage() {
                         renderStickerPreview(
                           num,
                           config,
-                          getStickerPath(view, view === 'left' ? group : null, num),
-                          isSelected ? stickerColor.filter : 'none',
+                          getStickerPath(view, view === 'left' ? group : null, num, isSelected ? stickerColor.filter : undefined),
                           group
                         )
                       ) : (
                         <CardMedia
                           component="img"
-                          image={getStickerPath(view, view === 'left' ? group : null, num)}
+                          image={getStickerPath(view, view === 'left' ? group : null, num, isSelected ? stickerColor.filter : undefined)}
                           alt={`Sticker ${num}`}
                           sx={{
                             height: '100%',
                             width: '100%',
                             objectFit: 'contain',
-                            filter: isSelected ? stickerColor.filter : 'none',
                           }}
                         />
                       )}
@@ -506,13 +503,12 @@ export default function BoatConfiguratorPage() {
     )
   }
 
-  // Render sticker using SVG with clipPath
+  // Render sticker using SVG with clipPath (no filter - uses pre-colored images)
   const renderStickerWithClipPath = (
     stickerNum: number,
     src: string,
     pos: StickerPosition,
     config: StickerGroup,
-    filter: string,
     groupPrefix?: string
   ) => {
     const { viewBox } = config
@@ -528,7 +524,6 @@ export default function BoatConfiguratorPage() {
           width: '100%',
           height: '100%',
           pointerEvents: 'none',
-          filter: filter,
         }}
         preserveAspectRatio="xMidYMid meet"
       >
@@ -655,20 +650,18 @@ export default function BoatConfiguratorPage() {
               {leftGroup1.sticker && LEFT_GROUP1.stickers[leftGroup1.sticker] &&
                 renderStickerWithClipPath(
                   leftGroup1.sticker,
-                  `/boat/left/group1/sticker-${leftGroup1.sticker}.png`,
+                  getStickerPath('left', 'group1', leftGroup1.sticker, STICKER_COLOR_OPTIONS[leftGroup1.colorIndex].filter),
                   LEFT_GROUP1.stickers[leftGroup1.sticker],
                   LEFT_GROUP1,
-                  STICKER_COLOR_OPTIONS[leftGroup1.colorIndex].filter,
                   'g1'
                 )
               }
               {leftGroup2.sticker && LEFT_GROUP2.stickers[leftGroup2.sticker] &&
                 renderStickerWithClipPath(
                   leftGroup2.sticker,
-                  `/boat/left/group2/sticker-${leftGroup2.sticker}.png`,
+                  getStickerPath('left', 'group2', leftGroup2.sticker, STICKER_COLOR_OPTIONS[leftGroup2.colorIndex].filter),
                   LEFT_GROUP2.stickers[leftGroup2.sticker],
                   LEFT_GROUP2,
-                  STICKER_COLOR_OPTIONS[leftGroup2.colorIndex].filter,
                   'g2'
                 )
               }
@@ -679,10 +672,9 @@ export default function BoatConfiguratorPage() {
           {view === 'top' && topSticker.sticker && TOP_CONFIG.stickers[topSticker.sticker] &&
             renderStickerWithClipPath(
               topSticker.sticker,
-              `/boat/top/sticker-${topSticker.sticker}.png`,
+              getStickerPath('top', null, topSticker.sticker, STICKER_COLOR_OPTIONS[topSticker.colorIndex].filter),
               TOP_CONFIG.stickers[topSticker.sticker],
-              TOP_CONFIG,
-              STICKER_COLOR_OPTIONS[topSticker.colorIndex].filter
+              TOP_CONFIG
             )
           }
 
@@ -690,10 +682,9 @@ export default function BoatConfiguratorPage() {
           {view === 'back' && backSticker.sticker && BACK_CONFIG.stickers[backSticker.sticker] &&
             renderStickerWithClipPath(
               backSticker.sticker,
-              `/boat/back/sticker-${backSticker.sticker}.png`,
+              getStickerPath('back', null, backSticker.sticker, STICKER_COLOR_OPTIONS[backSticker.colorIndex].filter),
               BACK_CONFIG.stickers[backSticker.sticker],
-              BACK_CONFIG,
-              STICKER_COLOR_OPTIONS[backSticker.colorIndex].filter
+              BACK_CONFIG
             )
           }
         </Box>
