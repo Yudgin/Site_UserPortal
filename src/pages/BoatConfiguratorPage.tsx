@@ -44,19 +44,20 @@ const BOAT_COLOR_OPTIONS: ColorOption[] = [
   { name: 'dark', filter: 'brightness(0.6) saturate(1.2)', displayColor: '#994000' },
 ]
 
-// Color options for stickers (gray images - need sepia base then hue-rotate)
+// Color options for stickers (gray/white images with orange accents)
+// Using invert + sepia + saturate + hue-rotate for accurate colors
 const STICKER_COLOR_OPTIONS: ColorOption[] = [
   { name: 'original', filter: 'none', displayColor: '#888888' },
-  { name: 'orange', filter: 'sepia(1) saturate(3) hue-rotate(0deg) brightness(1.1)', displayColor: '#FF6B00' },
-  { name: 'red', filter: 'sepia(1) saturate(5) hue-rotate(-35deg) brightness(0.9)', displayColor: '#FF0000' },
-  { name: 'yellow', filter: 'sepia(1) saturate(3) hue-rotate(15deg) brightness(1.2)', displayColor: '#FFD700' },
-  { name: 'green', filter: 'sepia(1) saturate(5) hue-rotate(85deg)', displayColor: '#00CC00' },
-  { name: 'cyan', filter: 'sepia(1) saturate(5) hue-rotate(145deg)', displayColor: '#00CCCC' },
-  { name: 'blue', filter: 'sepia(1) saturate(5) hue-rotate(185deg)', displayColor: '#0066FF' },
-  { name: 'purple', filter: 'sepia(1) saturate(5) hue-rotate(235deg)', displayColor: '#9900FF' },
-  { name: 'pink', filter: 'sepia(1) saturate(5) hue-rotate(295deg)', displayColor: '#FF00CC' },
-  { name: 'white', filter: 'brightness(1.5) contrast(0.8)', displayColor: '#FFFFFF' },
-  { name: 'black', filter: 'brightness(0.3) contrast(1.2)', displayColor: '#333333' },
+  { name: 'red', filter: 'brightness(0.9) sepia(1) hue-rotate(-50deg) saturate(6)', displayColor: '#FF0000' },
+  { name: 'orange', filter: 'brightness(1) sepia(1) hue-rotate(-15deg) saturate(4)', displayColor: '#FF6B00' },
+  { name: 'yellow', filter: 'brightness(1.1) sepia(1) hue-rotate(10deg) saturate(4)', displayColor: '#FFD700' },
+  { name: 'green', filter: 'brightness(0.95) sepia(1) hue-rotate(70deg) saturate(5)', displayColor: '#00CC00' },
+  { name: 'cyan', filter: 'brightness(1) sepia(1) hue-rotate(120deg) saturate(5)', displayColor: '#00CCCC' },
+  { name: 'blue', filter: 'brightness(0.9) sepia(1) hue-rotate(170deg) saturate(6)', displayColor: '#0066FF' },
+  { name: 'purple', filter: 'brightness(0.9) sepia(1) hue-rotate(220deg) saturate(6)', displayColor: '#9900FF' },
+  { name: 'pink', filter: 'brightness(1) sepia(1) hue-rotate(280deg) saturate(5)', displayColor: '#FF00CC' },
+  { name: 'white', filter: 'brightness(2) saturate(0)', displayColor: '#FFFFFF' },
+  { name: 'black', filter: 'brightness(0.15) saturate(0)', displayColor: '#333333' },
 ]
 
 interface StickerPosition {
@@ -265,89 +266,180 @@ export default function BoatConfiguratorPage() {
     return `/boat/${viewType}/sticker-${num}.png`
   }
 
+  // Render sticker preview with clipPath - zoomed to sticker area
+  const renderStickerPreview = (
+    num: number,
+    config: StickerGroup,
+    src: string,
+    filter: string,
+    group: string
+  ) => {
+    const pos = config.stickers[num]
+    if (!pos) return null
+
+    // Use unique clipId with group to avoid conflicts
+    const clipId = `preview-clip-${group}-${num}`
+
+    // Add padding around sticker for better view
+    const padding = 1
+    const vbX = pos.x - padding
+    const vbY = pos.y - padding
+    const vbW = pos.width + padding * 2
+    const vbH = pos.height + padding * 2
+
+    return (
+      <svg
+        viewBox={`${vbX} ${vbY} ${vbW} ${vbH}`}
+        style={{
+          width: '100%',
+          height: '100%',
+          filter: filter,
+        }}
+        preserveAspectRatio="xMidYMid meet"
+      >
+        <defs>
+          <clipPath id={clipId} clipPathUnits="userSpaceOnUse">
+            {pos.clipPath ? (
+              <path d={pos.clipPath} />
+            ) : (
+              <rect x={pos.x} y={pos.y} width={pos.width} height={pos.height} />
+            )}
+          </clipPath>
+        </defs>
+        <g style={{ clipPath: `url(#${clipId})` }}>
+          <image
+            href={src}
+            x={pos.x}
+            y={pos.y}
+            width={pos.width}
+            height={pos.height}
+            preserveAspectRatio="none"
+          />
+        </g>
+      </svg>
+    )
+  }
+
+  // Get config for current view and group
+  const getConfig = (group: 'group1' | 'group2' | 'single'): StickerGroup => {
+    if (view === 'left') {
+      return group === 'group1' ? LEFT_GROUP1 : LEFT_GROUP2
+    } else if (view === 'top') {
+      return TOP_CONFIG
+    } else {
+      return BACK_CONFIG
+    }
+  }
+
   // Render sticker selection grid
   const renderStickerGrid = (
     stickers: number[],
     group: 'group1' | 'group2' | 'single',
     selection: StickerSelection,
     title?: string
-  ) => (
-    <Box sx={{ mb: 3 }}>
-      {title && (
-        <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold' }}>
-          {title}
-        </Typography>
-      )}
-      <Grid container spacing={2}>
-        {stickers.map((num) => {
-          const isSelected = selection.sticker === num
-          const stickerColor = STICKER_COLOR_OPTIONS[selection.colorIndex]
+  ) => {
+    const config = getConfig(group)
 
-          return (
-            <Grid item xs={4} sm={3} md={2} key={num}>
-              <Card
-                sx={{
-                  border: isSelected ? '3px solid #2196F3' : '3px solid transparent',
-                  borderRadius: 2,
-                  transition: 'border-color 0.2s',
-                }}
-              >
-                <CardActionArea onClick={() => selectSticker(group, num)}>
-                  <CardMedia
-                    component="img"
-                    image={getStickerPath(view, view === 'left' ? group : null, num)}
-                    alt={`Sticker ${num}`}
-                    sx={{
-                      height: 60,
-                      objectFit: 'contain',
-                      backgroundColor: '#f9f9f9',
-                      p: 0.5,
-                      filter: isSelected ? stickerColor.filter : 'none',
-                    }}
-                  />
-                  <Box
-                    sx={{
-                      textAlign: 'center',
-                      py: 0.5,
-                      backgroundColor: isSelected ? '#2196F3' : '#eee',
-                      color: isSelected ? '#fff' : '#333',
-                      fontWeight: isSelected ? 'bold' : 'normal',
-                      fontSize: '0.875rem',
-                    }}
-                  >
-                    {num}
-                  </Box>
-                </CardActionArea>
-              </Card>
-            </Grid>
-          )
-        })}
-      </Grid>
+    return (
+      <Box sx={{ mb: 3 }}>
+        {title && (
+          <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold' }}>
+            {title}
+          </Typography>
+        )}
+        <Grid container spacing={2}>
+          {stickers.map((num) => {
+            const isSelected = selection.sticker === num
+            const stickerColor = STICKER_COLOR_OPTIONS[selection.colorIndex]
+            const hasConfig = config.stickers[num]
 
-      {/* Color picker for this group */}
-      <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-        <Typography variant="body2" sx={{ color: '#666' }}>
-          {t('configurator.selectColor')}:
-        </Typography>
-        {STICKER_COLOR_OPTIONS.map((color, idx) => (
-          <Box
-            key={color.name}
-            onClick={() => changeStickerColor(group, idx)}
-            sx={{
-              width: 24,
-              height: 24,
-              borderRadius: '50%',
-              backgroundColor: color.displayColor,
-              cursor: 'pointer',
-              border: selection.colorIndex === idx ? '2px solid #333' : '2px solid transparent',
-              transition: 'all 0.2s',
-              '&:hover': { transform: 'scale(1.15)' },
-            }}
-          />
-        ))}
+            return (
+              <Grid item xs={4} sm={3} md={2} key={num}>
+                <Card
+                  sx={{
+                    border: isSelected ? '3px solid #2196F3' : '3px solid transparent',
+                    borderRadius: 2,
+                    transition: 'border-color 0.2s',
+                  }}
+                >
+                  <CardActionArea onClick={() => selectSticker(group, num)}>
+                    <Box
+                      sx={{
+                        height: 70,
+                        backgroundColor: boatColor.displayColor,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        p: 0.5,
+                        overflow: 'hidden',
+                      }}
+                    >
+                      {hasConfig ? (
+                        renderStickerPreview(
+                          num,
+                          config,
+                          getStickerPath(view, view === 'left' ? group : null, num),
+                          isSelected ? stickerColor.filter : 'none',
+                          group
+                        )
+                      ) : (
+                        <CardMedia
+                          component="img"
+                          image={getStickerPath(view, view === 'left' ? group : null, num)}
+                          alt={`Sticker ${num}`}
+                          sx={{
+                            height: '100%',
+                            width: '100%',
+                            objectFit: 'contain',
+                            filter: isSelected ? stickerColor.filter : 'none',
+                          }}
+                        />
+                      )}
+                    </Box>
+                    <Box
+                      sx={{
+                        textAlign: 'center',
+                        py: 0.5,
+                        backgroundColor: isSelected ? '#2196F3' : '#eee',
+                        color: isSelected ? '#fff' : '#333',
+                        fontWeight: isSelected ? 'bold' : 'normal',
+                        fontSize: '0.875rem',
+                      }}
+                    >
+                      {num}
+                    </Box>
+                  </CardActionArea>
+                </Card>
+              </Grid>
+            )
+          })}
+        </Grid>
+
+        {/* Color picker for this group */}
+        <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+          <Typography variant="body2" sx={{ color: '#666' }}>
+            {t('configurator.selectColor')}:
+          </Typography>
+          {STICKER_COLOR_OPTIONS.map((color, idx) => (
+            <Box
+              key={color.name}
+              onClick={() => changeStickerColor(group, idx)}
+              sx={{
+                width: 24,
+                height: 24,
+                borderRadius: '50%',
+                backgroundColor: color.displayColor,
+                cursor: 'pointer',
+                border: selection.colorIndex === idx ? '2px solid #333' : '2px solid transparent',
+                transition: 'all 0.2s',
+                '&:hover': { transform: 'scale(1.15)' },
+              }}
+            />
+          ))}
+        </Box>
       </Box>
-    </Box>
-  )
+    )
+  }
 
   // Render sticker using SVG with clipPath
   const renderStickerWithClipPath = (
