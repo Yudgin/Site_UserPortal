@@ -26,7 +26,6 @@ import {
   Settings as SettingsIcon,
   AdminPanelSettings as AdminIcon,
   Logout as LogoutIcon,
-  DirectionsBoat as BoatIcon,
   Store as DistributorIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
@@ -85,21 +84,39 @@ export default function Layout() {
   }
 
   const drawer = (
-    <Box>
-      <Toolbar>
-        <BoatIcon sx={{ mr: 1 }} />
-        <Typography variant="h6" noWrap>
-          Bait Boat
-        </Typography>
-      </Toolbar>
-      <Divider />
+    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {/* Logo Area with gradient */}
+      <Box
+        sx={{
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          py: 3,
+          background: 'linear-gradient(180deg, rgba(33,150,243,0.08) 0%, rgba(255,255,255,0) 100%)',
+        }}
+      >
+        <img src="/logo.svg" alt="Logo" style={{ height: 120 }} />
+      </Box>
+
+      {/* Selected Boat Info */}
       {selectedBoat && (
-        <Box sx={{ p: 2, bgcolor: 'primary.light', color: 'white' }}>
-          <Typography variant="body2">{selectedBoat.info.name}</Typography>
-          <Typography variant="caption">ID: {selectedBoat.credentials.boatId}</Typography>
+        <Box
+          sx={{
+            mx: 2,
+            p: 2,
+            borderRadius: 3,
+            background: 'linear-gradient(135deg, #2196F3 0%, #1565C0 100%)',
+            color: 'white',
+            boxShadow: '0 4px 15px rgba(33,150,243,0.4)',
+          }}
+        >
+          <Typography variant="subtitle2" fontWeight={600}>{selectedBoat.info.name}</Typography>
+          <Typography variant="caption" sx={{ opacity: 0.85 }}>ID: {selectedBoat.credentials.boatId}</Typography>
         </Box>
       )}
-      <List>
+
+      {/* Navigation */}
+      <List sx={{ flex: 1, pt: 2 }}>
         {menuItems.map((item) => (
           <ListItem key={item.path} disablePadding>
             <ListItemButton
@@ -107,6 +124,13 @@ export default function Layout() {
               onClick={() => {
                 navigate(item.path)
                 if (isMobile) setMobileOpen(false)
+              }}
+              sx={{
+                '&.Mui-selected': {
+                  '& .MuiListItemIcon-root': {
+                    color: 'primary.main',
+                  },
+                },
               }}
             >
               <ListItemIcon>{item.icon}</ListItemIcon>

@@ -2,10 +2,14 @@ import { useEffect } from 'react'
 import { Snackbar, Alert, Box, CircularProgress } from '@mui/material'
 import AppRoutes from './routes'
 import { useAuthStore } from '@/store/authStore'
+import { useBoatStore } from '@/store/boatStore'
+import { useSettingsStore } from '@/store/settingsStore'
 import { firebaseAuth } from '@/api/firebase'
 
 function App() {
   const { setUser, setLoading, isLoading } = useAuthStore()
+  const loadBoatsFromServer = useBoatStore((state) => state.loadFromServer)
+  const loadSettingsFromServer = useSettingsStore((state) => state.loadFromServer)
 
   useEffect(() => {
     setLoading(true)
@@ -18,20 +22,33 @@ function App() {
           email: firebaseUser.email || '',
           displayName: firebaseUser.displayName,
           photoURL: firebaseUser.photoURL,
+          phoneNumber: firebaseUser.phoneNumber,
           role: 'user',
           createdAt: firebaseUser.metadata.creationTime || new Date().toISOString(),
           lastLogin: new Date().toISOString(),
         })
-        // Boats are persisted in localStorage, no need to verify on startup
+
+        // Load user data from Firestore
+        await Promise.all([
+          loadBoatsFromServer(),
+          loadSettingsFromServer(),
+        ])
       } else {
         setUser(null)
+        // Clear local stores on logout
+        useBoatStore.setState({ boats: [], selectedBoatId: null, isSynced: false })
+        useSettingsStore.setState({
+          phoneNumber: null,
+          serviceRequests: [],
+          isSynced: false,
+        })
       }
 
       setLoading(false)
     })
 
     return () => unsubscribe()
-  }, [setUser, setLoading])
+  }, [setUser, setLoading, loadBoatsFromServer, loadSettingsFromServer])
 
   const { error, setError } = useAuthStore()
 

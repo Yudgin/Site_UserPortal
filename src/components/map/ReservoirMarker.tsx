@@ -1,6 +1,7 @@
 import { Marker, Popup } from 'react-leaflet'
 import L from 'leaflet'
 import { Box, Typography, Button, Chip } from '@mui/material'
+import { OpenInNew as OpenIcon } from '@mui/icons-material'
 import { useTranslation } from 'react-i18next'
 import { Reservoir } from '@/types/models'
 
@@ -35,32 +36,44 @@ export default function ReservoirMarker({
       icon={reservoirIcon}
     >
       <Popup>
-        <Box sx={{ minWidth: 200 }}>
-          <Typography variant="subtitle1" fontWeight="bold">
+        <Box sx={{ minWidth: 220 }}>
+          <Typography variant="subtitle1" fontWeight="bold" sx={{ color: '#1E293B' }}>
             {reservoir.name}
           </Typography>
 
           <Box sx={{ mt: 1 }}>
             <Chip
-              label={`${reservoir.pointsCount} ${t('reservoirs.pointsCount')}`}
+              label={`${reservoir.pointsCount} ${t('points.title')}`}
               size="small"
-              color="primary"
-              variant="outlined"
+              sx={{
+                backgroundColor: '#2196F3',
+                color: '#fff',
+                fontWeight: 500,
+              }}
             />
           </Box>
 
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+          <Typography
+            variant="caption"
+            sx={{
+              display: 'block',
+              mt: 1,
+              color: '#64748B',
+            }}
+          >
             {t('reservoirs.basePoint')}: {reservoir.basePoint.lat.toFixed(5)}, {reservoir.basePoint.lng.toFixed(5)}
           </Typography>
 
-          <Box sx={{ mt: 2, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          <Box sx={{ mt: 2, display: 'flex', flexDirection: 'column', gap: 1 }}>
             {onClick && (
               <Button
                 size="small"
                 variant="contained"
+                startIcon={<OpenIcon />}
                 onClick={() => onClick(reservoir)}
+                fullWidth
               >
-                {t('common.edit')}
+                {t('common.open')}
               </Button>
             )}
             {onRename && (
@@ -68,6 +81,7 @@ export default function ReservoirMarker({
                 size="small"
                 variant="outlined"
                 onClick={() => onRename(reservoir)}
+                fullWidth
               >
                 {t('reservoirs.rename')}
               </Button>
@@ -77,6 +91,7 @@ export default function ReservoirMarker({
                 size="small"
                 variant="outlined"
                 onClick={() => onShare(reservoir)}
+                fullWidth
               >
                 {t('reservoirs.share')}
               </Button>

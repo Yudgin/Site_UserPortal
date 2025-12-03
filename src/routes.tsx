@@ -1,4 +1,6 @@
+import React from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
+import { Box, CircularProgress } from '@mui/material'
 import { useAuthStore } from '@/store/authStore'
 import { useBoatStore } from '@/store/boatStore'
 import LoginPage from '@/pages/LoginPage'
@@ -7,8 +9,10 @@ import DashboardPage from '@/pages/DashboardPage'
 import ReservoirPage from '@/pages/ReservoirPage'
 import SettingsPage from '@/pages/SettingsPage'
 import SharePage from '@/pages/SharePage'
+import ServiceSharePage from '@/pages/ServiceSharePage'
 import AdminPage from '@/pages/AdminPage'
 import DistributorPage from '@/pages/DistributorPage'
+import BoatConfiguratorPage from '@/pages/BoatConfiguratorPage'
 import Layout from '@/components/common/Layout'
 
 interface ProtectedRouteProps {
@@ -16,14 +20,40 @@ interface ProtectedRouteProps {
 }
 
 const ProtectedRoute = ({ children }: ProtectedRouteProps) => {
-  const { user } = useAuthStore()
-  const { boats } = useBoatStore()
+  const { user, isLoading: authLoading } = useAuthStore()
+  const { boats, isLoading: boatsLoading, isSynced, loadFromServer } = useBoatStore()
+
+  // Trigger loading if user is authenticated but boats not synced
+  React.useEffect(() => {
+    if (user && !isSynced && !boatsLoading) {
+      loadFromServer()
+    }
+  }, [user, isSynced, boatsLoading, loadFromServer])
+
+  // Wait for auth to complete
+  if (authLoading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+        <CircularProgress />
+      </Box>
+    )
+  }
 
   if (!user) {
     return <Navigate to="/login" replace />
   }
 
-  if (boats.length === 0) {
+  // Wait for boats to load from server
+  if (boatsLoading || (!isSynced && boats.length === 0)) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+        <CircularProgress />
+      </Box>
+    )
+  }
+
+  // Only redirect to connect-boat if boats are synced but empty
+  if (isSynced && boats.length === 0) {
     return <Navigate to="/connect-boat" replace />
   }
 
@@ -32,9 +62,10 @@ const ProtectedRoute = ({ children }: ProtectedRouteProps) => {
 
 const AuthRoute = ({ children }: ProtectedRouteProps) => {
   const { user } = useAuthStore()
-  const { boats } = useBoatStore()
+  const { boats, isSynced } = useBoatStore()
 
-  if (user && boats.length > 0) {
+  // Only redirect if fully loaded and has boats
+  if (user && isSynced && boats.length > 0) {
     return <Navigate to="/" replace />
   }
 
@@ -75,6 +106,12 @@ export const AppRoutes = () => {
 
       {/* Share route - semi-public */}
       <Route path="/share/:shareKey" element={<SharePage />} />
+
+      {/* Service repair share - public */}
+      <Route path="/serviceshare/:requestId" element={<ServiceSharePage />} />
+
+      {/* Boat configurator - public */}
+      <Route path="/configurator" element={<BoatConfiguratorPage />} />
 
       {/* Protected routes with Layout */}
       <Route

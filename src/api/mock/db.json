@@ -17,10 +17,10 @@
     {
       "id": "res-1",
       "number": 1,
-      "name": "Озеро біля Канева",
+      "name": "Озеро Процев",
       "basePoint": {
-        "lat": 49.7500,
-        "lng": 31.4700
+        "lat": 50.3470,
+        "lng": 30.7020
       },
       "pointsCount": 7,
       "boatId": "BOAT001",
@@ -29,10 +29,10 @@
     {
       "id": "res-2",
       "number": 2,
-      "name": "Ставок на Полтавщині",
+      "name": "Ставок Біла Церква",
       "basePoint": {
-        "lat": 49.5900,
-        "lng": 34.5500
+        "lat": 49.7920,
+        "lng": 30.0850
       },
       "pointsCount": 5,
       "boatId": "BOAT001",
@@ -41,10 +41,10 @@
     {
       "id": "res-3",
       "number": 3,
-      "name": "Водосховище під Вінницею",
+      "name": "Кременчуцьке водосховище",
       "basePoint": {
-        "lat": 49.2300,
-        "lng": 28.4700
+        "lat": 49.0650,
+        "lng": 33.4100
       },
       "pointsCount": 6,
       "boatId": "BOAT001"
@@ -55,10 +55,10 @@
       "id": "pt-1",
       "reservoirId": "res-1",
       "number": 1,
-      "name": "Ближня точка",
+      "name": "Ближня ліва",
       "coordinates": {
-        "lat": 49.7500,
-        "lng": 31.4707
+        "lat": 50.3463,
+        "lng": 30.7015
       },
       "depth": 2.5,
       "createdAt": "2024-01-15T10:00:00Z"
@@ -67,82 +67,82 @@
       "id": "pt-2",
       "reservoirId": "res-1",
       "number": 2,
-      "name": "Середня 1",
+      "name": "Ближня права",
       "coordinates": {
-        "lat": 49.7500,
-        "lng": 31.4710
+        "lat": 50.3462,
+        "lng": 30.7028
       },
-      "depth": 3.8,
+      "depth": 2.8,
       "createdAt": "2024-01-15T10:30:00Z"
     },
     {
       "id": "pt-3",
       "reservoirId": "res-1",
       "number": 3,
-      "name": "Середня 2",
+      "name": "Середня ліва",
       "coordinates": {
-        "lat": 49.7500,
-        "lng": 31.4713
+        "lat": 50.3455,
+        "lng": 30.7012
       },
-      "depth": 4.5,
+      "depth": 4.0,
       "createdAt": "2024-01-16T08:00:00Z"
     },
     {
       "id": "pt-4",
       "reservoirId": "res-1",
       "number": 4,
-      "name": "Середня 3",
+      "name": "Середня центр",
       "coordinates": {
-        "lat": 49.7500,
-        "lng": 31.4716
+        "lat": 50.3456,
+        "lng": 30.7022
       },
-      "depth": 5.2,
+      "depth": 4.5,
       "createdAt": "2024-01-17T11:00:00Z"
     },
     {
       "id": "pt-5",
       "reservoirId": "res-1",
       "number": 5,
-      "name": "Глибока 1",
+      "name": "Середня права",
       "coordinates": {
-        "lat": 49.7500,
-        "lng": 31.4719
+        "lat": 50.3454,
+        "lng": 30.7032
       },
-      "depth": 6.0,
+      "depth": 3.8,
       "createdAt": "2024-01-18T09:00:00Z"
     },
     {
       "id": "pt-6",
       "reservoirId": "res-1",
       "number": 6,
-      "name": "Глибока 2",
+      "name": "Дальня ліва",
       "coordinates": {
-        "lat": 49.7500,
-        "lng": 31.4722
+        "lat": 50.3447,
+        "lng": 30.7018
       },
-      "depth": 7.5,
+      "depth": 6.0,
       "createdAt": "2024-01-19T09:00:00Z"
     },
     {
       "id": "pt-7",
       "reservoirId": "res-1",
       "number": 7,
-      "name": "Дальня точка",
+      "name": "Дальня права",
       "coordinates": {
-        "lat": 49.7500,
-        "lng": 31.4725
+        "lat": 50.3446,
+        "lng": 30.7026
       },
-      "depth": 8.0,
+      "depth": 5.5,
       "createdAt": "2024-01-20T09:00:00Z"
     },
     {
       "id": "pt-8",
       "reservoirId": "res-2",
       "number": 1,
-      "name": "Ближня",
+      "name": "Ближня ліва",
       "coordinates": {
-        "lat": 49.5905,
-        "lng": 34.5500
+        "lat": 49.7920,
+        "lng": 30.0858
       },
       "depth": 2.0,
       "createdAt": "2024-02-01T09:00:00Z"
@@ -151,94 +151,94 @@
       "id": "pt-9",
       "reservoirId": "res-2",
       "number": 2,
-      "name": "Точка 2",
+      "name": "Ближня права",
       "coordinates": {
-        "lat": 49.5907,
-        "lng": 34.5500
+        "lat": 49.7918,
+        "lng": 30.0866
       },
-      "depth": 3.2,
+      "depth": 2.5,
       "createdAt": "2024-02-01T09:30:00Z"
     },
     {
       "id": "pt-10",
       "reservoirId": "res-2",
       "number": 3,
-      "name": "Точка 3",
+      "name": "Середня",
       "coordinates": {
-        "lat": 49.5909,
-        "lng": 34.5500
+        "lat": 49.7916,
+        "lng": 30.0875
       },
-      "depth": 4.0,
+      "depth": 3.5,
       "createdAt": "2024-02-02T10:00:00Z"
     },
     {
       "id": "pt-11",
       "reservoirId": "res-2",
       "number": 4,
-      "name": "Точка 4",
+      "name": "Дальня ліва",
       "coordinates": {
-        "lat": 49.5911,
-        "lng": 34.5500
+        "lat": 49.7914,
+        "lng": 30.0882
       },
-      "depth": 5.5,
+      "depth": 4.5,
       "createdAt": "2024-02-02T10:30:00Z"
     },
     {
       "id": "pt-12",
       "reservoirId": "res-2",
       "number": 5,
-      "name": "Дальня",
+      "name": "Дальня права",
       "coordinates": {
-        "lat": 49.5913,
-        "lng": 34.5500
+        "lat": 49.7912,
+        "lng": 30.0890
       },
-      "depth": 6.0,
+      "depth": 5.0,
       "createdAt": "2024-02-02T11:00:00Z"
     },
     {
       "id": "pt-13",
       "reservoirId": "res-3",
       "number": 1,
-      "name": "Точка біля берега",
+      "name": "Ближня ліва",
       "coordinates": {
-        "lat": 49.2294,
-        "lng": 28.4700
+        "lat": 49.0645,
+        "lng": 33.4092
       },
-      "depth": 2.8,
+      "depth": 3.0,
       "createdAt": "2024-03-10T12:00:00Z"
     },
     {
       "id": "pt-14",
       "reservoirId": "res-3",
       "number": 2,
-      "name": "Робоча 1",
+      "name": "Ближня права",
       "coordinates": {
-        "lat": 49.2292,
-        "lng": 28.4700
+        "lat": 49.0644,
+        "lng": 33.4108
       },
-      "depth": 3.5,
+      "depth": 3.2,
       "createdAt": "2024-03-10T12:30:00Z"
     },
     {
       "id": "pt-15",
       "reservoirId": "res-3",
       "number": 3,
-      "name": "Робоча 2",
+      "name": "Середня ліва",
       "coordinates": {
-        "lat": 49.2290,
-        "lng": 28.4700
+        "lat": 49.0638,
+        "lng": 33.4095
       },
-      "depth": 4.2,
+      "depth": 4.5,
       "createdAt": "2024-03-10T13:00:00Z"
     },
     {
       "id": "pt-16",
       "reservoirId": "res-3",
       "number": 4,
-      "name": "Робоча 3",
+      "name": "Середня права",
       "coordinates": {
-        "lat": 49.2288,
-        "lng": 28.4700
+        "lat": 49.0637,
+        "lng": 33.4105
       },
       "depth": 5.0,
       "createdAt": "2024-03-10T13:30:00Z"
@@ -247,10 +247,10 @@
       "id": "pt-17",
       "reservoirId": "res-3",
       "number": 5,
-      "name": "Глибока",
+      "name": "Дальня ліва",
       "coordinates": {
-        "lat": 49.2286,
-        "lng": 28.4700
+        "lat": 49.0630,
+        "lng": 33.4098
       },
       "depth": 6.5,
       "createdAt": "2024-03-10T14:00:00Z"
@@ -259,10 +259,10 @@
       "id": "pt-18",
       "reservoirId": "res-3",
       "number": 6,
-      "name": "Дальня точка",
+      "name": "Дальня права",
       "coordinates": {
-        "lat": 49.2284,
-        "lng": 28.4700
+        "lat": 49.0629,
+        "lng": 33.4110
       },
       "depth": 7.0,
       "createdAt": "2024-03-10T14:30:00Z"

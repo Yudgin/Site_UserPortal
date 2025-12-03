@@ -16,13 +16,26 @@ import {
   Button,
   Snackbar,
   Alert,
+  Paper,
+  List,
+  ListItem,
+  ListItemText,
+  Divider,
 } from '@mui/material'
-import { Water, Share as ShareIcon, Download as ImportIcon, ContentCopy as CopyIcon } from '@mui/icons-material'
+import {
+  Water,
+  Share as ShareIcon,
+  Download as ImportIcon,
+  ContentCopy as CopyIcon,
+  Build as ServiceIcon,
+  Visibility as ViewIcon,
+} from '@mui/icons-material'
 import MapContainer from '@/components/map/MapContainer'
 import ReservoirMarker from '@/components/map/ReservoirMarker'
 import LoadingSpinner from '@/components/common/LoadingSpinner'
 import { useBoatStore } from '@/store/boatStore'
 import { useReservoirStore } from '@/store/reservoirStore'
+import { useSettingsStore } from '@/store/settingsStore'
 import { reservoirsApi } from '@/api/endpoints/reservoirs'
 import { Reservoir } from '@/types/models'
 
@@ -32,6 +45,7 @@ export default function DashboardPage() {
   const { getSelectedBoat, selectedBoatId } = useBoatStore()
   const selectedBoat = getSelectedBoat()
   const { reservoirs, setReservoirs, setSelectedReservoir, updateReservoir, isLoading, setLoading } = useReservoirStore()
+  const { serviceRequests } = useSettingsStore()
 
   const [renameDialog, setRenameDialog] = useState<{ open: boolean; reservoir: Reservoir | null }>({
     open: false,
@@ -51,7 +65,6 @@ export default function DashboardPage() {
     message: '',
     severity: 'success',
   })
-
   useEffect(() => {
     // Clear reservoirs when boat changes and reload
     setReservoirs([])
@@ -199,6 +212,46 @@ export default function DashboardPage() {
             </Grid>
           ))}
         </Grid>
+      )}
+
+      {/* Service Requests Section */}
+      {serviceRequests && serviceRequests.length > 0 && (
+        <Paper sx={{ p: 3, mt: 4 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+            <ServiceIcon color="primary" />
+            <Typography variant="h6">{t('service.myServiceRequests')}</Typography>
+          </Box>
+
+          <List>
+            {serviceRequests.map((request, index) => (
+              <Box key={request.id}>
+                {index > 0 && <Divider />}
+                <ListItem
+                  sx={{
+                    flexDirection: { xs: 'column', sm: 'row' },
+                    alignItems: { xs: 'flex-start', sm: 'center' },
+                    gap: { xs: 1, sm: 2 },
+                    py: { xs: 1.5, sm: 1 },
+                  }}
+                >
+                  <ListItemText
+                    primary={`${t('service.requestTitle')} #${request.number || request.id.slice(0, 8)}`}
+                    sx={{ m: 0 }}
+                  />
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<ViewIcon />}
+                    onClick={() => navigate(`/serviceshare/${request.id}`)}
+                    sx={{ flexShrink: 0 }}
+                  >
+                    {t('service.viewRequest')}
+                  </Button>
+                </ListItem>
+              </Box>
+            ))}
+          </List>
+        </Paper>
       )}
 
       {/* Rename Dialog */}

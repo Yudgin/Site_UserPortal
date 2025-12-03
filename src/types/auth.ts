@@ -5,6 +5,7 @@ export interface User {
   email: string
   displayName: string | null
   photoURL: string | null
+  phoneNumber: string | null
   role: UserRole
   createdAt: string
   lastLogin: string

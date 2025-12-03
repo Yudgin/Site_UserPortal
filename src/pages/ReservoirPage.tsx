@@ -91,13 +91,16 @@ export default function ReservoirPage() {
     }
   }, [id])
 
+  // Store initial boat ID to detect changes
+  const [initialBoatId] = useState(selectedBoatId)
+
   // Navigate back to dashboard if boat changes
   useEffect(() => {
-    if (selectedReservoir && selectedBoatId) {
-      // If the reservoir doesn't belong to the current boat, go back
+    if (initialBoatId && selectedBoatId && initialBoatId !== selectedBoatId) {
+      // If the boat changed, go back to dashboard
       navigate('/')
     }
-  }, [selectedBoatId])
+  }, [selectedBoatId, initialBoatId, navigate])
 
   const loadReservoirData = async () => {
     if (!id || !selectedBoat) return

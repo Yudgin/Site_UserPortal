@@ -17,12 +17,17 @@ import {
   Snackbar,
   Card,
   CardContent,
+  Chip,
+  Collapse,
 } from '@mui/material'
 import {
   Language as LanguageIcon,
   Security as SecurityIcon,
   DirectionsBoat as BoatIcon,
   Settings as SettingsIcon,
+  Phone as PhoneIcon,
+  CheckCircle as VerifiedIcon,
+  Edit as EditIcon,
 } from '@mui/icons-material'
 import { languages } from '@/i18n'
 import { useSettingsStore } from '@/store/settingsStore'
@@ -30,10 +35,12 @@ import { useBoatStore } from '@/store/boatStore'
 import apiClient from '@/api/client'
 import { Distributor } from '@/types/models'
 import BoatSettings from '@/components/settings/BoatSettings'
+import PhoneVerification from '@/components/common/PhoneVerification'
+import { smsApi } from '@/api/endpoints/sms'
 
 export default function SettingsPage() {
   const { t, i18n } = useTranslation()
-  const { language, setLanguage, userAccess, setUserAccess, updatePermissions } = useSettingsStore()
+  const { language, setLanguage, userAccess, setUserAccess, updatePermissions, phoneNumber, setPhoneNumber } = useSettingsStore()
   const { getSelectedBoat } = useBoatStore()
   const selectedBoat = getSelectedBoat()
 
@@ -44,6 +51,7 @@ export default function SettingsPage() {
     editSettings: userAccess?.permissions.editSettings || false,
     viewReservoirs: userAccess?.permissions.viewReservoirs || false,
   })
+  const [showPhoneVerification, setShowPhoneVerification] = useState(false)
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
     open: false,
     message: '',
@@ -66,6 +74,17 @@ export default function SettingsPage() {
   const handleLanguageChange = (code: string) => {
     setLanguage(code)
     i18n.changeLanguage(code)
+  }
+
+  const handlePhoneVerified = (verifiedPhone: string) => {
+    setPhoneNumber(verifiedPhone)
+    setShowPhoneVerification(false)
+    setSnackbar({ open: true, message: t('phone.phoneVerified'), severity: 'success' })
+  }
+
+  const handleRemovePhone = () => {
+    setPhoneNumber(null)
+    setSnackbar({ open: true, message: t('common.success'), severity: 'success' })
   }
 
   const handlePermissionChange = (key: keyof typeof permissions) => {
@@ -148,6 +167,68 @@ export default function SettingsPage() {
             ))}
           </Select>
         </FormControl>
+      </Paper>
+
+      {/* Phone Number Settings */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+          <PhoneIcon color="primary" />
+          <Typography variant="h6">{t('service.phone')}</Typography>
+        </Box>
+
+        <Alert severity="info" sx={{ mb: 3 }}>
+          {t('service.myServiceRequests')}
+        </Alert>
+
+        {/* Show verified phone or verification form */}
+        {phoneNumber && !showPhoneVerification ? (
+          <Box>
+            <Box
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 2,
+                p: 2,
+                borderRadius: 2,
+                bgcolor: 'success.light',
+                color: 'success.contrastText',
+                mb: 2,
+              }}
+            >
+              <VerifiedIcon />
+              <Box sx={{ flex: 1 }}>
+                <Typography variant="body2" sx={{ opacity: 0.9 }}>
+                  {t('phone.phoneVerified')}
+                </Typography>
+                <Typography variant="h6">
+                  {smsApi.formatForDisplay(phoneNumber)}
+                </Typography>
+              </Box>
+              <Chip
+                label={t('phone.changeVerifiedPhone')}
+                icon={<EditIcon />}
+                onClick={() => setShowPhoneVerification(true)}
+                sx={{ bgcolor: 'white', color: 'success.dark' }}
+              />
+            </Box>
+            <Button
+              variant="outlined"
+              color="error"
+              size="small"
+              onClick={handleRemovePhone}
+            >
+              {t('common.delete')}
+            </Button>
+          </Box>
+        ) : (
+          <Collapse in={!phoneNumber || showPhoneVerification}>
+            <PhoneVerification
+              initialPhone={phoneNumber || ''}
+              onVerified={handlePhoneVerified}
+              onCancel={phoneNumber ? () => setShowPhoneVerification(false) : undefined}
+            />
+          </Collapse>
+        )}
       </Paper>
 
       {/* Access Settings */}

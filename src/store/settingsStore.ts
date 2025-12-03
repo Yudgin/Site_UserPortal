@@ -1,62 +1,230 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
 import { Distributor, UserAccessSettings } from '@/types/models'
+import { userDataService, SavedServiceRequest } from '@/api/userDataService'
 
 interface SettingsState {
   language: string
   mapType: 'satellite' | 'street'
   distributors: Distributor[]
   userAccess: UserAccessSettings | null
+  phoneNumber: string | null
+  serviceRequests: SavedServiceRequest[]
   isLoading: boolean
+  isSynced: boolean
   error: string | null
 
   // Actions
-  setLanguage: (language: string) => void
-  setMapType: (type: 'satellite' | 'street') => void
+  setLanguage: (language: string) => Promise<void>
+  setMapType: (type: 'satellite' | 'street') => Promise<void>
   setDistributors: (distributors: Distributor[]) => void
   setUserAccess: (access: UserAccessSettings | null) => void
   updatePermissions: (permissions: Partial<UserAccessSettings['permissions']>) => void
+  setPhoneNumber: (phoneNumber: string | null) => Promise<void>
+  addServiceRequest: (id: string, number: string) => Promise<void>
+  removeServiceRequest: (id: string) => Promise<void>
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
+
+  // Sync methods
+  loadFromServer: () => Promise<void>
+  syncToServer: () => Promise<void>
 }
 
-export const useSettingsStore = create<SettingsState>()(
-  persist(
-    (set) => ({
-      language: 'en',
-      mapType: 'satellite',
-      distributors: [],
-      userAccess: null,
-      isLoading: false,
-      error: null,
+// Helper to save to server
+const saveSettingsToServer = async (state: {
+  language: string
+  mapType: 'satellite' | 'street'
+  phoneNumber: string | null
+  serviceRequests: SavedServiceRequest[]
+}) => {
+  if (userDataService.isAuthenticated()) {
+    await userDataService.saveSettingsData({
+      language: state.language,
+      mapType: state.mapType,
+      phoneNumber: state.phoneNumber,
+      serviceRequests: state.serviceRequests,
+    })
+  }
+}
 
-      setLanguage: (language) => set({ language }),
+export const useSettingsStore = create<SettingsState>()((set, get) => ({
+  language: 'uk',
+  mapType: 'satellite',
+  distributors: [],
+  userAccess: null,
+  phoneNumber: null,
+  serviceRequests: [],
+  isLoading: false,
+  isSynced: false,
+  error: null,
 
-      setMapType: (type) => set({ mapType: type }),
+  setLanguage: async (language) => {
+    set({ language })
+    const state = get()
+    await saveSettingsToServer({
+      language,
+      mapType: state.mapType,
+      phoneNumber: state.phoneNumber,
+      serviceRequests: state.serviceRequests,
+    })
+  },
 
-      setDistributors: (distributors) => set({ distributors }),
+  setMapType: async (type) => {
+    set({ mapType: type })
+    const state = get()
+    await saveSettingsToServer({
+      language: state.language,
+      mapType: type,
+      phoneNumber: state.phoneNumber,
+      serviceRequests: state.serviceRequests,
+    })
+  },
 
-      setUserAccess: (access) => set({ userAccess: access }),
+  setDistributors: (distributors) => set({ distributors }),
 
-      updatePermissions: (permissions) => set((state) => ({
-        userAccess: state.userAccess
-          ? {
-              ...state.userAccess,
-              permissions: { ...state.userAccess.permissions, ...permissions },
-            }
-          : null,
-      })),
+  setUserAccess: (access) => set({ userAccess: access }),
 
-      setLoading: (loading) => set({ isLoading: loading }),
+  updatePermissions: (permissions) => set((state) => ({
+    userAccess: state.userAccess
+      ? {
+          ...state.userAccess,
+          permissions: { ...state.userAccess.permissions, ...permissions },
+        }
+      : null,
+  })),
 
-      setError: (error) => set({ error }),
-    }),
-    {
-      name: 'settings-storage',
-      partialize: (state) => ({
-        language: state.language,
-        mapType: state.mapType,
-      }),
+  setPhoneNumber: async (phoneNumber) => {
+    set({ phoneNumber })
+    const state = get()
+    await saveSettingsToServer({
+      language: state.language,
+      mapType: state.mapType,
+      phoneNumber,
+      serviceRequests: state.serviceRequests,
+    })
+  },
+
+  addServiceRequest: async (id, number) => {
+    const exists = get().serviceRequests.some(r => r.id === id)
+    if (exists) return
+
+    const serviceRequests = [...get().serviceRequests, { id, number }]
+    set({ serviceRequests })
+
+    const state = get()
+    await saveSettingsToServer({
+      language: state.language,
+      mapType: state.mapType,
+      phoneNumber: state.phoneNumber,
+      serviceRequests,
+    })
+  },
+
+  removeServiceRequest: async (id) => {
+    const serviceRequests = get().serviceRequests.filter((r) => r.id !== id)
+    set({ serviceRequests })
+
+    const state = get()
+    await saveSettingsToServer({
+      language: state.language,
+      mapType: state.mapType,
+      phoneNumber: state.phoneNumber,
+      serviceRequests,
+    })
+  },
+
+  setLoading: (loading) => set({ isLoading: loading }),
+
+  setError: (error) => set({ error }),
+
+  // Load settings from server
+  loadFromServer: async () => {
+    if (!userDataService.isAuthenticated()) {
+      set({ isSynced: true }) // Mark as synced even if not authenticated
+      return
     }
-  )
-)
+
+    set({ isLoading: true })
+    try {
+      const userData = await userDataService.loadUserData()
+
+      // Check if server has settings data
+      if (userData?.settings && (userData.settings.language || userData.settings.phoneNumber || userData.settings.serviceRequests?.length)) {
+        set({
+          language: userData.settings.language || 'uk',
+          mapType: userData.settings.mapType || 'satellite',
+          phoneNumber: userData.settings.phoneNumber || null,
+          serviceRequests: userData.settings.serviceRequests || [],
+          isSynced: true,
+        })
+      } else {
+        // Check if we need to migrate from localStorage
+        const localData = localStorage.getItem('settings-v1')
+        if (localData) {
+          try {
+            const parsed = JSON.parse(localData)
+            if (parsed.state) {
+              const localSettings = {
+                language: parsed.state.language || 'uk',
+                mapType: parsed.state.mapType || 'satellite',
+                phoneNumber: parsed.state.phoneNumber || null,
+                serviceRequests: parsed.state.serviceRequests || [],
+              }
+              // Migrate localStorage data to server
+              await userDataService.saveSettingsData(localSettings)
+              set({
+                ...localSettings,
+                isSynced: true,
+              })
+              // Clear old localStorage after migration
+              localStorage.removeItem('settings-v1')
+              console.log('Migrated settings from localStorage to Firestore')
+              return
+            }
+          } catch (e) {
+            console.error('Error migrating settings from localStorage:', e)
+          }
+        }
+        set({ isSynced: true }) // Mark as synced even if no data
+      }
+    } catch (error) {
+      console.error('Error loading settings from server:', error)
+
+      // Fallback to localStorage if Firestore fails
+      const localData = localStorage.getItem('settings-v1')
+      if (localData) {
+        try {
+          const parsed = JSON.parse(localData)
+          if (parsed.state) {
+            set({
+              language: parsed.state.language || 'uk',
+              mapType: parsed.state.mapType || 'satellite',
+              phoneNumber: parsed.state.phoneNumber || null,
+              serviceRequests: parsed.state.serviceRequests || [],
+              isSynced: true,
+            })
+            return
+          }
+        } catch (e) {
+          // ignore parse error
+        }
+      }
+
+      set({ isSynced: true }) // Mark as synced to prevent infinite retry
+    } finally {
+      set({ isLoading: false })
+    }
+  },
+
+  // Sync current state to server
+  syncToServer: async () => {
+    const state = get()
+    await saveSettingsToServer({
+      language: state.language,
+      mapType: state.mapType,
+      phoneNumber: state.phoneNumber,
+      serviceRequests: state.serviceRequests,
+    })
+    set({ isSynced: true })
+  },
+}))

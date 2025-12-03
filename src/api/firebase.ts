@@ -10,6 +10,7 @@ import {
   onAuthStateChanged,
   User as FirebaseUser,
 } from 'firebase/auth'
+import { getFirestore, Firestore } from 'firebase/firestore'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -23,6 +24,7 @@ const firebaseConfig = {
 // Initialize Firebase only if config is available
 const app = firebaseConfig.apiKey ? initializeApp(firebaseConfig) : null
 export const auth = app ? getAuth(app) : null
+export const db: Firestore | null = app ? getFirestore(app) : null
 
 const googleProvider = new GoogleAuthProvider()
 const facebookProvider = new FacebookAuthProvider()
