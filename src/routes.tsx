@@ -13,6 +13,8 @@ import ServiceSharePage from '@/pages/ServiceSharePage'
 import AdminPage from '@/pages/AdminPage'
 import DistributorPage from '@/pages/DistributorPage'
 import BoatConfiguratorPage from '@/pages/BoatConfiguratorPage'
+import BoatConfiguratorResultPage from '@/pages/BoatConfiguratorResultPage'
+import BoatConfiguratorLookupPage from '@/pages/BoatConfiguratorLookupPage'
 import Layout from '@/components/common/Layout'
 
 interface ProtectedRouteProps {
@@ -112,6 +114,8 @@ export const AppRoutes = () => {
 
       {/* Boat configurator - public */}
       <Route path="/configurator" element={<BoatConfiguratorPage />} />
+      <Route path="/configurator/result/:code" element={<BoatConfiguratorResultPage />} />
+      <Route path="/configurator/lookup" element={<BoatConfiguratorLookupPage />} />
 
       {/* Protected routes with Layout */}
       <Route

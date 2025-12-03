@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router-dom'
 import {
   Box,
   Typography,
@@ -10,28 +11,78 @@ import {
   Card,
   CardActionArea,
   CardMedia,
+  Button,
 } from '@mui/material'
 import {
   Visibility as LeftIcon,
   VerticalAlignTop as TopIcon,
   ArrowBack as BackIcon,
+  CheckCircle as FinishIcon,
+  Search as SearchIcon,
 } from '@mui/icons-material'
 
-type ViewType = 'left' | 'top' | 'back'
+export type ViewType = 'left' | 'top' | 'back'
 
-interface ColorOption {
+export interface ColorOption {
   name: string
   filter: string
   displayColor: string
 }
 
-interface StickerSelection {
+export interface StickerSelection {
   sticker: number | null
   colorIndex: number
 }
 
+// Configuration encoding/decoding
+export interface BoatConfiguration {
+  boatColorIndex: number
+  leftGroup1: StickerSelection
+  leftGroup2: StickerSelection
+  topSticker: StickerSelection
+  backSticker: StickerSelection
+}
+
+// Encode configuration to a compact code
+export function encodeConfiguration(config: BoatConfiguration): string {
+  const parts = [
+    config.boatColorIndex.toString(36),
+    (config.leftGroup1.sticker || 0).toString(36),
+    config.leftGroup1.colorIndex.toString(36),
+    (config.leftGroup2.sticker || 0).toString(36),
+    config.leftGroup2.colorIndex.toString(36),
+    (config.topSticker.sticker || 0).toString(36),
+    config.topSticker.colorIndex.toString(36),
+    (config.backSticker.sticker || 0).toString(36),
+    config.backSticker.colorIndex.toString(36),
+  ]
+  return parts.join('')
+}
+
+// Decode configuration from code
+export function decodeConfiguration(code: string): BoatConfiguration | null {
+  try {
+    // Remove any spaces or dashes
+    const cleanCode = code.replace(/[-\s]/g, '')
+    if (cleanCode.length !== 9) return null
+
+    const values = cleanCode.split('').map(c => parseInt(c, 36))
+    if (values.some(isNaN)) return null
+
+    return {
+      boatColorIndex: values[0],
+      leftGroup1: { sticker: values[1] || null, colorIndex: values[2] },
+      leftGroup2: { sticker: values[3] || null, colorIndex: values[4] },
+      topSticker: { sticker: values[5] || null, colorIndex: values[6] },
+      backSticker: { sticker: values[7] || null, colorIndex: values[8] },
+    }
+  } catch {
+    return null
+  }
+}
+
 // Color options for boat (hue-rotate based, works on colored images)
-const BOAT_COLOR_OPTIONS: ColorOption[] = [
+export const BOAT_COLOR_OPTIONS: ColorOption[] = [
   { name: 'orange', filter: 'none', displayColor: '#FF6B00' },
   { name: 'red', filter: 'hue-rotate(-30deg)', displayColor: '#FF0000' },
   { name: 'yellow', filter: 'hue-rotate(30deg)', displayColor: '#FFD700' },
@@ -40,13 +91,13 @@ const BOAT_COLOR_OPTIONS: ColorOption[] = [
   { name: 'blue', filter: 'hue-rotate(180deg)', displayColor: '#0066FF' },
   { name: 'purple', filter: 'hue-rotate(240deg)', displayColor: '#9900FF' },
   { name: 'pink', filter: 'hue-rotate(300deg)', displayColor: '#FF00CC' },
-  { name: 'light', filter: 'brightness(1.3) saturate(0.8)', displayColor: '#FFB366' },
-  { name: 'dark', filter: 'brightness(0.6) saturate(1.2)', displayColor: '#994000' },
+  { name: 'lightGray', filter: 'saturate(0) brightness(1.4)', displayColor: '#C0C0C0' },
+  { name: 'graphite', filter: 'saturate(0) brightness(0.5)', displayColor: '#4A4A4A' },
 ]
 
 // Color options for stickers (gray/white images with orange accents)
 // Using invert + sepia + saturate + hue-rotate for accurate colors
-const STICKER_COLOR_OPTIONS: ColorOption[] = [
+export const STICKER_COLOR_OPTIONS: ColorOption[] = [
   { name: 'original', filter: 'none', displayColor: '#888888' },
   { name: 'red', filter: 'brightness(0.9) sepia(1) hue-rotate(-50deg) saturate(6)', displayColor: '#FF0000' },
   { name: 'orange', filter: 'brightness(1) sepia(1) hue-rotate(-15deg) saturate(4)', displayColor: '#FF6B00' },
@@ -60,7 +111,7 @@ const STICKER_COLOR_OPTIONS: ColorOption[] = [
   { name: 'black', filter: 'brightness(0.15) saturate(0)', displayColor: '#333333' },
 ]
 
-interface StickerPosition {
+export interface StickerPosition {
   x: number
   y: number
   width: number
@@ -68,16 +119,16 @@ interface StickerPosition {
   clipPath?: string // SVG path for complex shapes, undefined = use rect
 }
 
-interface StickerGroup {
+export interface StickerGroup {
   viewBox: { width: number; height: number }
   baseViewBox: { width: number; height: number }
   stickers: Record<number, StickerPosition>
 }
 
 // LEFT view configuration
-const LEFT_BASE_VIEWBOX = { width: 140.03, height: 78.77 }
+export const LEFT_BASE_VIEWBOX = { width: 140.03, height: 78.77 }
 
-const LEFT_GROUP1: StickerGroup = {
+export const LEFT_GROUP1: StickerGroup = {
   viewBox: { width: 111.39, height: 62.66 },
   baseViewBox: LEFT_BASE_VIEWBOX,
   stickers: {
@@ -100,7 +151,7 @@ const LEFT_GROUP1: StickerGroup = {
   },
 }
 
-const LEFT_GROUP2: StickerGroup = {
+export const LEFT_GROUP2: StickerGroup = {
   viewBox: { width: 114.26, height: 64.27 },
   baseViewBox: LEFT_BASE_VIEWBOX,
   stickers: {
@@ -138,7 +189,7 @@ const LEFT_GROUP2: StickerGroup = {
 }
 
 // TOP view configuration with clipPath for complex shapes
-const TOP_CONFIG: StickerGroup = {
+export const TOP_CONFIG: StickerGroup = {
   viewBox: { width: 131.21, height: 73.81 },
   baseViewBox: { width: 117.64, height: 66.17 },
   stickers: {
@@ -170,7 +221,7 @@ const TOP_CONFIG: StickerGroup = {
 }
 
 // BACK view configuration
-const BACK_CONFIG: StickerGroup = {
+export const BACK_CONFIG: StickerGroup = {
   viewBox: { width: 129.33, height: 72.75 },
   baseViewBox: { width: 122.55, height: 68.94 },
   stickers: {
@@ -184,7 +235,7 @@ const BACK_CONFIG: StickerGroup = {
 }
 
 // Sticker numbers per view
-const VIEW_STICKERS = {
+export const VIEW_STICKERS = {
   left: {
     group1: [1, 2, 3, 4, 5, 6, 7, 9, 10, 11],
     group2: [1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -199,6 +250,7 @@ const VIEW_STICKERS = {
 
 export default function BoatConfiguratorPage() {
   const { t } = useTranslation()
+  const navigate = useNavigate()
   const [view, setView] = useState<ViewType>('left')
   const [boatColorIndex, setBoatColorIndex] = useState(0)
 
@@ -257,6 +309,19 @@ export default function BoatConfiguratorPage() {
   }
 
   const boatColor = BOAT_COLOR_OPTIONS[boatColorIndex]
+
+  // Handle finish configuration
+  const handleFinish = () => {
+    const config: BoatConfiguration = {
+      boatColorIndex,
+      leftGroup1,
+      leftGroup2,
+      topSticker,
+      backSticker,
+    }
+    const code = encodeConfiguration(config)
+    navigate(`/configurator/result/${code}`)
+  }
 
   // Get sticker image path
   const getStickerPath = (viewType: ViewType, group: string | null, num: number) => {
@@ -492,9 +557,19 @@ export default function BoatConfiguratorPage() {
 
   return (
     <Box sx={{ p: 2, maxWidth: 1200, mx: 'auto' }}>
-      <Typography variant="h5" gutterBottom>
-        {t('configurator.title')}
-      </Typography>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+        <Typography variant="h5">
+          {t('configurator.title')}
+        </Typography>
+        <Button
+          variant="outlined"
+          size="small"
+          startIcon={<SearchIcon />}
+          onClick={() => navigate('/configurator/lookup')}
+        >
+          {t('configurator.haveCode', 'Есть код?')}
+        </Button>
+      </Box>
 
       {/* View Selector */}
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'center' }}>
@@ -639,6 +714,20 @@ export default function BoatConfiguratorPage() {
       {view === 'top' && renderStickerGrid(VIEW_STICKERS.top.stickers, 'single', topSticker)}
 
       {view === 'back' && renderStickerGrid(VIEW_STICKERS.back.stickers, 'single', backSticker)}
+
+      {/* Finish Button */}
+      <Box sx={{ mt: 4, display: 'flex', justifyContent: 'center' }}>
+        <Button
+          variant="contained"
+          color="success"
+          size="large"
+          startIcon={<FinishIcon />}
+          onClick={handleFinish}
+          sx={{ px: 6, py: 1.5 }}
+        >
+          {t('configurator.finish', 'Завершить')}
+        </Button>
+      </Box>
     </Box>
   )
 }
