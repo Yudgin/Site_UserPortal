@@ -198,7 +198,9 @@
     "noWarehouses": "No branches found",
     "selectCityFirst": "Select city first",
     "clientInfoSaved": "Recipient information saved",
-    "addPhoneToSeeRequests": "Add your phone number in settings to see your repair requests"
+    "addPhoneToSeeRequests": "Add your phone number in settings to see your repair requests",
+    "communicationHistory": "Communication History",
+    "noHistory": "No communication history"
   },
   "phone": {
     "enterPhone": "Enter phone number",
@@ -254,6 +256,10 @@
     "invalidCodeMessage": "Code not found or invalid. Make sure you entered the correct 9-character code.",
     "search": "Find",
     "codeExample": "Code example"
+  },
+  "repairs": {
+    "title": "Service",
+    "createFirstRequest": "Create your first service request"
   },
   "repair": {
     "title": "New Repair Request",

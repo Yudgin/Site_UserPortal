@@ -446,4 +446,27 @@ export const serviceApi = {
       }
     }
   },
+
+  // Get communication history by phone number
+  getRepairHistory: async (phone: string): Promise<ApiResponse<Array<{ Desc: string; Date: string }>>> => {
+    try {
+      // Phone should be in format 380XXXXXXXXX (without +)
+      const cleanPhone = phone.replace(/^\+/, '').replace(/\D/g, '')
+      const response = await axios.post(`${SERVICE_API_BASE}/${cleanPhone}/repair_History`, '', {
+        headers: { 'Content-Type': 'text/plain' },
+      })
+      return {
+        success: true,
+        data: response.data.List || [],
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        error: {
+          code: 'FETCH_FAILED',
+          message: 'Failed to load communication history',
+        },
+      }
+    }
+  },
 }

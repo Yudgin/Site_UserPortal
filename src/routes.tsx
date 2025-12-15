@@ -16,6 +16,7 @@ import BoatConfiguratorPage from '@/pages/BoatConfiguratorPage'
 import BoatConfiguratorResultPage from '@/pages/BoatConfiguratorResultPage'
 import BoatConfiguratorLookupPage from '@/pages/BoatConfiguratorLookupPage'
 import NewRepairPage from '@/pages/NewRepairPage'
+import RepairsPage from '@/pages/RepairsPage'
 import Layout from '@/components/common/Layout'
 
 interface ProtectedRouteProps {
@@ -132,6 +133,7 @@ export const AppRoutes = () => {
       >
         <Route index element={<DashboardPage />} />
         <Route path="reservoir/:id" element={<ReservoirPage />} />
+        <Route path="repairs" element={<RepairsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="distributor" element={<DistributorPage />} />

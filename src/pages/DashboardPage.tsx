@@ -16,37 +16,20 @@ import {
   Button,
   Snackbar,
   Alert,
-  Paper,
-  List,
-  ListItem,
-  ListItemText,
-  Divider,
-  CircularProgress,
 } from '@mui/material'
 import {
   Water,
   Share as ShareIcon,
   Download as ImportIcon,
   ContentCopy as CopyIcon,
-  Build as ServiceIcon,
-  Visibility as ViewIcon,
-  Add as AddIcon,
 } from '@mui/icons-material'
 import MapContainer from '@/components/map/MapContainer'
 import ReservoirMarker from '@/components/map/ReservoirMarker'
 import LoadingSpinner from '@/components/common/LoadingSpinner'
 import { useBoatStore } from '@/store/boatStore'
 import { useReservoirStore } from '@/store/reservoirStore'
-import { useSettingsStore } from '@/store/settingsStore'
 import { reservoirsApi } from '@/api/endpoints/reservoirs'
-import { serviceApi } from '@/api/endpoints/service'
 import { Reservoir } from '@/types/models'
-
-interface RepairItem {
-  id: string
-  Number: string
-  Date: string
-}
 
 export default function DashboardPage() {
   const { t } = useTranslation()
@@ -54,11 +37,6 @@ export default function DashboardPage() {
   const { getSelectedBoat, selectedBoatId } = useBoatStore()
   const selectedBoat = getSelectedBoat()
   const { reservoirs, setReservoirs, setSelectedReservoir, updateReservoir, isLoading, setLoading } = useReservoirStore()
-  const { phoneNumber } = useSettingsStore()
-
-  // Repair requests from API
-  const [repairRequests, setRepairRequests] = useState<RepairItem[]>([])
-  const [loadingRepairs, setLoadingRepairs] = useState(false)
 
   const [renameDialog, setRenameDialog] = useState<{ open: boolean; reservoir: Reservoir | null }>({
     open: false,
@@ -83,30 +61,6 @@ export default function DashboardPage() {
     setReservoirs([])
     loadReservoirs()
   }, [selectedBoatId])
-
-  // Load repair requests when phone number is available
-  useEffect(() => {
-    if (phoneNumber) {
-      loadRepairRequests()
-    } else {
-      setRepairRequests([])
-    }
-  }, [phoneNumber])
-
-  const loadRepairRequests = async () => {
-    if (!phoneNumber) return
-    setLoadingRepairs(true)
-    try {
-      const result = await serviceApi.getRepairList(phoneNumber)
-      if (result.success && result.data) {
-        setRepairRequests(result.data)
-      }
-    } catch (error) {
-      console.error('Failed to load repair requests:', error)
-    } finally {
-      setLoadingRepairs(false)
-    }
-  }
 
   const loadReservoirs = async () => {
     if (!selectedBoat) return
@@ -250,68 +204,6 @@ export default function DashboardPage() {
           ))}
         </Grid>
       )}
-
-      {/* Service Requests Section */}
-      <Paper sx={{ p: 3, mt: 4 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2, flexWrap: 'wrap', gap: 1 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <ServiceIcon color="primary" />
-            <Typography variant="h6">{t('service.myServiceRequests')}</Typography>
-          </Box>
-          <Button
-            variant="contained"
-            startIcon={<AddIcon />}
-            onClick={() => navigate('/repair/new')}
-          >
-            {t('repair.title')}
-          </Button>
-        </Box>
-
-        {!phoneNumber ? (
-          <Alert severity="info" sx={{ mb: 2 }}>
-            {t('service.addPhoneToSeeRequests')}
-          </Alert>
-        ) : loadingRepairs ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
-            <CircularProgress size={24} />
-          </Box>
-        ) : repairRequests.length > 0 ? (
-          <List>
-            {repairRequests.map((request, index) => (
-              <Box key={request.id}>
-                {index > 0 && <Divider />}
-                <ListItem
-                  sx={{
-                    flexDirection: { xs: 'column', sm: 'row' },
-                    alignItems: { xs: 'flex-start', sm: 'center' },
-                    gap: { xs: 1, sm: 2 },
-                    py: { xs: 1.5, sm: 1 },
-                  }}
-                >
-                  <ListItemText
-                    primary={`${t('service.requestTitle')} #${request.Number}`}
-                    secondary={request.Date}
-                    sx={{ m: 0 }}
-                  />
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    startIcon={<ViewIcon />}
-                    onClick={() => navigate(`/serviceshare/${request.id}`)}
-                    sx={{ flexShrink: 0 }}
-                  >
-                    {t('service.viewRequest')}
-                  </Button>
-                </ListItem>
-              </Box>
-            ))}
-          </List>
-        ) : (
-          <Typography color="text.secondary" textAlign="center" py={2}>
-            {t('service.noServiceRequests')}
-          </Typography>
-        )}
-      </Paper>
 
       {/* Rename Dialog */}
       <Dialog open={renameDialog.open} onClose={() => setRenameDialog({ open: false, reservoir: null })}>
