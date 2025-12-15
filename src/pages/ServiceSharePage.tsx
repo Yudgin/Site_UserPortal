@@ -44,7 +44,8 @@ import {
 } from '@mui/icons-material'
 import LanguageSelector from '@/components/common/LanguageSelector'
 import LoadingSpinner from '@/components/common/LoadingSpinner'
-import { serviceApi, ServiceRequestData } from '@/api/endpoints/service'
+import ClientInfoEditor from '@/components/common/ClientInfoEditor'
+import { serviceApi, ServiceRequestData, ClientInfo } from '@/api/endpoints/service'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useNavigate } from 'react-router-dom'
 import { Home as HomeIcon } from '@mui/icons-material'
@@ -107,10 +108,10 @@ export default function ServiceSharePage() {
   }
 
   const handleAcceptTerms = async () => {
-    if (!requestId || !data) return
+    if (!data) return
 
     setAcceptingTerms(true)
-    const result = await serviceApi.acceptTerms(requestId)
+    const result = await serviceApi.acceptTerms(data.requestId)
 
     if (result.success) {
       setData({
@@ -129,11 +130,11 @@ export default function ServiceSharePage() {
   }
 
   const handleConfirmRepair = async () => {
-    if (!requestId || !data || !selectedRepairOption) return
+    if (!data || !selectedRepairOption) return
 
     setConfirmingRepair(true)
     const confirmedAt = new Date().toISOString()
-    const result = await serviceApi.selectRepairOption(requestId, selectedRepairOption, confirmedAt)
+    const result = await serviceApi.selectRepairOption(data.requestId, selectedRepairOption, confirmedAt)
 
     if (result.success) {
       setData({
@@ -150,10 +151,10 @@ export default function ServiceSharePage() {
   }
 
   const handleAddComment = async () => {
-    if (!requestId || !data || !newComment.trim()) return
+    if (!data || !newComment.trim()) return
 
     setAddingComment(true)
-    const result = await serviceApi.addComment(requestId, newComment)
+    const result = await serviceApi.addComment(data.requestId, newComment)
 
     if (result.success) {
       if (result.data?.comments) {
@@ -174,10 +175,10 @@ export default function ServiceSharePage() {
   }
 
   const handleAddQuestion = async () => {
-    if (!requestId || !data || !newQuestion.trim()) return
+    if (!data || !newQuestion.trim()) return
 
     setAddingQuestion(true)
-    const result = await serviceApi.addQuestion(requestId, newQuestion)
+    const result = await serviceApi.addQuestion(data.requestId, newQuestion)
 
     if (result.success) {
       if (result.data?.questions) {
@@ -206,10 +207,10 @@ export default function ServiceSharePage() {
   }
 
   const handleRequestCall = async () => {
-    if (!requestId || !data) return
+    if (!data) return
 
     setRequestingCall(true)
-    const result = await serviceApi.requestCall(requestId, callComment)
+    const result = await serviceApi.requestCall(data.requestId, callComment)
 
     if (result.success) {
       if (result.data?.callRequests) {
@@ -323,33 +324,40 @@ export default function ServiceSharePage() {
             </Alert>
 
             {/* Client Info */}
-            {data.clientInfo && (
-              <>
-                <Accordion defaultExpanded>
-                  <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                      <PersonIcon color="primary" />
-                      <Typography variant="h6">{t('service.clientInfo', 'Інформація про відправника')}</Typography>
-                    </Box>
-                  </AccordionSummary>
-                  <AccordionDetails>
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                      <Typography variant="body1">
-                        <strong>{t('service.clientName', 'ПІБ')}:</strong>{' '}
-                        {`${data.clientInfo.lastName} ${data.clientInfo.firstName} ${data.clientInfo.middleName}`.trim()}
-                      </Typography>
-                      <Typography variant="body1">
-                        <strong>{t('service.clientCity', 'Місто')}:</strong> {data.clientInfo.city}
-                      </Typography>
-                      <Typography variant="body1">
-                        <strong>{t('service.clientWarehouse', 'Відділення НП')}:</strong> {data.clientInfo.warehouse}
-                      </Typography>
-                    </Box>
-                  </AccordionDetails>
-                </Accordion>
+            <Accordion defaultExpanded>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <PersonIcon color="primary" />
+                  <Typography variant="h6">{t('service.clientInfo', 'Інформація про отримувача')}</Typography>
+                </Box>
+              </AccordionSummary>
+              <AccordionDetails>
+                {data.clientInfo && (
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mb: 3 }}>
+                    <Typography variant="body1">
+                      <strong>{t('service.clientName', 'ПІБ')}:</strong>{' '}
+                      {`${data.clientInfo.lastName} ${data.clientInfo.firstName} ${data.clientInfo.middleName}`.trim() || '—'}
+                    </Typography>
+                    <Typography variant="body1">
+                      <strong>{t('service.clientCity', 'Місто')}:</strong> {data.clientInfo.city || '—'}
+                    </Typography>
+                    <Typography variant="body1">
+                      <strong>{t('service.clientWarehouse', 'Відділення НП')}:</strong> {data.clientInfo.warehouse || '—'}
+                    </Typography>
+                  </Box>
+                )}
                 <Divider sx={{ my: 2 }} />
-              </>
-            )}
+                <ClientInfoEditor
+                  requestId={data.requestId}
+                  clientInfo={data.clientInfo}
+                  onSave={(updatedInfo: ClientInfo) => {
+                    setData({ ...data, clientInfo: updatedInfo })
+                    setSnackbar({ open: true, message: t('service.clientInfoSaved', 'Дані отримувача збережено'), severity: 'success' })
+                  }}
+                />
+              </AccordionDetails>
+            </Accordion>
+            <Divider sx={{ my: 2 }} />
 
             {/* Shipment Info */}
             <Accordion defaultExpanded>

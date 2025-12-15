@@ -185,10 +185,19 @@
     "myServiceRequests": "Мои заявки на обслуживание",
     "noServiceRequests": "Заявок не найдено",
     "viewRequest": "Посмотреть заявку",
-    "clientInfo": "Информация об отправителе",
+    "clientInfo": "Информация о получателе",
     "clientName": "ФИО",
     "clientCity": "Город",
-    "clientWarehouse": "Отделение НП"
+    "clientWarehouse": "Отделение НП",
+    "editClientInfo": "Редактировать данные получателя",
+    "lastName": "Фамилия",
+    "firstName": "Имя",
+    "middleName": "Отчество",
+    "selectCityAndWarehouse": "Выберите город и отделение",
+    "typeToSearch": "Начните вводить название города",
+    "noWarehouses": "Отделения не найдены",
+    "selectCityFirst": "Сначала выберите город",
+    "clientInfoSaved": "Данные получателя сохранены"
   },
   "phone": {
     "enterPhone": "Введите номер телефона",

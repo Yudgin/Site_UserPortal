@@ -185,10 +185,19 @@
     "myServiceRequests": "Мої заявки на обслуговування",
     "noServiceRequests": "Заявок не знайдено",
     "viewRequest": "Переглянути заявку",
-    "clientInfo": "Інформація про відправника",
+    "clientInfo": "Інформація про отримувача",
     "clientName": "ПІБ",
     "clientCity": "Місто",
-    "clientWarehouse": "Відділення НП"
+    "clientWarehouse": "Відділення НП",
+    "editClientInfo": "Редагувати дані отримувача",
+    "lastName": "Прізвище",
+    "firstName": "Ім'я",
+    "middleName": "По батькові",
+    "selectCityAndWarehouse": "Оберіть місто та відділення",
+    "typeToSearch": "Почніть вводити назву міста",
+    "noWarehouses": "Відділення не знайдено",
+    "selectCityFirst": "Спочатку оберіть місто",
+    "clientInfoSaved": "Дані отримувача збережено"
   },
   "phone": {
     "enterPhone": "Введіть номер телефону",

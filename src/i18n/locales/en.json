@@ -185,10 +185,19 @@
     "myServiceRequests": "My Service Requests",
     "noServiceRequests": "No service requests found",
     "viewRequest": "View Request",
-    "clientInfo": "Sender Information",
+    "clientInfo": "Recipient Information",
     "clientName": "Full Name",
     "clientCity": "City",
-    "clientWarehouse": "Nova Poshta Branch"
+    "clientWarehouse": "Nova Poshta Branch",
+    "editClientInfo": "Edit recipient information",
+    "lastName": "Last Name",
+    "firstName": "First Name",
+    "middleName": "Middle Name",
+    "selectCityAndWarehouse": "Select city and branch",
+    "typeToSearch": "Start typing city name",
+    "noWarehouses": "No branches found",
+    "selectCityFirst": "Select city first",
+    "clientInfoSaved": "Recipient information saved"
   },
   "phone": {
     "enterPhone": "Enter phone number",

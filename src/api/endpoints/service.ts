@@ -42,7 +42,9 @@ export interface InvoiceItem {
 
 export interface ClientInfo {
   city: string
+  cityRef: string | null
   warehouse: string
+  warehouseRef: string | null
   lastName: string
   firstName: string
   middleName: string
@@ -92,8 +94,10 @@ const normalizeResponse = (raw: any): ServiceRequestData => {
   const normalizeClientInfo = (info: any): ClientInfo | null => {
     if (!info) return null
     return {
-      city: info.City || info.city || '',
-      warehouse: info.tWarehouse || info.warehouse || '',
+      city: info.CityDescription || info.City || info.city || '',
+      cityRef: info.CityRef || info.cityRef || null,
+      warehouse: info.WarehouseDescription || info.tWarehouse || info.warehouse || '',
+      warehouseRef: info.WarehouseRef || info.warehouseRef || null,
       lastName: info.LastName || info.lastName || '',
       firstName: info.FirstName || info.firstName || '',
       middleName: info.MiddleName || info.middleName || '',
@@ -161,7 +165,9 @@ export const serviceApi = {
   // Accept terms
   acceptTerms: async (requestId: string): Promise<ApiResponse<void>> => {
     try {
-      await axios.post(`${SERVICE_API_BASE}/${requestId}/accept`)
+      await axios.post(`${SERVICE_API_BASE}/${requestId}/accept`, '', {
+        headers: { 'Content-Type': 'text/plain' },
+      })
       return { success: true }
     } catch (error: any) {
       return {
@@ -181,9 +187,11 @@ export const serviceApi = {
     confirmedAt: string
   ): Promise<ApiResponse<void>> => {
     try {
-      await axios.post(`${SERVICE_API_BASE}/${requestId}/select-repair`, {
+      await axios.post(`${SERVICE_API_BASE}/${requestId}/select-repair`, JSON.stringify({
         optionId,
         confirmedAt,
+      }), {
+        headers: { 'Content-Type': 'text/plain' },
       })
       return { success: true }
     } catch (error: any) {
@@ -200,7 +208,9 @@ export const serviceApi = {
   // Add comment
   addComment: async (requestId: string, text: string): Promise<ApiResponse<{ comments: CommentItem[] }>> => {
     try {
-      const response = await axios.post(`${SERVICE_API_BASE}/${requestId}/comment`, { text })
+      const response = await axios.post(`${SERVICE_API_BASE}/${requestId}/comment`, JSON.stringify({ text }), {
+        headers: { 'Content-Type': 'text/plain' },
+      })
       return {
         success: true,
         data: response.data,
@@ -219,7 +229,9 @@ export const serviceApi = {
   // Add question
   addQuestion: async (requestId: string, text: string): Promise<ApiResponse<{ questions: QuestionItem[] }>> => {
     try {
-      const response = await axios.post(`${SERVICE_API_BASE}/${requestId}/question`, { text })
+      const response = await axios.post(`${SERVICE_API_BASE}/${requestId}/question`, JSON.stringify({ text }), {
+        headers: { 'Content-Type': 'text/plain' },
+      })
       return {
         success: true,
         data: response.data,
@@ -241,8 +253,10 @@ export const serviceApi = {
     userComment: string
   ): Promise<ApiResponse<{ callRequests: CallRequestItem[] }>> => {
     try {
-      const response = await axios.post(`${SERVICE_API_BASE}/${requestId}/call-request`, {
+      const response = await axios.post(`${SERVICE_API_BASE}/${requestId}/call-request`, JSON.stringify({
         userComment,
+      }), {
+        headers: { 'Content-Type': 'text/plain' },
       })
       return {
         success: true,
@@ -262,9 +276,11 @@ export const serviceApi = {
   // Get labels for localization
   getLabels: async (lang: string, keys: string[]): Promise<ApiResponse<Record<string, string>>> => {
     try {
-      const response = await axios.post('https://portal.runferry.com/api/hs/facebook/labels', {
+      const response = await axios.post('https://portal.runferry.com/api/hs/facebook/labels', JSON.stringify({
         lang,
         keys,
+      }), {
+        headers: { 'Content-Type': 'text/plain' },
       })
 
       const labels: Record<string, string> = {}
@@ -303,6 +319,42 @@ export const serviceApi = {
         error: {
           code: 'FETCH_FAILED',
           message: 'Failed to load service requests',
+        },
+      }
+    }
+  },
+
+  // Update client information (recipient for return delivery)
+  updateClientInfo: async (
+    requestId: string,
+    clientInfo: {
+      LastName: string
+      FirstName: string
+      MiddleName: string
+      City: string      // City Ref from Nova Poshta
+      tWarehouse: string // Warehouse Ref from Nova Poshta
+    }
+  ): Promise<ApiResponse<void>> => {
+    const url = `${SERVICE_API_BASE}/${requestId}/ClientInformation`
+    console.log('Updating client info URL:', url)
+    console.log('Updating client info body:', clientInfo)
+    try {
+      // Use text/plain to avoid CORS preflight (OPTIONS request)
+      // Server accepts JSON body with text/plain content-type
+      const response = await axios.post(url, JSON.stringify(clientInfo), {
+        headers: {
+          'Content-Type': 'text/plain',
+        },
+      })
+      console.log('Update response:', response.data)
+      return { success: true }
+    } catch (error: any) {
+      console.error('Update error:', error.response?.status, error.response?.data)
+      return {
+        success: false,
+        error: {
+          code: 'UPDATE_FAILED',
+          message: error.response?.data?.message || error.response?.data || 'Failed to update client information',
         },
       }
     }
