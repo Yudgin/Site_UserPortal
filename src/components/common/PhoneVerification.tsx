@@ -16,7 +16,7 @@ import {
   CheckCircle as CheckIcon,
   Refresh as RefreshIcon,
 } from '@mui/icons-material'
-import { smsApi } from '@/api/endpoints/sms'
+import { serviceApi } from '@/api/endpoints/service'
 
 interface PhoneVerificationProps {
   initialPhone?: string
@@ -26,12 +26,47 @@ interface PhoneVerificationProps {
 
 type Step = 'phone' | 'code' | 'verified'
 
+// Phone formatting helpers
+const formatPhone = (phone: string): string => {
+  // Remove all non-digits
+  let digits = phone.replace(/\D/g, '')
+
+  // Handle Ukrainian numbers
+  if (digits.startsWith('380')) {
+    return '+' + digits
+  }
+  if (digits.startsWith('80') && digits.length >= 10) {
+    return '+3' + digits
+  }
+  if (digits.startsWith('0') && digits.length >= 10) {
+    return '+38' + digits
+  }
+
+  return '+' + digits
+}
+
+const formatForDisplay = (phone: string): string => {
+  const formatted = formatPhone(phone)
+  // Format: +380 XX XXX XX XX
+  if (formatted.length === 13 && formatted.startsWith('+380')) {
+    return `${formatted.slice(0, 4)} ${formatted.slice(4, 6)} ${formatted.slice(6, 9)} ${formatted.slice(9, 11)} ${formatted.slice(11)}`
+  }
+  return formatted
+}
+
+const isValidPhone = (phone: string): boolean => {
+  const formatted = formatPhone(phone)
+  // Ukrainian mobile: +380XXXXXXXXX (13 chars)
+  return /^\+380\d{9}$/.test(formatted)
+}
+
 export default function PhoneVerification({ initialPhone = '', onVerified, onCancel }: PhoneVerificationProps) {
   const { t } = useTranslation()
 
   const [step, setStep] = useState<Step>('phone')
   const [phone, setPhone] = useState(initialPhone)
-  const [code, setCode] = useState(['', '', '', ''])
+  const [code, setCode] = useState(['', '', '', '', '', ''])
+  const [expectedCode, setExpectedCode] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [countdown, setCountdown] = useState(0)
@@ -56,7 +91,7 @@ export default function PhoneVerification({ initialPhone = '', onVerified, onCan
 
   // Send verification code
   const handleSendCode = async () => {
-    if (!smsApi.isValidPhone(phone)) {
+    if (!isValidPhone(phone)) {
       setError(t('phone.invalidFormat'))
       return
     }
@@ -64,11 +99,12 @@ export default function PhoneVerification({ initialPhone = '', onVerified, onCan
     setLoading(true)
     setError(null)
 
-    const result = await smsApi.sendVerificationCode(phone)
+    const result = await serviceApi.sendSmsCode(phone)
 
     setLoading(false)
 
-    if (result.success) {
+    if (result.success && result.data) {
+      setExpectedCode(result.data.code)
       setStep('code')
       setCountdown(60) // 60 seconds before resend allowed
       // Focus first code input
@@ -89,14 +125,14 @@ export default function PhoneVerification({ initialPhone = '', onVerified, onCan
     setError(null)
 
     // Auto-focus next input
-    if (digit && index < 3) {
+    if (digit && index < 5) {
       codeInputRefs.current[index + 1]?.focus()
     }
 
     // Auto-verify when all digits entered
-    if (digit && index === 3) {
-      const fullCode = [...newCode.slice(0, 3), digit].join('')
-      if (fullCode.length === 4) {
+    if (digit && index === 5) {
+      const fullCode = [...newCode.slice(0, 5), digit].join('')
+      if (fullCode.length === 6) {
         verifyCode(fullCode)
       }
     }
@@ -112,8 +148,8 @@ export default function PhoneVerification({ initialPhone = '', onVerified, onCan
   // Handle paste
   const handlePaste = (e: React.ClipboardEvent) => {
     e.preventDefault()
-    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 4)
-    if (pasted.length === 4) {
+    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6)
+    if (pasted.length === 6) {
       const newCode = pasted.split('')
       setCode(newCode)
       verifyCode(pasted)
@@ -125,36 +161,35 @@ export default function PhoneVerification({ initialPhone = '', onVerified, onCan
     setLoading(true)
     setError(null)
 
-    const result = await smsApi.verifyCode(phone, fullCode)
+    // Compare with expected code (client-side verification)
+    const isValid = expectedCode && fullCode === expectedCode
 
     setLoading(false)
 
-    if (result.success && result.data?.verified) {
+    if (isValid) {
       setStep('verified')
       setTimeout(() => {
-        onVerified(smsApi.formatPhone(phone))
+        onVerified(formatPhone(phone))
       }, 1000)
-    } else if (result.error?.code === 'CODE_EXPIRED') {
-      setError(t('phone.codeExpired'))
-      setCode(['', '', '', ''])
     } else {
       setError(t('phone.wrongCode'))
-      setCode(['', '', '', ''])
+      setCode(['', '', '', '', '', ''])
       codeInputRefs.current[0]?.focus()
     }
   }
 
   // Resend code
   const handleResend = () => {
-    setCode(['', '', '', ''])
+    setCode(['', '', '', '', '', ''])
     handleSendCode()
   }
 
   // Go back to phone input
   const handleChangePhone = () => {
     setStep('phone')
-    setCode(['', '', '', ''])
+    setCode(['', '', '', '', '', ''])
     setError(null)
+    setExpectedCode(null)
   }
 
   return (
@@ -203,7 +238,7 @@ export default function PhoneVerification({ initialPhone = '', onVerified, onCan
       <Collapse in={step === 'code'}>
         <Box>
           <Alert severity="info" sx={{ mb: 3 }}>
-            {t('phone.codeSentTo')} <strong>{smsApi.formatForDisplay(phone)}</strong>
+            {t('phone.codeSentTo')} <strong>{formatForDisplay(phone)}</strong>
           </Alert>
 
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2, textAlign: 'center' }}>
@@ -237,7 +272,7 @@ export default function PhoneVerification({ initialPhone = '', onVerified, onCan
                   },
                 }}
                 sx={{
-                  width: 50,
+                  width: 45,
                   '& .MuiOutlinedInput-root': {
                     borderRadius: 2,
                   },
@@ -292,7 +327,7 @@ export default function PhoneVerification({ initialPhone = '', onVerified, onCan
             {t('phone.verified')}
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            {smsApi.formatForDisplay(phone)}
+            {formatForDisplay(phone)}
           </Typography>
         </Box>
       </Collapse>

@@ -15,6 +15,7 @@ import DistributorPage from '@/pages/DistributorPage'
 import BoatConfiguratorPage from '@/pages/BoatConfiguratorPage'
 import BoatConfiguratorResultPage from '@/pages/BoatConfiguratorResultPage'
 import BoatConfiguratorLookupPage from '@/pages/BoatConfiguratorLookupPage'
+import NewRepairPage from '@/pages/NewRepairPage'
 import Layout from '@/components/common/Layout'
 
 interface ProtectedRouteProps {
@@ -109,8 +110,10 @@ export const AppRoutes = () => {
       {/* Share route - semi-public */}
       <Route path="/share/:shareKey" element={<SharePage />} />
 
-      {/* Service repair share - public */}
+      {/* Service repair - public */}
       <Route path="/serviceshare/:requestId" element={<ServiceSharePage />} />
+      <Route path="/service/:requestId" element={<ServiceSharePage />} />
+      <Route path="/repair/new" element={<NewRepairPage />} />
 
       {/* Boat configurator - public */}
       <Route path="/configurator" element={<BoatConfiguratorPage />} />

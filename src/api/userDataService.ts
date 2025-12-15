@@ -13,10 +13,21 @@ export interface SavedServiceRequest {
   number: string
 }
 
+export interface UserProfileData {
+  lastName: string
+  firstName: string
+  middleName: string
+  city: string
+  cityRef: string | null
+  warehouse: string
+  warehouseRef: string | null
+}
+
 export interface UserSettingsData {
   language: string
   mapType: 'satellite' | 'street'
   phoneNumber: string | null
+  profile: UserProfileData | null
   serviceRequests: SavedServiceRequest[]
 }
 
@@ -36,6 +47,7 @@ const DEFAULT_SETTINGS_DATA: UserSettingsData = {
   language: 'uk',
   mapType: 'satellite',
   phoneNumber: null,
+  profile: null,
   serviceRequests: [],
 }
 

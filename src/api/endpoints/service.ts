@@ -50,6 +50,28 @@ export interface ClientInfo {
   middleName: string
 }
 
+export interface ServiceCenter {
+  ID: string
+  Name: string
+}
+
+export interface NewRepairRequest {
+  phone_number: string
+  Service: string  // Service center ID
+  Disc: string     // Complaint description
+  LastName: string
+  FirstName: string
+  MiddleName: string
+  City: string      // Nova Poshta City Ref
+  tWarehouse: string // Nova Poshta Warehouse Ref
+}
+
+export interface NewRepairResponse {
+  ID: string
+  Status: string
+  LastName: number
+}
+
 export interface ServiceRequestData {
   requestId: string
   clientInfo: ClientInfo | null
@@ -303,22 +325,24 @@ export const serviceApi = {
     }
   },
 
-  // Get service requests by phone number
-  getRequestsByPhone: async (phone: string): Promise<ApiResponse<{ requests: Array<{ id: string; status: string; date: string }> }>> => {
+  // Get service requests list by phone number
+  getRepairList: async (phone: string): Promise<ApiResponse<Array<{ id: string; Number: string; Date: string }>>> => {
     try {
-      const response = await axios.get(`https://portal.runferry.com/api/hs/facebook/repair/by-phone`, {
-        params: { phone },
+      // Phone should be in format 380XXXXXXXXX (without +)
+      const cleanPhone = phone.replace(/^\+/, '').replace(/\D/g, '')
+      const response = await axios.post(`${SERVICE_API_BASE}/${cleanPhone}/List`, '', {
+        headers: { 'Content-Type': 'text/plain' },
       })
       return {
         success: true,
-        data: response.data,
+        data: response.data.List || [],
       }
     } catch (error: any) {
       return {
         success: false,
         error: {
           code: 'FETCH_FAILED',
-          message: 'Failed to load service requests',
+          message: 'Failed to load repair requests',
         },
       }
     }
@@ -355,6 +379,69 @@ export const serviceApi = {
         error: {
           code: 'UPDATE_FAILED',
           message: error.response?.data?.message || error.response?.data || 'Failed to update client information',
+        },
+      }
+    }
+  },
+
+  // Get list of service centers
+  getServiceCenters: async (): Promise<ApiResponse<ServiceCenter[]>> => {
+    try {
+      const response = await axios.get(`${SERVICE_API_BASE}/repair_ServoceList`)
+      return {
+        success: true,
+        data: response.data.List || [],
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        error: {
+          code: 'FETCH_FAILED',
+          message: 'Failed to load service centers',
+        },
+      }
+    }
+  },
+
+  // Send SMS verification code
+  sendSmsCode: async (phone: string): Promise<ApiResponse<{ code: string }>> => {
+    try {
+      // Phone should be in format 380XXXXXXXXX (without +)
+      const cleanPhone = phone.replace(/^\+/, '').replace(/\D/g, '')
+      const response = await axios.post(`${SERVICE_API_BASE}/${cleanPhone}/sendSMS`, '', {
+        headers: { 'Content-Type': 'text/plain' },
+      })
+      return {
+        success: true,
+        data: { code: String(response.data.Code) },
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        error: {
+          code: 'SMS_FAILED',
+          message: 'Failed to send SMS',
+        },
+      }
+    }
+  },
+
+  // Create new repair request
+  createRepairRequest: async (request: NewRepairRequest): Promise<ApiResponse<NewRepairResponse>> => {
+    try {
+      const response = await axios.post(`${SERVICE_API_BASE}/repair_NEW`, JSON.stringify(request), {
+        headers: { 'Content-Type': 'text/plain' },
+      })
+      return {
+        success: true,
+        data: response.data,
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        error: {
+          code: 'CREATE_FAILED',
+          message: error.response?.data?.message || 'Failed to create repair request',
         },
       }
     }

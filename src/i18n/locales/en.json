@@ -197,14 +197,15 @@
     "typeToSearch": "Start typing city name",
     "noWarehouses": "No branches found",
     "selectCityFirst": "Select city first",
-    "clientInfoSaved": "Recipient information saved"
+    "clientInfoSaved": "Recipient information saved",
+    "addPhoneToSeeRequests": "Add your phone number in settings to see your repair requests"
   },
   "phone": {
     "enterPhone": "Enter phone number",
     "ukrainianOnly": "Ukrainian mobile numbers only (+380)",
     "sendCode": "Send verification code",
     "codeSentTo": "Verification code sent to",
-    "enterCode": "Enter the 4-digit code from SMS",
+    "enterCode": "Enter the 6-digit code from SMS",
     "wrongCode": "Wrong code. Please try again",
     "codeExpired": "Code expired. Please request a new one",
     "resendCode": "Resend code",
@@ -253,5 +254,21 @@
     "invalidCodeMessage": "Code not found or invalid. Make sure you entered the correct 9-character code.",
     "search": "Find",
     "codeExample": "Code example"
+  },
+  "repair": {
+    "title": "New Repair Request",
+    "stepContact": "Contact Info",
+    "stepService": "Service",
+    "stepDelivery": "Delivery",
+    "phone": "Phone Number",
+    "serviceCenter": "Service Center",
+    "complaint": "Problem Description",
+    "complaintPlaceholder": "Describe the problem with your device...",
+    "deliveryInfo": "Enter the Nova Poshta branch address from which you will send the device",
+    "submit": "Create Request",
+    "success": "Request Created!",
+    "successMessage": "Your repair request has been successfully created. We will contact you shortly.",
+    "requestId": "Request ID",
+    "viewRequest": "View Request"
   }
 }

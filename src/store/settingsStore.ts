@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { Distributor, UserAccessSettings } from '@/types/models'
-import { userDataService, SavedServiceRequest } from '@/api/userDataService'
+import { userDataService, SavedServiceRequest, UserProfileData } from '@/api/userDataService'
 
 interface SettingsState {
   language: string
@@ -8,6 +8,7 @@ interface SettingsState {
   distributors: Distributor[]
   userAccess: UserAccessSettings | null
   phoneNumber: string | null
+  profile: UserProfileData | null
   serviceRequests: SavedServiceRequest[]
   isLoading: boolean
   isSynced: boolean
@@ -20,6 +21,7 @@ interface SettingsState {
   setUserAccess: (access: UserAccessSettings | null) => void
   updatePermissions: (permissions: Partial<UserAccessSettings['permissions']>) => void
   setPhoneNumber: (phoneNumber: string | null) => Promise<void>
+  setProfile: (profile: UserProfileData | null) => Promise<void>
   addServiceRequest: (id: string, number: string) => Promise<void>
   removeServiceRequest: (id: string) => Promise<void>
   setLoading: (loading: boolean) => void
@@ -35,6 +37,7 @@ const saveSettingsToServer = async (state: {
   language: string
   mapType: 'satellite' | 'street'
   phoneNumber: string | null
+  profile: UserProfileData | null
   serviceRequests: SavedServiceRequest[]
 }) => {
   if (userDataService.isAuthenticated()) {
@@ -42,6 +45,7 @@ const saveSettingsToServer = async (state: {
       language: state.language,
       mapType: state.mapType,
       phoneNumber: state.phoneNumber,
+      profile: state.profile,
       serviceRequests: state.serviceRequests,
     })
   }
@@ -53,6 +57,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
   distributors: [],
   userAccess: null,
   phoneNumber: null,
+  profile: null,
   serviceRequests: [],
   isLoading: false,
   isSynced: false,
@@ -65,6 +70,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
       language,
       mapType: state.mapType,
       phoneNumber: state.phoneNumber,
+      profile: state.profile,
       serviceRequests: state.serviceRequests,
     })
   },
@@ -76,6 +82,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
       language: state.language,
       mapType: type,
       phoneNumber: state.phoneNumber,
+      profile: state.profile,
       serviceRequests: state.serviceRequests,
     })
   },
@@ -100,6 +107,19 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
       language: state.language,
       mapType: state.mapType,
       phoneNumber,
+      profile: state.profile,
+      serviceRequests: state.serviceRequests,
+    })
+  },
+
+  setProfile: async (profile) => {
+    set({ profile })
+    const state = get()
+    await saveSettingsToServer({
+      language: state.language,
+      mapType: state.mapType,
+      phoneNumber: state.phoneNumber,
+      profile,
       serviceRequests: state.serviceRequests,
     })
   },
@@ -116,6 +136,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
       language: state.language,
       mapType: state.mapType,
       phoneNumber: state.phoneNumber,
+      profile: state.profile,
       serviceRequests,
     })
   },
@@ -129,6 +150,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
       language: state.language,
       mapType: state.mapType,
       phoneNumber: state.phoneNumber,
+      profile: state.profile,
       serviceRequests,
     })
   },
@@ -149,11 +171,12 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
       const userData = await userDataService.loadUserData()
 
       // Check if server has settings data
-      if (userData?.settings && (userData.settings.language || userData.settings.phoneNumber || userData.settings.serviceRequests?.length)) {
+      if (userData?.settings && (userData.settings.language || userData.settings.phoneNumber || userData.settings.profile || userData.settings.serviceRequests?.length)) {
         set({
           language: userData.settings.language || 'uk',
           mapType: userData.settings.mapType || 'satellite',
           phoneNumber: userData.settings.phoneNumber || null,
+          profile: userData.settings.profile || null,
           serviceRequests: userData.settings.serviceRequests || [],
           isSynced: true,
         })
@@ -168,6 +191,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
                 language: parsed.state.language || 'uk',
                 mapType: parsed.state.mapType || 'satellite',
                 phoneNumber: parsed.state.phoneNumber || null,
+                profile: parsed.state.profile || null,
                 serviceRequests: parsed.state.serviceRequests || [],
               }
               // Migrate localStorage data to server
@@ -200,6 +224,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
               language: parsed.state.language || 'uk',
               mapType: parsed.state.mapType || 'satellite',
               phoneNumber: parsed.state.phoneNumber || null,
+              profile: parsed.state.profile || null,
               serviceRequests: parsed.state.serviceRequests || [],
               isSynced: true,
             })
@@ -223,6 +248,7 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
       language: state.language,
       mapType: state.mapType,
       phoneNumber: state.phoneNumber,
+      profile: state.profile,
       serviceRequests: state.serviceRequests,
     })
     set({ isSynced: true })
