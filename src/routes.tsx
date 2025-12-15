@@ -114,6 +114,7 @@ export const AppRoutes = () => {
 
       {/* Boat configurator - public */}
       <Route path="/configurator" element={<BoatConfiguratorPage />} />
+      <Route path="/configurator/:code" element={<BoatConfiguratorPage />} />
       <Route path="/configurator/result/:code" element={<BoatConfiguratorResultPage />} />
       <Route path="/configurator/lookup" element={<BoatConfiguratorLookupPage />} />
 

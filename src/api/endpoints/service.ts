@@ -40,8 +40,17 @@ export interface InvoiceItem {
   price: number
 }
 
+export interface ClientInfo {
+  city: string
+  warehouse: string
+  lastName: string
+  firstName: string
+  middleName: string
+}
+
 export interface ServiceRequestData {
   requestId: string
+  clientInfo: ClientInfo | null
   clientAcceptedTerms: {
     accepted: boolean
     acceptedAt: string | null
@@ -79,8 +88,21 @@ const normalizeResponse = (raw: any): ServiceRequestData => {
     }))
   }
 
+  // Normalize client info
+  const normalizeClientInfo = (info: any): ClientInfo | null => {
+    if (!info) return null
+    return {
+      city: info.City || info.city || '',
+      warehouse: info.tWarehouse || info.warehouse || '',
+      lastName: info.LastName || info.lastName || '',
+      firstName: info.FirstName || info.firstName || '',
+      middleName: info.MiddleName || info.middleName || '',
+    }
+  }
+
   return {
     requestId: raw.requestId || raw.FixNumber || raw.request_id || '',
+    clientInfo: normalizeClientInfo(raw.ClientInfo || raw.clientInfo),
     clientAcceptedTerms: {
       accepted: raw.clientAcceptedTerms?.accepted ?? raw.agreement_at != null,
       acceptedAt: raw.clientAcceptedTerms?.acceptedAt || raw.agreement_at || null,

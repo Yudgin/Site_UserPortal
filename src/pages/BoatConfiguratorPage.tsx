@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import {
   Box,
   Typography,
@@ -12,6 +12,9 @@ import {
   CardActionArea,
   CardMedia,
   Button,
+  IconButton,
+  Menu,
+  MenuItem,
 } from '@mui/material'
 import {
   Visibility as LeftIcon,
@@ -19,7 +22,9 @@ import {
   ArrowBack as BackIcon,
   CheckCircle as FinishIcon,
   Search as SearchIcon,
+  Language as LanguageIcon,
 } from '@mui/icons-material'
+import { languages } from '@/i18n'
 
 export type ViewType = 'left' | 'top' | 'back'
 
@@ -249,10 +254,19 @@ export const VIEW_STICKERS = {
 }
 
 export default function BoatConfiguratorPage() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const navigate = useNavigate()
+  const { code } = useParams<{ code?: string }>()
   const [view, setView] = useState<ViewType>('left')
   const [boatColorIndex, setBoatColorIndex] = useState(0)
+  const [langMenuAnchor, setLangMenuAnchor] = useState<null | HTMLElement>(null)
+
+  const handleLanguageChange = (langCode: string) => {
+    i18n.changeLanguage(langCode)
+    setLangMenuAnchor(null)
+  }
+
+  const currentLanguage = languages.find(l => l.code === i18n.language) || languages[0]
 
   // For left view: two groups of stickers
   const [leftGroup1, setLeftGroup1] = useState<StickerSelection>({ sticker: null, colorIndex: 0 })
@@ -261,6 +275,20 @@ export default function BoatConfiguratorPage() {
   // For top/back views: single sticker selection
   const [topSticker, setTopSticker] = useState<StickerSelection>({ sticker: null, colorIndex: 0 })
   const [backSticker, setBackSticker] = useState<StickerSelection>({ sticker: null, colorIndex: 0 })
+
+  // Load configuration from URL code on mount
+  useEffect(() => {
+    if (code) {
+      const config = decodeConfiguration(code)
+      if (config) {
+        setBoatColorIndex(config.boatColorIndex)
+        setLeftGroup1(config.leftGroup1)
+        setLeftGroup2(config.leftGroup2)
+        setTopSticker(config.topSticker)
+        setBackSticker(config.backSticker)
+      }
+    }
+  }, [code])
 
   const handleViewChange = (_: React.MouseEvent<HTMLElement>, newView: ViewType | null) => {
     if (newView) {
@@ -556,14 +584,40 @@ export default function BoatConfiguratorPage() {
         <Typography variant="h5">
           {t('configurator.title')}
         </Typography>
-        <Button
-          variant="outlined"
-          size="small"
-          startIcon={<SearchIcon />}
-          onClick={() => navigate('/configurator/lookup')}
-        >
-          {t('configurator.haveCode', 'Есть код?')}
-        </Button>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          <IconButton
+            onClick={(e) => setLangMenuAnchor(e.currentTarget)}
+            size="small"
+            sx={{ border: '1px solid #ccc' }}
+          >
+            <Box component="span" sx={{ fontSize: '1.2rem', mr: 0.5 }}>{currentLanguage.flag}</Box>
+            <LanguageIcon fontSize="small" />
+          </IconButton>
+          <Menu
+            anchorEl={langMenuAnchor}
+            open={Boolean(langMenuAnchor)}
+            onClose={() => setLangMenuAnchor(null)}
+          >
+            {languages.map((lang) => (
+              <MenuItem
+                key={lang.code}
+                onClick={() => handleLanguageChange(lang.code)}
+                selected={lang.code === i18n.language}
+              >
+                <Box component="span" sx={{ mr: 1 }}>{lang.flag}</Box>
+                {lang.name}
+              </MenuItem>
+            ))}
+          </Menu>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<SearchIcon />}
+            onClick={() => navigate('/configurator/lookup')}
+          >
+            {t('configurator.haveCode', 'Есть код?')}
+          </Button>
+        </Box>
       </Box>
 
       {/* View Selector */}
@@ -716,7 +770,7 @@ export default function BoatConfiguratorPage() {
           onClick={handleFinish}
           sx={{ px: 6, py: 1.5 }}
         >
-          {t('configurator.finish', 'Завершить')}
+          {t('configurator.finish', 'Подвести итоги')}
         </Button>
       </Box>
     </Box>

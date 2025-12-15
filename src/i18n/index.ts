@@ -34,8 +34,8 @@ i18n
       ro: { translation: ro },
       pl: { translation: pl },
     },
-    lng: hasStoredLanguage ? undefined : 'en', // Default to English for new users
-    fallbackLng: 'en',
+    lng: hasStoredLanguage ? undefined : 'uk', // Default to Ukrainian for new users
+    fallbackLng: 'uk',
     interpolation: {
       escapeValue: false,
     },

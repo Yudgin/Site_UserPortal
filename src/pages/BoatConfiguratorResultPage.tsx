@@ -11,13 +11,17 @@ import {
   Snackbar,
   Alert,
   Divider,
+  Menu,
+  MenuItem,
 } from '@mui/material'
 import {
   ContentCopy as CopyIcon,
   Edit as EditIcon,
   Share as ShareIcon,
+  Language as LanguageIcon,
 } from '@mui/icons-material'
 import { useState } from 'react'
+import { languages } from '@/i18n'
 import {
   decodeConfiguration,
   BOAT_COLOR_OPTIONS,
@@ -89,8 +93,16 @@ const renderStickerWithClipPath = (
 export default function BoatConfiguratorResultPage() {
   const { code } = useParams<{ code: string }>()
   const navigate = useNavigate()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [copySuccess, setCopySuccess] = useState(false)
+  const [langMenuAnchor, setLangMenuAnchor] = useState<null | HTMLElement>(null)
+
+  const handleLanguageChange = (langCode: string) => {
+    i18n.changeLanguage(langCode)
+    setLangMenuAnchor(null)
+  }
+
+  const currentLanguage = languages.find(l => l.code === i18n.language) || languages[0]
 
   const config = code ? decodeConfiguration(code) : null
 
@@ -207,9 +219,35 @@ export default function BoatConfiguratorResultPage() {
 
   return (
     <Box sx={{ p: 2, maxWidth: 1200, mx: 'auto' }}>
-      <Typography variant="h5" gutterBottom textAlign="center">
-        {t('configurator.result', 'Результат конфигурации')}
-      </Typography>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+        <Typography variant="h5">
+          {t('configurator.result', 'Результат конфігурації')}
+        </Typography>
+        <IconButton
+          onClick={(e) => setLangMenuAnchor(e.currentTarget)}
+          size="small"
+          sx={{ border: '1px solid #ccc' }}
+        >
+          <Box component="span" sx={{ fontSize: '1.2rem', mr: 0.5 }}>{currentLanguage.flag}</Box>
+          <LanguageIcon fontSize="small" />
+        </IconButton>
+        <Menu
+          anchorEl={langMenuAnchor}
+          open={Boolean(langMenuAnchor)}
+          onClose={() => setLangMenuAnchor(null)}
+        >
+          {languages.map((lang) => (
+            <MenuItem
+              key={lang.code}
+              onClick={() => handleLanguageChange(lang.code)}
+              selected={lang.code === i18n.language}
+            >
+              <Box component="span" sx={{ mr: 1 }}>{lang.flag}</Box>
+              {lang.name}
+            </MenuItem>
+          ))}
+        </Menu>
+      </Box>
 
       {/* Boat Views */}
       <Grid container spacing={2} sx={{ mb: 4 }}>
@@ -395,7 +433,7 @@ export default function BoatConfiguratorResultPage() {
         <Button
           variant="outlined"
           startIcon={<EditIcon />}
-          onClick={() => navigate('/configurator')}
+          onClick={() => navigate(`/configurator/${code}`)}
         >
           {t('configurator.editConfig', 'Изменить конфигурацию')}
         </Button>

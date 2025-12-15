@@ -40,6 +40,7 @@ import {
   LocalShipping as ShippingIcon,
   Build as BuildIcon,
   Payment as PaymentIcon,
+  Person as PersonIcon,
 } from '@mui/icons-material'
 import LanguageSelector from '@/components/common/LanguageSelector'
 import LoadingSpinner from '@/components/common/LoadingSpinner'
@@ -320,6 +321,35 @@ export default function ServiceSharePage() {
             <Alert severity="success" sx={{ mb: 3 }}>
               {t('service.termsAcceptedAt')}: {data.clientAcceptedTerms.acceptedAt}
             </Alert>
+
+            {/* Client Info */}
+            {data.clientInfo && (
+              <>
+                <Accordion defaultExpanded>
+                  <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <PersonIcon color="primary" />
+                      <Typography variant="h6">{t('service.clientInfo', 'Інформація про відправника')}</Typography>
+                    </Box>
+                  </AccordionSummary>
+                  <AccordionDetails>
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <Typography variant="body1">
+                        <strong>{t('service.clientName', 'ПІБ')}:</strong>{' '}
+                        {`${data.clientInfo.lastName} ${data.clientInfo.firstName} ${data.clientInfo.middleName}`.trim()}
+                      </Typography>
+                      <Typography variant="body1">
+                        <strong>{t('service.clientCity', 'Місто')}:</strong> {data.clientInfo.city}
+                      </Typography>
+                      <Typography variant="body1">
+                        <strong>{t('service.clientWarehouse', 'Відділення НП')}:</strong> {data.clientInfo.warehouse}
+                      </Typography>
+                    </Box>
+                  </AccordionDetails>
+                </Accordion>
+                <Divider sx={{ my: 2 }} />
+              </>
+            )}
 
             {/* Shipment Info */}
             <Accordion defaultExpanded>

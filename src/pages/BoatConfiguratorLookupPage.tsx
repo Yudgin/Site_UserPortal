@@ -8,18 +8,31 @@ import {
   TextField,
   Button,
   Alert,
+  IconButton,
+  Menu,
+  MenuItem,
 } from '@mui/material'
 import {
   Search as SearchIcon,
   ArrowBack as BackIcon,
+  Language as LanguageIcon,
 } from '@mui/icons-material'
 import { decodeConfiguration } from './BoatConfiguratorPage'
+import { languages } from '@/i18n'
 
 export default function BoatConfiguratorLookupPage() {
   const navigate = useNavigate()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [code, setCode] = useState('')
   const [error, setError] = useState(false)
+  const [langMenuAnchor, setLangMenuAnchor] = useState<null | HTMLElement>(null)
+
+  const handleLanguageChange = (langCode: string) => {
+    i18n.changeLanguage(langCode)
+    setLangMenuAnchor(null)
+  }
+
+  const currentLanguage = languages.find(l => l.code === i18n.language) || languages[0]
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -48,12 +61,38 @@ export default function BoatConfiguratorLookupPage() {
 
   return (
     <Box sx={{ p: 2, maxWidth: 600, mx: 'auto', mt: 4 }}>
-      <Typography variant="h5" gutterBottom textAlign="center">
-        {t('configurator.lookupTitle', 'Поиск конфигурации')}
-      </Typography>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+        <Typography variant="h5">
+          {t('configurator.lookupTitle', 'Пошук конфігурації')}
+        </Typography>
+        <IconButton
+          onClick={(e) => setLangMenuAnchor(e.currentTarget)}
+          size="small"
+          sx={{ border: '1px solid #ccc' }}
+        >
+          <Box component="span" sx={{ fontSize: '1.2rem', mr: 0.5 }}>{currentLanguage.flag}</Box>
+          <LanguageIcon fontSize="small" />
+        </IconButton>
+        <Menu
+          anchorEl={langMenuAnchor}
+          open={Boolean(langMenuAnchor)}
+          onClose={() => setLangMenuAnchor(null)}
+        >
+          {languages.map((lang) => (
+            <MenuItem
+              key={lang.code}
+              onClick={() => handleLanguageChange(lang.code)}
+              selected={lang.code === i18n.language}
+            >
+              <Box component="span" sx={{ mr: 1 }}>{lang.flag}</Box>
+              {lang.name}
+            </MenuItem>
+          ))}
+        </Menu>
+      </Box>
 
       <Typography variant="body1" color="textSecondary" textAlign="center" sx={{ mb: 4 }}>
-        {t('configurator.lookupDescription', 'Введите 9-значный код конфигурации, чтобы увидеть внешний вид лодки')}
+        {t('configurator.lookupDescription', 'Введіть 9-значний код конфігурації, щоб побачити зовнішній вигляд човна')}
       </Typography>
 
       <Paper sx={{ p: 4 }}>
