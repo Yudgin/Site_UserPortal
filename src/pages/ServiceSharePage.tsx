@@ -300,6 +300,23 @@ export default function ServiceSharePage() {
             <Alert severity="info" sx={{ mb: 2 }}>
               {t('service.termsDescription')}
             </Alert>
+            <Paper
+              variant="outlined"
+              sx={{
+                p: 2,
+                mb: 3,
+                maxHeight: 300,
+                overflow: 'auto',
+                bgcolor: 'grey.50'
+              }}
+            >
+              <Typography
+                variant="body2"
+                sx={{ whiteSpace: 'pre-line' }}
+              >
+                {t('service.termsText')}
+              </Typography>
+            </Paper>
             <Button
               variant="contained"
               onClick={handleAcceptTerms}
@@ -619,9 +636,8 @@ export default function ServiceSharePage() {
 
             <Divider sx={{ my: 2 }} />
 
-            {/* Payment Section */}
-            {(data.finalPrice || data.finalInvoice?.length > 0) && (
-              <Accordion defaultExpanded>
+            {/* Payment Section - always show */}
+            <Accordion defaultExpanded>
                 <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                     <PaymentIcon color="primary" />
@@ -674,10 +690,9 @@ export default function ServiceSharePage() {
                   )}
                 </AccordionDetails>
               </Accordion>
-            )}
 
-            {/* Return Delivery */}
-            {data.returnTtn && (
+            {/* Return Delivery - only show when paid */}
+            {data.returnTtn && data.paymentStatus === true && (
               <>
                 <Divider sx={{ my: 2 }} />
                 <Accordion>

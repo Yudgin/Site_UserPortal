@@ -139,6 +139,7 @@
     "requestTitle": "Service Request",
     "termsTitle": "Terms and Conditions",
     "termsDescription": "Please review and accept the terms before proceeding",
+    "termsText": "After approval, you will be shown the provided tracking number (TTN) for shipping.\n\nYour next steps:\n\nPack the boat together with the remote control in the bag and box yourself. If you don't have a Runferry box left, you can purchase a 30-kilogram box at Nova Poshta.\n\nDo not include the battery or charger in the package (except when the service concerns them specifically).\n\nThen at the Nova Poshta branch, tell them the TTN number you received, the operator will print it and stick it on your package. Don't worry that the package is not sent in your name — this is necessary for proper accounting on our side.\n\nAfter the service is completed, we will send the package to the branch from which you sent it to us. You will be provided with a TTN number to pick up the package. For delivery confirmation: Nova Poshta will call us and we will give our confirmation for release.\n\nPayment will also be made through this service.",
     "acceptTerms": "Accept Terms",
     "termsAccepted": "Terms accepted successfully",
     "termsAcceptedAt": "Terms accepted at",
