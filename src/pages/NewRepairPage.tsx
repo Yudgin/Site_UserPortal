@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Container,
   Paper,
@@ -19,16 +19,24 @@ import {
   Step,
   StepLabel,
   InputAdornment,
+  List,
+  ListItemButton,
+  ListItemText,
+  Collapse,
+  Chip,
 } from '@mui/material'
 import {
   Phone as PhoneIcon,
   Send as SendIcon,
   Home as HomeIcon,
   CheckCircle as CheckIcon,
+  ExpandMore as ExpandMoreIcon,
+  ChevronRight as ChevronRightIcon,
 } from '@mui/icons-material'
 import LanguageSelector from '@/components/common/LanguageSelector'
-import { serviceApi, ServiceCenter, NewRepairRequest } from '@/api/endpoints/service'
+import { serviceApi, ServiceCenter, ServiceTypeItem, NewRepairRequest } from '@/api/endpoints/service'
 import { searchCities, getWarehouses, NPCity, NPWarehouse } from '@/api/endpoints/novaposhta'
+import { useSettingsStore } from '@/store/settingsStore'
 
 // Simple debounce helper
 function useDebounce<T extends (...args: any[]) => any>(fn: T, delay: number): T {
@@ -49,14 +57,25 @@ function useDebounce<T extends (...args: any[]) => any>(fn: T, delay: number): T
 export default function NewRepairPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+
+  // Get user profile data from settings store
+  const { phoneNumber: savedPhone, profile: savedProfile } = useSettingsStore()
 
   // Stepper
   const [activeStep, setActiveStep] = useState(0)
   const steps = [
     t('repair.stepContact', 'Контактні дані'),
+    t('repair.stepServiceType', 'Тип сервісу'),
     t('repair.stepService', 'Сервіс'),
     t('repair.stepDelivery', 'Доставка'),
   ]
+
+  // Service types
+  const [serviceTypes, setServiceTypes] = useState<ServiceTypeItem[]>([])
+  const [loadingTypes, setLoadingTypes] = useState(true)
+  const [selectedServiceType, setSelectedServiceType] = useState<{ id: string; name: string; path: string[] } | null>(null)
+  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set())
 
   // Form state
   const [phone, setPhone] = useState('')
@@ -87,10 +106,107 @@ export default function NewRepairPage() {
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<{ id: string } | null>(null)
 
-  // Load service centers on mount
+  // Load service centers and types on mount
   useEffect(() => {
     loadServiceCenters()
+    loadServiceTypes()
   }, [])
+
+  // Handle URL parameter for service type
+  useEffect(() => {
+    const typeParam = searchParams.get('type')
+    if (typeParam && serviceTypes.length > 0) {
+      const found = findServiceTypeById(serviceTypes, typeParam)
+      if (found) {
+        setSelectedServiceType(found)
+        // Expand parent items
+        const newExpanded = new Set<string>()
+        found.path.forEach((id) => newExpanded.add(id))
+        setExpandedItems(newExpanded)
+      }
+    }
+  }, [searchParams, serviceTypes])
+
+  // Auto-fill form from user profile
+  useEffect(() => {
+    // Fill phone number
+    if (savedPhone && !phone) {
+      setPhone(savedPhone)
+    }
+
+    // Fill name fields from profile
+    if (savedProfile) {
+      if (savedProfile.lastName && !lastName) {
+        setLastName(savedProfile.lastName)
+      }
+      if (savedProfile.firstName && !firstName) {
+        setFirstName(savedProfile.firstName)
+      }
+      if (savedProfile.middleName && !middleName) {
+        setMiddleName(savedProfile.middleName)
+      }
+
+      // Fill city from profile
+      if (savedProfile.city && savedProfile.cityRef && !selectedCity) {
+        const cityFromProfile: NPCity = {
+          Ref: savedProfile.cityRef,
+          Description: savedProfile.city,
+          DescriptionRu: savedProfile.city,
+          Area: '',
+          AreaDescription: '',
+        }
+        setSelectedCity(cityFromProfile)
+        setCityInputValue(savedProfile.city)
+      }
+    }
+  }, [savedPhone, savedProfile]) // Only run on initial load
+
+  // Auto-fill warehouse when city is set from profile
+  useEffect(() => {
+    if (savedProfile?.warehouseRef && savedProfile?.warehouse && selectedCity && !selectedWarehouse) {
+      // Check if the city matches the saved profile city
+      if (selectedCity.Ref === savedProfile.cityRef) {
+        const warehouseFromProfile: NPWarehouse = {
+          Ref: savedProfile.warehouseRef,
+          Description: savedProfile.warehouse,
+          DescriptionRu: savedProfile.warehouse,
+          Number: '',
+          CityRef: selectedCity.Ref,
+          CityDescription: savedProfile.city,
+          TypeOfWarehouse: '',
+        }
+        setSelectedWarehouse(warehouseFromProfile)
+        setWarehouseInputValue(savedProfile.warehouse)
+      }
+    }
+  }, [selectedCity, savedProfile, warehouseOptions])
+
+  // Find service type by ID recursively
+  const findServiceTypeById = (
+    items: ServiceTypeItem[],
+    id: string,
+    path: string[] = []
+  ): { id: string; name: string; path: string[] } | null => {
+    for (const item of items) {
+      if (item.ID === id) {
+        return { id: item.ID, name: item.Name, path }
+      }
+      if (item.List && item.List.length > 0) {
+        const found = findServiceTypeById(item.List, id, [...path, item.ID])
+        if (found) return found
+      }
+    }
+    return null
+  }
+
+  const loadServiceTypes = async () => {
+    setLoadingTypes(true)
+    const result = await serviceApi.getServiceTypeList()
+    if (result.success && result.data) {
+      setServiceTypes(result.data)
+    }
+    setLoadingTypes(false)
+  }
 
   const loadServiceCenters = async () => {
     setLoadingCenters(true)
@@ -168,8 +284,67 @@ export default function NewRepairPage() {
 
   // Step validation
   const isStep1Valid = isValidPhone(phone) && lastName.trim() && firstName.trim()
-  const isStep2Valid = selectedServiceCenter && complaint.trim()
-  const isStep3Valid = selectedCity && selectedWarehouse
+  const isStep2Valid = selectedServiceType !== null
+  const isStep3Valid = selectedServiceCenter && complaint.trim()
+  const isStep4Valid = selectedCity && selectedWarehouse
+
+  // Toggle expand item
+  const toggleExpand = (id: string) => {
+    const newExpanded = new Set(expandedItems)
+    if (newExpanded.has(id)) {
+      newExpanded.delete(id)
+    } else {
+      newExpanded.add(id)
+    }
+    setExpandedItems(newExpanded)
+  }
+
+  // Select service type (only leaf nodes - items without children)
+  const handleSelectServiceType = (item: ServiceTypeItem, path: string[]) => {
+    if (!item.List || item.List.length === 0) {
+      setSelectedServiceType({ id: item.ID, name: item.Name, path })
+    }
+  }
+
+  // Render service type tree recursively
+  const renderServiceTypeTree = (items: ServiceTypeItem[], level: number = 0, path: string[] = []): React.ReactNode => {
+    return items.map((item) => {
+      const hasChildren = item.List && item.List.length > 0
+      const isExpanded = expandedItems.has(item.ID)
+      const isSelected = selectedServiceType?.id === item.ID
+      const currentPath = [...path, item.ID]
+
+      return (
+        <Box key={item.ID}>
+          <ListItemButton
+            onClick={() => {
+              if (hasChildren) {
+                toggleExpand(item.ID)
+              } else {
+                handleSelectServiceType(item, path)
+              }
+            }}
+            selected={isSelected}
+            sx={{ pl: 2 + level * 2 }}
+          >
+            {hasChildren ? (
+              isExpanded ? <ExpandMoreIcon /> : <ChevronRightIcon />
+            ) : (
+              <Box sx={{ width: 24 }} />
+            )}
+            <ListItemText primary={item.Name} />
+          </ListItemButton>
+          {hasChildren && (
+            <Collapse in={isExpanded} timeout="auto" unmountOnExit>
+              <List component="div" disablePadding>
+                {renderServiceTypeTree(item.List!, level + 1, currentPath)}
+              </List>
+            </Collapse>
+          )}
+        </Box>
+      )
+    })
+  }
 
   const handleNext = () => {
     setActiveStep((prev) => prev + 1)
@@ -188,6 +363,7 @@ export default function NewRepairPage() {
     const request: NewRepairRequest = {
       phone_number: formatPhoneForApi(phone),
       Service: selectedServiceCenter,
+      ServiceType: selectedServiceType?.id,
       Disc: complaint,
       LastName: lastName,
       FirstName: firstName,
@@ -333,8 +509,47 @@ export default function NewRepairPage() {
             </Box>
           )}
 
-          {/* Step 2: Service & Complaint */}
+          {/* Step 2: Service Type */}
           {activeStep === 1 && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+              <Typography variant="body1" color="text.secondary">
+                {t('repair.selectServiceType', 'Оберіть тип послуги')}
+              </Typography>
+
+              {selectedServiceType && (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Typography variant="body2">{t('repair.selected', 'Обрано')}:</Typography>
+                  <Chip
+                    label={selectedServiceType.name}
+                    color="primary"
+                    onDelete={() => setSelectedServiceType(null)}
+                  />
+                </Box>
+              )}
+
+              {loadingTypes ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+                  <CircularProgress />
+                </Box>
+              ) : (
+                <Paper variant="outlined" sx={{ maxHeight: 400, overflow: 'auto' }}>
+                  <List component="nav">
+                    {renderServiceTypeTree(serviceTypes)}
+                  </List>
+                </Paper>
+              )}
+
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                <Button onClick={handleBack}>{t('common.back')}</Button>
+                <Button variant="contained" onClick={handleNext} disabled={!isStep2Valid}>
+                  {t('common.next')}
+                </Button>
+              </Box>
+            </Box>
+          )}
+
+          {/* Step 3: Service & Complaint */}
+          {activeStep === 2 && (
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
               <FormControl fullWidth>
                 <InputLabel>{t('repair.serviceCenter', 'Сервісний центр')}</InputLabel>
@@ -364,15 +579,15 @@ export default function NewRepairPage() {
 
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                 <Button onClick={handleBack}>{t('common.back')}</Button>
-                <Button variant="contained" onClick={handleNext} disabled={!isStep2Valid}>
+                <Button variant="contained" onClick={handleNext} disabled={!isStep3Valid}>
                   {t('common.next')}
                 </Button>
               </Box>
             </Box>
           )}
 
-          {/* Step 3: Delivery Address */}
-          {activeStep === 2 && (
+          {/* Step 4: Delivery Address */}
+          {activeStep === 3 && (
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
               <Typography variant="body1" color="text.secondary">
                 {t('repair.deliveryInfo', 'Вкажіть адресу відділення Нової Пошти, з якого ви надішлете пристрій')}
@@ -450,7 +665,7 @@ export default function NewRepairPage() {
                 <Button
                   variant="contained"
                   onClick={handleSubmit}
-                  disabled={!isStep3Valid || submitting}
+                  disabled={!isStep4Valid || submitting}
                   startIcon={submitting ? <CircularProgress size={20} /> : <SendIcon />}
                 >
                   {t('repair.submit', 'Створити заявку')}

@@ -28,6 +28,7 @@ import {
   Logout as LogoutIcon,
   Store as DistributorIcon,
   Build as RepairsIcon,
+  Palette as DesignIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { useBoatStore } from '@/store/boatStore'
@@ -72,6 +73,7 @@ export default function Layout() {
   const menuItems = [
     { text: t('reservoirs.title'), icon: <MapIcon />, path: '/' },
     { text: t('repairs.title'), icon: <RepairsIcon />, path: '/repairs' },
+    { text: t('design.title'), icon: <DesignIcon />, path: '/design' },
     { text: t('settings.title'), icon: <SettingsIcon />, path: '/settings' },
   ]
 

@@ -17,6 +17,8 @@ import BoatConfiguratorResultPage from '@/pages/BoatConfiguratorResultPage'
 import BoatConfiguratorLookupPage from '@/pages/BoatConfiguratorLookupPage'
 import NewRepairPage from '@/pages/NewRepairPage'
 import RepairsPage from '@/pages/RepairsPage'
+import PixelEditorPage from '@/pages/PixelEditorPage'
+import DesignPage from '@/pages/DesignPage'
 import Layout from '@/components/common/Layout'
 
 interface ProtectedRouteProps {
@@ -122,6 +124,28 @@ export const AppRoutes = () => {
       <Route path="/configurator/result/:code" element={<BoatConfiguratorResultPage />} />
       <Route path="/configurator/lookup" element={<BoatConfiguratorLookupPage />} />
 
+      {/* Pixel editor - view is public, create requires auth */}
+      <Route path="/pixel-editor/:designId" element={<PixelEditorPage />} />
+      <Route
+        path="/pixel-editor"
+        element={
+          <AuthenticatedRoute>
+            <PixelEditorPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Pixel editor admin - with export buttons */}
+      <Route path="/pixel-editor-admin/:designId" element={<PixelEditorPage isAdmin />} />
+      <Route
+        path="/pixel-editor-admin"
+        element={
+          <AuthenticatedRoute>
+            <PixelEditorPage isAdmin />
+          </AuthenticatedRoute>
+        }
+      />
+
       {/* Protected routes with Layout */}
       <Route
         path="/"
@@ -134,6 +158,7 @@ export const AppRoutes = () => {
         <Route index element={<DashboardPage />} />
         <Route path="reservoir/:id" element={<ReservoirPage />} />
         <Route path="repairs" element={<RepairsPage />} />
+        <Route path="design" element={<DesignPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="distributor" element={<DistributorPage />} />

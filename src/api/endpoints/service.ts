@@ -55,9 +55,16 @@ export interface ServiceCenter {
   Name: string
 }
 
+export interface ServiceTypeItem {
+  ID: string
+  Name: string
+  List?: ServiceTypeItem[]
+}
+
 export interface NewRepairRequest {
   phone_number: string
   Service: string  // Service center ID
+  ServiceType?: string // Service type ID from hierarchical list
   Disc: string     // Complaint description
   LastName: string
   FirstName: string
@@ -398,6 +405,25 @@ export const serviceApi = {
         error: {
           code: 'FETCH_FAILED',
           message: 'Failed to load service centers',
+        },
+      }
+    }
+  },
+
+  // Get hierarchical list of service types
+  getServiceTypeList: async (): Promise<ApiResponse<ServiceTypeItem[]>> => {
+    try {
+      const response = await axios.get(`${SERVICE_API_BASE}/repair_ServoceTypeList`)
+      return {
+        success: true,
+        data: response.data.List || [],
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        error: {
+          code: 'FETCH_FAILED',
+          message: 'Failed to load service types',
         },
       }
     }

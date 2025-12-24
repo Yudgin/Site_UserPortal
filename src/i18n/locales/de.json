@@ -195,6 +195,14 @@
     "phoneVerified": "Telefonnummer bestätigt",
     "changeVerifiedPhone": "Telefonnummer ändern"
   },
+  "design": {
+    "title": "Design",
+    "remoteDesign": "Fernbedienungs-Design",
+    "remoteDesignDesc": "Erstellen Sie benutzerdefinierte 128×64 Monochrom-Bilder für Ihr Fernbedienungsdisplay",
+    "boatDesign": "Solo V3 Design",
+    "boatDesignDesc": "Konfigurieren Sie das Farbschema und die Aufkleber für Ihr Solo V3 Boot",
+    "savedDesigns": "Gespeicherte Designs"
+  },
   "configurator": {
     "title": "Boot-Konfigurator",
     "viewLeft": "Seite",
@@ -230,6 +238,10 @@
     "invalidCodeError": "Ungültiger Code. Der Code muss 9 Zeichen enthalten.",
     "invalidCodeMessage": "Code nicht gefunden oder ungültig. Stellen Sie sicher, dass Sie den richtigen 9-stelligen Code eingegeben haben.",
     "search": "Suchen",
-    "codeExample": "Codebeispiel"
+    "codeExample": "Codebeispiel",
+    "saveConfig": "Speichern",
+    "saved": "Gespeichert",
+    "configSaved": "Konfiguration gespeichert!",
+    "saveFailed": "Speichern fehlgeschlagen"
   }
 }

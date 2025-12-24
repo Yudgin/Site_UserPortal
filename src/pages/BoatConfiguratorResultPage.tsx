@@ -19,9 +19,13 @@ import {
   Edit as EditIcon,
   Share as ShareIcon,
   Language as LanguageIcon,
+  Home as HomeIcon,
+  Save as SaveIcon,
 } from '@mui/icons-material'
 import { useState } from 'react'
 import { languages } from '@/i18n'
+import { useAuthStore } from '@/store/authStore'
+import { boatConfigService } from '@/api/boatConfigService'
 import {
   decodeConfiguration,
   BOAT_COLOR_OPTIONS,
@@ -94,8 +98,26 @@ export default function BoatConfiguratorResultPage() {
   const { code } = useParams<{ code: string }>()
   const navigate = useNavigate()
   const { t, i18n } = useTranslation()
+  const { user } = useAuthStore()
   const [copySuccess, setCopySuccess] = useState(false)
   const [langMenuAnchor, setLangMenuAnchor] = useState<null | HTMLElement>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveSuccess, setSaveSuccess] = useState(false)
+  const [saveError, setSaveError] = useState(false)
+
+  const handleSaveConfig = async () => {
+    if (!user || !code) return
+
+    setSaving(true)
+    const result = await boatConfigService.saveConfig(code)
+    setSaving(false)
+
+    if (result) {
+      setSaveSuccess(true)
+    } else {
+      setSaveError(true)
+    }
+  }
 
   const handleLanguageChange = (langCode: string) => {
     i18n.changeLanguage(langCode)
@@ -223,30 +245,40 @@ export default function BoatConfiguratorResultPage() {
         <Typography variant="h5">
           {t('configurator.result', 'Результат конфігурації')}
         </Typography>
-        <IconButton
-          onClick={(e) => setLangMenuAnchor(e.currentTarget)}
-          size="small"
-          sx={{ border: '1px solid #ccc' }}
-        >
-          <Box component="span" sx={{ fontSize: '1.2rem', mr: 0.5 }}>{currentLanguage.flag}</Box>
-          <LanguageIcon fontSize="small" />
-        </IconButton>
-        <Menu
-          anchorEl={langMenuAnchor}
-          open={Boolean(langMenuAnchor)}
-          onClose={() => setLangMenuAnchor(null)}
-        >
-          {languages.map((lang) => (
-            <MenuItem
-              key={lang.code}
-              onClick={() => handleLanguageChange(lang.code)}
-              selected={lang.code === i18n.language}
-            >
-              <Box component="span" sx={{ mr: 1 }}>{lang.flag}</Box>
-              {lang.name}
-            </MenuItem>
-          ))}
-        </Menu>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<HomeIcon />}
+            onClick={() => navigate('/design')}
+          >
+            {t('common.home')}
+          </Button>
+          <IconButton
+            onClick={(e) => setLangMenuAnchor(e.currentTarget)}
+            size="small"
+            sx={{ border: '1px solid #ccc' }}
+          >
+            <Box component="span" sx={{ fontSize: '1.2rem', mr: 0.5 }}>{currentLanguage.flag}</Box>
+            <LanguageIcon fontSize="small" />
+          </IconButton>
+          <Menu
+            anchorEl={langMenuAnchor}
+            open={Boolean(langMenuAnchor)}
+            onClose={() => setLangMenuAnchor(null)}
+          >
+            {languages.map((lang) => (
+              <MenuItem
+                key={lang.code}
+                onClick={() => handleLanguageChange(lang.code)}
+                selected={lang.code === i18n.language}
+              >
+                <Box component="span" sx={{ mr: 1 }}>{lang.flag}</Box>
+                {lang.name}
+              </MenuItem>
+            ))}
+          </Menu>
+        </Box>
       </Box>
 
       {/* Boat Views */}
@@ -444,6 +476,17 @@ export default function BoatConfiguratorResultPage() {
         >
           {t('configurator.copyCode', 'Копировать код')}
         </Button>
+        {user && (
+          <Button
+            variant="contained"
+            color="success"
+            startIcon={<SaveIcon />}
+            onClick={handleSaveConfig}
+            disabled={saving || saveSuccess}
+          >
+            {saving ? t('common.loading') : saveSuccess ? t('configurator.saved') : t('configurator.saveConfig')}
+          </Button>
+        )}
       </Box>
 
       {/* Copy Success Snackbar */}
@@ -455,6 +498,30 @@ export default function BoatConfiguratorResultPage() {
       >
         <Alert severity="success" onClose={() => setCopySuccess(false)}>
           {t('configurator.copied', 'Скопировано!')}
+        </Alert>
+      </Snackbar>
+
+      {/* Save Success Snackbar */}
+      <Snackbar
+        open={saveSuccess}
+        autoHideDuration={3000}
+        onClose={() => setSaveSuccess(false)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert severity="success" onClose={() => setSaveSuccess(false)}>
+          {t('configurator.configSaved', 'Конфигурация сохранена!')}
+        </Alert>
+      </Snackbar>
+
+      {/* Save Error Snackbar */}
+      <Snackbar
+        open={saveError}
+        autoHideDuration={3000}
+        onClose={() => setSaveError(false)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert severity="error" onClose={() => setSaveError(false)}>
+          {t('configurator.saveFailed', 'Не удалось сохранить')}
         </Alert>
       </Snackbar>
     </Box>

@@ -195,6 +195,14 @@
     "phoneVerified": "Numer telefonu zweryfikowany",
     "changeVerifiedPhone": "Zmień numer telefonu"
   },
+  "design": {
+    "title": "Design",
+    "remoteDesign": "Design pilota",
+    "remoteDesignDesc": "Twórz własne monochromatyczne obrazy 128×64 dla wyświetlacza pilota",
+    "boatDesign": "Design Solo V3",
+    "boatDesignDesc": "Skonfiguruj schemat kolorów i naklejki dla łodzi Solo V3",
+    "savedDesigns": "Zapisane projekty"
+  },
   "configurator": {
     "title": "Konfigurator łodzi",
     "viewLeft": "Z boku",
@@ -230,6 +238,10 @@
     "invalidCodeError": "Nieprawidłowy kod. Kod musi zawierać 9 znaków.",
     "invalidCodeMessage": "Nie znaleziono kodu lub jest nieprawidłowy. Upewnij się, że wprowadziłeś poprawny 9-znakowy kod.",
     "search": "Szukaj",
-    "codeExample": "Przykład kodu"
+    "codeExample": "Przykład kodu",
+    "saveConfig": "Zapisz",
+    "saved": "Zapisano",
+    "configSaved": "Konfiguracja zapisana!",
+    "saveFailed": "Nie udało się zapisać"
   }
 }

@@ -23,6 +23,7 @@ import {
   CheckCircle as FinishIcon,
   Search as SearchIcon,
   Language as LanguageIcon,
+  Home as HomeIcon,
 } from '@mui/icons-material'
 import { languages } from '@/i18n'
 
@@ -585,6 +586,14 @@ export default function BoatConfiguratorPage() {
           {t('configurator.title')}
         </Typography>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<HomeIcon />}
+            onClick={() => navigate('/design')}
+          >
+            {t('common.home')}
+          </Button>
           <IconButton
             onClick={(e) => setLangMenuAnchor(e.currentTarget)}
             size="small"

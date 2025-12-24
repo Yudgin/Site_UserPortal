@@ -195,6 +195,14 @@
     "phoneVerified": "Număr de telefon verificat",
     "changeVerifiedPhone": "Schimbă numărul de telefon"
   },
+  "design": {
+    "title": "Design",
+    "remoteDesign": "Design telecomandă",
+    "remoteDesignDesc": "Creați imagini monocrome personalizate 128×64 pentru afișajul telecomenzii",
+    "boatDesign": "Design Solo V3",
+    "boatDesignDesc": "Configurați schema de culori și autocolantele pentru barca Solo V3",
+    "savedDesigns": "Design-uri salvate"
+  },
   "configurator": {
     "title": "Configurator barcă",
     "viewLeft": "Lateral",
@@ -230,6 +238,10 @@
     "invalidCodeError": "Cod invalid. Codul trebuie să conțină 9 caractere.",
     "invalidCodeMessage": "Codul nu a fost găsit sau este invalid. Asigurați-vă că ați introdus codul corect din 9 caractere.",
     "search": "Căutare",
-    "codeExample": "Exemplu de cod"
+    "codeExample": "Exemplu de cod",
+    "saveConfig": "Salvează",
+    "saved": "Salvat",
+    "configSaved": "Configurația a fost salvată!",
+    "saveFailed": "Nu s-a putut salva"
   }
 }
