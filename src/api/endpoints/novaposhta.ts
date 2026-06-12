@@ -1,7 +1,12 @@
 import axios from 'axios'
 
-const NP_API_URL = 'https://api.novaposhta.ua/v2.0/json/'
-const NP_API_KEY = '7017b9e350e0c2d9fd515a5d0d76560c'
+// Nova Poshta requests go through our backend proxy — the API key never reaches the browser.
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3002'
+
+const npClient = axios.create({
+  baseURL: `${BACKEND_URL}/api/novaposhta`,
+  timeout: 20000,
+})
 
 export interface NPCity {
   Ref: string
@@ -24,15 +29,7 @@ export interface NPWarehouse {
 // Search cities by name
 export const searchCities = async (query: string): Promise<NPCity[]> => {
   try {
-    const response = await axios.post(NP_API_URL, {
-      apiKey: NP_API_KEY,
-      modelName: 'Address',
-      calledMethod: 'searchSettlements',
-      methodProperties: {
-        CityName: query,
-        Limit: 20,
-      },
-    })
+    const response = await npClient.post('/cities', { query })
 
     if (response.data.success && response.data.data?.[0]?.Addresses) {
       return response.data.data[0].Addresses.map((addr: any) => ({
@@ -53,16 +50,7 @@ export const searchCities = async (query: string): Promise<NPCity[]> => {
 // Get warehouses by city Ref
 export const getWarehouses = async (cityRef: string, searchQuery?: string): Promise<NPWarehouse[]> => {
   try {
-    const response = await axios.post(NP_API_URL, {
-      apiKey: NP_API_KEY,
-      modelName: 'Address',
-      calledMethod: 'getWarehouses',
-      methodProperties: {
-        CityRef: cityRef,
-        FindByString: searchQuery || '',
-        Limit: 50,
-      },
-    })
+    const response = await npClient.post('/warehouses', { cityRef, searchQuery: searchQuery || '' })
 
     if (response.data.success && response.data.data) {
       return response.data.data.map((wh: any) => ({
@@ -85,14 +73,7 @@ export const getWarehouses = async (cityRef: string, searchQuery?: string): Prom
 // Track parcel by TTN
 export const trackParcel = async (ttn: string): Promise<any> => {
   try {
-    const response = await axios.post(NP_API_URL, {
-      apiKey: NP_API_KEY,
-      modelName: 'TrackingDocument',
-      calledMethod: 'getStatusDocuments',
-      methodProperties: {
-        Documents: [{ DocumentNumber: ttn }],
-      },
-    })
+    const response = await npClient.post('/track', { ttn })
 
     if (response.data.success && response.data.data?.[0]) {
       return response.data.data[0]

@@ -673,8 +673,8 @@ if (importResult.success) {
 ## Settings API (Настройки кораблика)
 
 ### Внешний API
-- **URL**: `http://160baf.cube-host.online:8812/InfoBase1/hs/ad`
-- **Auth**: Basic Auth (iis/sas)
+- **URL**: `http://<SETTINGS_API_HOST>:<SETTINGS_API_PORT><SETTINGS_API_PATH>` (задаётся переменными окружения, см. `server/.env.example`)
+- **Auth**: Basic Auth (`SETTINGS_API_USER` / `SETTINGS_API_PASS` из переменных окружения)
 
 ### Backend (наш сервер)
 - **URL**: `http://localhost:3002`

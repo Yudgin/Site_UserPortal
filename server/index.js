@@ -54,13 +54,17 @@ const isValidUkrainianPhone = (phone) => {
   return /^380\d{9}$/.test(formatted)
 }
 
-// Settings API configuration
+// Settings API configuration — credentials come from environment only (see .env.example)
 const SETTINGS_API = {
-  host: process.env.SETTINGS_API_HOST || '160baf.cube-host.online',
+  host: process.env.SETTINGS_API_HOST,
   port: process.env.SETTINGS_API_PORT || '8812',
   basePath: process.env.SETTINGS_API_PATH || '/InfoBase1/hs/ad',
-  username: process.env.SETTINGS_API_USER || 'iis',
-  password: process.env.SETTINGS_API_PASS || 'sas',
+  username: process.env.SETTINGS_API_USER,
+  password: process.env.SETTINGS_API_PASS,
+}
+
+if (!SETTINGS_API.host || !SETTINGS_API.username || !SETTINGS_API.password) {
+  console.warn('⚠️  SETTINGS_API_HOST/USER/PASS are not set — settings endpoints will fail (see .env.example)')
 }
 
 // Create axios instance for settings API
@@ -291,6 +295,94 @@ app.post('/api/sms/verify-code', (req, res) => {
     success: true,
     data: { verified: false },
   })
+})
+
+// ============ Nova Poshta Proxy Endpoints ============
+// API key lives on the server only (NP_API_KEY); the frontend calls these endpoints.
+const NP_API_URL = 'https://api.novaposhta.ua/v2.0/json/'
+const NP_API_KEY = process.env.NP_API_KEY || ''
+
+if (!NP_API_KEY) {
+  console.warn('⚠️  NP_API_KEY is not set — Nova Poshta endpoints will fail (see .env.example)')
+}
+
+const npRequest = async (modelName, calledMethod, methodProperties) => {
+  const response = await axios.post(NP_API_URL, {
+    apiKey: NP_API_KEY,
+    modelName,
+    calledMethod,
+    methodProperties,
+  }, { timeout: 15000 })
+  return response.data
+}
+
+// Search cities by name
+app.post('/api/novaposhta/cities', async (req, res) => {
+  try {
+    const { query } = req.body
+    if (!query) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_QUERY', message: 'query is required' },
+      })
+    }
+    const data = await npRequest('Address', 'searchSettlements', { CityName: query, Limit: 20 })
+    res.json(data)
+  } catch (error) {
+    console.error('Nova Poshta cities error:', error.message)
+    res.status(500).json({
+      success: false,
+      error: { code: 'NP_FAILED', message: 'Failed to search cities' },
+    })
+  }
+})
+
+// Get warehouses by city Ref
+app.post('/api/novaposhta/warehouses', async (req, res) => {
+  try {
+    const { cityRef, searchQuery } = req.body
+    if (!cityRef) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_CITY_REF', message: 'cityRef is required' },
+      })
+    }
+    const data = await npRequest('Address', 'getWarehouses', {
+      CityRef: cityRef,
+      FindByString: searchQuery || '',
+      Limit: 50,
+    })
+    res.json(data)
+  } catch (error) {
+    console.error('Nova Poshta warehouses error:', error.message)
+    res.status(500).json({
+      success: false,
+      error: { code: 'NP_FAILED', message: 'Failed to get warehouses' },
+    })
+  }
+})
+
+// Track parcel by TTN
+app.post('/api/novaposhta/track', async (req, res) => {
+  try {
+    const { ttn } = req.body
+    if (!ttn) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_TTN', message: 'ttn is required' },
+      })
+    }
+    const data = await npRequest('TrackingDocument', 'getStatusDocuments', {
+      Documents: [{ DocumentNumber: ttn }],
+    })
+    res.json(data)
+  } catch (error) {
+    console.error('Nova Poshta tracking error:', error.message)
+    res.status(500).json({
+      success: false,
+      error: { code: 'NP_FAILED', message: 'Failed to track parcel' },
+    })
+  }
 })
 
 // JSON Server for mock API
