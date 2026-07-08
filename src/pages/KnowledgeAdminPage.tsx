@@ -8,15 +8,15 @@ import {
 } from '@mui/material'
 import {
   Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Save as SaveIcon,
-  Home as HomeIcon, MenuBook as KnowledgeIcon,
+  Home as HomeIcon, MenuBook as KnowledgeIcon, CloudUpload as UploadIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import AiTextEditor from '@/components/common/AiTextEditor'
-import { knowledgeService } from '@/api/knowledgeService'
+import { knowledgeService, newKnowledgeId } from '@/api/knowledgeService'
 import { AiHistoryEntry } from '@/api/endpoints/ai'
 import type { Lang, LocalizedText } from '@/types/pricing'
-import type { KnowledgeArticle, KnowledgeVideo } from '@/types/knowledge'
+import type { KnowledgeArticle, KnowledgeVideo, KnowledgeImage } from '@/types/knowledge'
 
 const LANGS: { code: Lang; label: string }[] = [
   { code: 'uk', label: 'UA' }, { code: 'ru', label: 'RU' }, { code: 'en', label: 'EN' },
@@ -47,9 +47,10 @@ function LocalizedField({ label, value, onChange }: { label: string; value: Loca
 }
 
 const blankArticle = (): KnowledgeArticle => ({
-  id: '', title: emptyLocalized(), body: emptyLocalized(),
+  // id генерируем сразу — чтобы изображения грузились в стабильный путь knowledge/{id} ещё до сохранения
+  id: newKnowledgeId(), title: emptyLocalized(), body: emptyLocalized(),
   forConsultation: true, forSelfService: false, tags: [], relatedWorkCodes: [],
-  videos: [], links: [], active: true, updatedAt: '', updatedBy: null,
+  images: [], videos: [], links: [], active: true, updatedAt: '', updatedBy: null,
 })
 
 export default function KnowledgeAdminPage() {
@@ -114,7 +115,7 @@ export default function KnowledgeAdminPage() {
                 <TableHead>
                   <TableRow>
                     <TableCell>Заголовок</TableCell><TableCell>Признаки</TableCell>
-                    <TableCell align="center">Видео/ссылки</TableCell><TableCell align="right">Действия</TableCell>
+                    <TableCell align="center">Картинки/видео/ссылки</TableCell><TableCell align="right">Действия</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -126,7 +127,7 @@ export default function KnowledgeAdminPage() {
                         {a.forSelfService && <Chip size="small" label="самопомощь" color="success" variant="outlined" sx={{ mr: 0.5 }} />}
                         {a.forMasters && <Chip size="small" label="мастерам" color="warning" variant="outlined" />}
                       </TableCell>
-                      <TableCell align="center">{a.videos.length}/{a.links.length}</TableCell>
+                      <TableCell align="center">{(a.images || []).length}/{a.videos.length}/{a.links.length}</TableCell>
                       <TableCell align="right">
                         <IconButton size="small" onClick={() => setEditing(structuredClone(a))}><EditIcon fontSize="small" /></IconButton>
                         <IconButton size="small" onClick={() => remove(a.id)}><DeleteIcon fontSize="small" /></IconButton>
@@ -179,6 +180,30 @@ function ArticleDialog({ article, onClose, onSaved, onError }: {
   const [bodyLang, setBodyLang] = useState<Lang>('uk')
   const [aiHistory, setAiHistory] = useState<AiHistoryEntry[]>([])
   const [saving, setSaving] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [uploadErr, setUploadErr] = useState('')
+
+  const handleUpload = async (files: FileList | null) => {
+    if (!files || !files.length) return
+    setUploading(true); setUploadErr('')
+    const added: KnowledgeImage[] = []
+    for (const f of Array.from(files)) {
+      if (!f.type.startsWith('image/')) continue
+      if (f.size > 8 * 1024 * 1024) { setUploadErr('Зображення завелике (макс. 8 МБ).'); continue }
+      const res = await knowledgeService.uploadImage(a.id, f)
+      if (res) added.push(res)
+      else setUploadErr('Не вдалося завантажити (перевірте права адміністратора / підключення).')
+    }
+    if (added.length) setA((prev) => ({ ...prev, images: [...(prev.images || []), ...added] }))
+    setUploading(false)
+  }
+  const removeImage = (i: number) => {
+    const img = (a.images || [])[i]
+    setA((prev) => ({ ...prev, images: (prev.images || []).filter((_, idx) => idx !== i) }))
+    if (img?.path) knowledgeService.deleteImage(img.path) // best-effort очистка Storage
+  }
+  const setCaption = (i: number, caption: string) =>
+    setA((prev) => ({ ...prev, images: (prev.images || []).map((im, idx) => (idx === i ? { ...im, caption } : im)) }))
 
   const setBody = (v: string) => setA((prev) => ({ ...prev, body: { ...prev.body, [bodyLang]: v } }))
   const setVideo = (i: number, patch: Partial<KnowledgeVideo>) =>
@@ -230,6 +255,33 @@ function ArticleDialog({ article, onClose, onSaved, onError }: {
           <TextField label="Связанные коды работ (через запятую)" size="small" value={a.relatedWorkCodes.join(', ')}
             onChange={(e) => setA({ ...a, relatedWorkCodes: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
             helperText="Коды работ прайса, к которым относится статья (напр. W-AUTO)" />
+
+          <Divider textAlign="left"><Typography variant="caption">Иллюстрации</Typography></Divider>
+          {uploadErr && <Alert severity="error" sx={{ py: 0 }}>{uploadErr}</Alert>}
+          {(a.images || []).length > 0 && (
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5 }}>
+              {(a.images || []).map((img, i) => (
+                <Box key={i} sx={{ width: 180, border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1 }}>
+                  <Box sx={{ position: 'relative' }}>
+                    <Box component="img" src={img.url} alt={img.caption || ''}
+                      sx={{ width: '100%', height: 110, objectFit: 'cover', borderRadius: 1, display: 'block' }} />
+                    <IconButton size="small" onClick={() => removeImage(i)}
+                      sx={{ position: 'absolute', top: 2, right: 2, bgcolor: 'rgba(255,255,255,0.85)', '&:hover': { bgcolor: 'white' } }}>
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </Box>
+                  <TextField size="small" fullWidth variant="standard" placeholder="Підпис…" value={img.caption || ''}
+                    onChange={(e) => setCaption(i, e.target.value)} sx={{ mt: 0.5 }} />
+                </Box>
+              ))}
+            </Box>
+          )}
+          <Button component="label" size="small" disabled={uploading}
+            startIcon={uploading ? <CircularProgress size={16} /> : <UploadIcon />}>
+            {uploading ? 'Завантаження…' : 'Додати зображення'}
+            <input type="file" hidden accept="image/*" multiple
+              onChange={(e) => { handleUpload(e.target.files); e.target.value = '' }} />
+          </Button>
 
           <Divider textAlign="left"><Typography variant="caption">Видео</Typography></Divider>
           {a.videos.map((v, i) => (

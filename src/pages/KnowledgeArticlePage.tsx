@@ -41,6 +41,22 @@ export default function KnowledgeArticlePage() {
             <Typography variant="h5" sx={{ fontWeight: 700, mb: 2, textWrap: 'balance' }}>{tName(article.title, 'uk')}</Typography>
             <Typography variant="body1" sx={{ whiteSpace: 'pre-line', lineHeight: 1.7 }}>{tName(article.body, 'uk')}</Typography>
 
+            {article.images && article.images.length > 0 && (
+              <Stack spacing={2} sx={{ mt: 3 }}>
+                {article.images.map((img, i) => (
+                  <Box key={i}>
+                    <Box component="img" src={img.url} alt={img.caption || ''}
+                      sx={{ width: '100%', borderRadius: 2, display: 'block', border: '1px solid', borderColor: 'divider' }} />
+                    {img.caption && (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, textAlign: 'center' }}>
+                        {img.caption}
+                      </Typography>
+                    )}
+                  </Box>
+                ))}
+              </Stack>
+            )}
+
             {article.videos.length > 0 && (
               <>
                 <Divider sx={{ my: 2.5 }} />

@@ -12,6 +12,13 @@ export interface KnowledgeVideo {
   url: string
 }
 
+// Иллюстрация статьи: URL загруженного в Firebase Storage файла + путь (для удаления) + подпись.
+export interface KnowledgeImage {
+  url: string // download URL из Firebase Storage
+  path: string // путь в Storage (knowledge/{articleId}/…) — нужен для удаления
+  caption?: string // подпись под картинкой (украинский)
+}
+
 export interface KnowledgeArticle {
   id: string
   title: LocalizedText
@@ -21,6 +28,7 @@ export interface KnowledgeArticle {
   forMasters?: boolean // статья ТОЛЬКО для мастеров сервиса — клиентам не показывать и не предлагать ИИ
   tags: string[]
   relatedWorkCodes: string[] // связь с работами прайса (какой проблеме соответствует)
+  images?: KnowledgeImage[] // иллюстрации (схемы, экраны меню, фото) — загружаются в Storage
   videos: KnowledgeVideo[] // ссылки на видео
   links: string[] // ссылки на статьи
   active: boolean

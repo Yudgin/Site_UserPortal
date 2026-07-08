@@ -466,6 +466,16 @@
   (нужен серверный эндпоинт отправки + проверка ID-токена админа через firebase-admin);
   точный расчёт 48 рабочих часов для срока эскалации (сейчас приблизительно +48ч).
 
+- Изображения в базе знаний: у статьи появилось поле `images` (`KnowledgeImage {url, path, caption?}`),
+  загрузка через Firebase Storage (`knowledgeService.uploadImage/deleteImage`, `src/api/firebase.ts`
+  экспортирует `storage`). В редакторе (`KnowledgeAdminPage`) — секция «Иллюстрации» (загрузка,
+  превью, подписи, удаление); на публичной странице (`KnowledgeArticlePage`) картинки рендерятся под
+  текстом с подписями. Правила `storage.rules` (публичное чтение `knowledge/**`, запись — только админ,
+  ≤8 МБ, только image/*) + `firebase.json` (секция storage). ВНИМАНИЕ: Firebase Storage на проекте
+  ещё НЕ активирован (bucket `droidmaps-runferry.firebasestorage.app` не создан) — нужно один раз нажать
+  «Get Started» в консоли Storage, после чего задеплоить `storage.rules` (`firebase deploy --only storage`);
+  до этого загрузка изображений работать не будет.
+
 **Периодический адверсариальный аудит (последний прогон):** 4 измерения × верификация на опровержение,
 подтверждено 5 находок, исправлено:
 - [HIGH→MEDIUM, исправлено] `estimate-chat`/`knowledge-chat` слали Anthropic два подряд `assistant`

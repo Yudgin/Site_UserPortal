@@ -1,16 +1,20 @@
-import { db, auth } from './firebase'
+import { db, auth, storage } from './firebase'
 import { doc, getDoc, setDoc, collection, getDocs, deleteDoc, query, limit } from 'firebase/firestore'
-import type { KnowledgeArticle } from '@/types/knowledge'
+import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
+import type { KnowledgeArticle, KnowledgeImage } from '@/types/knowledge'
 
 // Единая база знаний: статьи для консультаций и самопомощи.
 const COLLECTION = 'knowledgeArticles'
 
-const generateId = (): string => {
+// Генератор id новой статьи. Экспортируется, чтобы новая статья получала id ДО
+// первого сохранения — тогда изображения можно грузить в стабильный путь knowledge/{id}.
+export const newKnowledgeId = (): string => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
   let s = ''
   for (let i = 0; i < 8; i++) s += chars.charAt(Math.floor(Math.random() * chars.length))
   return s
 }
+const generateId = newKnowledgeId
 
 export const knowledgeService = {
   // Сохранить статью (создать или обновить). Доступно администратору (см. firestore.rules).
@@ -63,6 +67,35 @@ export const knowledgeService = {
       return true
     } catch (error) {
       console.error('Error deleting knowledge article:', error)
+      return false
+    }
+  },
+
+  // Загрузить изображение статьи в Firebase Storage (knowledge/{articleId}/…).
+  // Возвращает {url, path}; запись разрешена только администратору (см. storage.rules).
+  uploadImage: async (articleId: string, file: File): Promise<KnowledgeImage | null> => {
+    if (!storage || !auth?.currentUser) return null
+    try {
+      const safeName = file.name.replace(/[^\w.\-]+/g, '_')
+      const path = `knowledge/${articleId}/${Date.now()}-${safeName}`
+      const r = ref(storage, path)
+      await uploadBytes(r, file, { contentType: file.type })
+      const url = await getDownloadURL(r)
+      return { url, path }
+    } catch (error) {
+      console.error('Error uploading knowledge image:', error)
+      return null
+    }
+  },
+
+  // Удалить изображение из Storage (best-effort; ошибку не эскалируем)
+  deleteImage: async (path: string): Promise<boolean> => {
+    if (!storage) return false
+    try {
+      await deleteObject(ref(storage, path))
+      return true
+    } catch (error) {
+      console.error('Error deleting knowledge image:', error)
       return false
     }
   },

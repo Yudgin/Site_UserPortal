@@ -11,6 +11,7 @@ import {
   User as FirebaseUser,
 } from 'firebase/auth'
 import { initializeFirestore, getFirestore, Firestore } from 'firebase/firestore'
+import { getStorage, FirebaseStorage } from 'firebase/storage'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -36,6 +37,8 @@ const makeDb = (a: NonNullable<typeof app>): Firestore => {
   }
 }
 export const db: Firestore | null = app ? makeDb(app) : null
+// Firebase Storage — для загрузки изображений базы знаний (иллюстрации инструкций)
+export const storage: FirebaseStorage | null = app ? getStorage(app) : null
 
 const googleProvider = new GoogleAuthProvider()
 const facebookProvider = new FacebookAuthProvider()
