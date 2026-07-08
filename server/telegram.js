@@ -24,6 +24,54 @@ export function registerTelegramBot(app, deps) {
     }
   }
 
+  // Обработка сообщения из БИЗНЕС-аккаунта (Telegram Business / Secretary Mode):
+  // клиент пишет на личный аккаунт владельца, бот читает и отвечає від його імені.
+  // Ключевой нюанс: business_message приходит и на сообщения САМОГО владельца — их не
+  // трогаем, а лишь ставим бота на паузу для цього чату (людина перехопила діалог).
+  // В приватному бізнес-чаті chat.id == id клієнта, тож from.id === chat.id ⇒ це клієнт.
+  const handleBusinessMessage = async (bm) => {
+    if (!adminDb) return
+    const chat = bm.chat
+    if (!chat || chat.type !== 'private' || !bm.from) return
+    const text = (bm.text || '').trim()
+    if (!text) return
+    const connId = bm.business_connection_id
+    const chatId = chat.id
+    const channelUserId = String(chatId)
+    const isFromClient = bm.from.id === chatId
+
+    let session =
+      (await core.findSession('telegram', channelUserId)) ||
+      core.newSession('telegram', channelUserId, [chat.first_name, chat.last_name].filter(Boolean).join(' ') || null)
+    session.businessConnectionId = connId
+
+    // Ручное сообщение владельца/менеджера → фиксируем и ставим бота на паузу в этом чате.
+    if (!isFromClient) {
+      session.messages.push({ id: genMsgId(), role: 'manager', text, at: nowIso() })
+      session.botPaused = true
+      await core.saveSession(session)
+      return
+    }
+
+    // Сообщение клиента.
+    session.messages.push({ id: genMsgId(), role: 'client', text, at: nowIso() })
+    if (session.botPaused) {
+      // Диалог ведёт человек — сохраняем сообщение (видно в инбоксе), но ИИ не отвечает.
+      await core.saveSession(session)
+      return
+    }
+    const { reply, needsManager, intent, usage } = await core.aiReply(session)
+    session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
+    if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)
+    session.topic = intent
+    if (needsManager) core.applyEscalation(session, intent)
+    await core.saveSession(session)
+    await send(chatId, reply, { business_connection_id: connId })
+    if (needsManager) {
+      await send(chatId, 'Ваш запит передано менеджеру — ми зв’яжемося з вами найближчим часом. 🙌', { business_connection_id: connId })
+    }
+  }
+
   app.post('/api/telegram/webhook', async (req, res) => {
     // Отвечаем 200 сразу, чтобы Telegram не ретраил доставку.
     res.sendStatus(200)
@@ -34,6 +82,19 @@ export function registerTelegramBot(app, deps) {
       }
       if (!adminDb || !TOKEN) return
       const update = req.body || {}
+
+      // Business (Secretary Mode): статус подключения бота к бизнес-аккаунту.
+      if (update.business_connection) {
+        const bc = update.business_connection
+        console.log('tg business_connection:', bc.id, 'enabled=', bc.is_enabled, 'can_reply=', bc.can_reply)
+        return
+      }
+      // Business: сообщение в чате личного аккаунта владельца.
+      if (update.business_message) {
+        await handleBusinessMessage(update.business_message)
+        return
+      }
+
       const m = update.message
       if (!m || !m.chat) return
       const chatId = m.chat.id
@@ -105,7 +166,11 @@ export function registerTelegramBot(app, deps) {
     const url = req.query.url
     if (!url) return res.status(400).json({ error: 'pass ?url=https://<домен>/api/telegram/webhook' })
     try {
-      const r = await axios.post(api('setWebhook'), { url, secret_token: SECRET || undefined, allowed_updates: ['message'] })
+      const r = await axios.post(api('setWebhook'), {
+        url,
+        secret_token: SECRET || undefined,
+        allowed_updates: ['message', 'business_connection', 'business_message'],
+      })
       res.json(r.data)
     } catch (e) {
       res.status(500).json({ error: (e.response && e.response.data) || e.message })

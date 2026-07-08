@@ -505,6 +505,16 @@
   ботов расширены. Проверено вживую: «купити Optima» → topic=sales + менеджер по продажам; «не працює мотор» →
   topic=service + самопомощь.
 
+- Telegram Business (Secretary Mode): бот подключается к личному аккаунту владельца и отвечает за него.
+  `telegram.js` обрабатывает `business_connection` и `business_message` (webhook `allowed_updates` расширены).
+  Клиент пишет на личный аккаунт → бот-консьерж отвечает от имени владельца через `business_connection_id`.
+  Умный перехват: сообщение владельца вручную (в приватном бизнес-чате `from.id !== chat.id`) фиксируется
+  как `manager` и ставит `botPaused=true` — дальше ИИ молчит в этом чате (диалог ведёт человек), сообщения
+  всё равно сохраняются в общий инбокс. Сессии: channel='telegram' + `businessConnectionId`. Проверено
+  вживую (client→ai→manager→client, пауза срабатывает). Активация владельцем: BotFather → Secretary Mode ON,
+  Telegram Premium, Settings → Business → Chatbots → @RunferryAssistance_Bot. У Viber аналога нет — там
+  автоответчик-редирект на бота.
+
 **Периодический адверсариальный аудит (последний прогон):** 4 измерения × верификация на опровержение,
 подтверждено 5 находок, исправлено:
 - [HIGH→MEDIUM, исправлено] `estimate-chat`/`knowledge-chat` слали Anthropic два подряд `assistant`
