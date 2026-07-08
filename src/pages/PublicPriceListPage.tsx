@@ -4,6 +4,7 @@ import {
   Box, Container, Paper, Typography, Table, TableBody, TableCell, TableRow, TableHead,
   TableContainer, Collapse, Button, Chip, Divider, IconButton, Stack, Alert, CircularProgress,
 } from '@mui/material'
+import { alpha, darken, type SxProps, type Theme } from '@mui/material/styles'
 import {
   ExpandMore as ExpandIcon, Calculate as RateIcon, LocalOffer as KitIcon,
   DirectionsBoat as BoatIcon, ArrowForward as ArrowIcon,
@@ -17,6 +18,29 @@ import type { RateLine } from '@/utils/pricing'
 
 // Артикул-константа: статья «как избежать наценки высокого сезона»
 const SURCHARGE_ARTICLE_ID = 'season-surcharge-avoidance'
+
+// Бейдж-маркер сезонного признака набора/работы. Раньше был outlined-чип цвета
+// secondary/success: оранжевый/зелёный текст на белом фоне давал контраст ~3:1 и
+// «сливался». Здесь — тёмный текст палитры на мягкой заливке того же цвета (контраст ≥4.5:1).
+function StatusChip({ label, tone, sx }: { label: string; tone: 'benefit' | 'critical'; sx?: SxProps<Theme> }) {
+  const color = tone === 'benefit' ? 'secondary' : 'success'
+  return (
+    <Chip
+      size="small"
+      label={label}
+      sx={[
+        (t) => ({
+          fontWeight: 600,
+          color: darken(t.palette[color].main, 0.4), // тёмный текст → контраст ≥4.5:1 на мягкой заливке
+          bgcolor: alpha(t.palette[color].main, 0.16),
+          border: `1px solid ${alpha(t.palette[color].main, 0.5)}`,
+          '& .MuiChip-label': { px: 1 },
+        }),
+        ...(Array.isArray(sx) ? sx : sx ? [sx] : []),
+      ]}
+    />
+  )
+}
 
 export default function PublicPriceListPage() {
   const navigate = useNavigate()
@@ -120,8 +144,8 @@ export default function PublicPriceListPage() {
                         <ExpandIcon sx={{ transform: isOpen ? 'rotate(180deg)' : 'none', transition: '.2s' }} />
                       </IconButton>
                       <Typography sx={{ fontWeight: 600 }}>{tName(k.name, 'uk')}</Typography>
-                      {k.seasonMode === 'benefit' && <Chip size="small" color="secondary" variant="outlined" label="пільговий" />}
-                      {k.seasonMode === 'critical' && <Chip size="small" color="success" variant="outlined" label="критичний" />}
+                      {k.seasonMode === 'benefit' && <StatusChip tone="benefit" label="пільговий" />}
+                      {k.seasonMode === 'critical' && <StatusChip tone="critical" label="критичний" />}
                     </Stack>
                     {hasSeasons ? (
                       <Box sx={{ textAlign: 'right', flexShrink: 0, lineHeight: 1.3 }}>
@@ -178,7 +202,7 @@ export default function PublicPriceListPage() {
                           <TableCell>
                             {tName(w.name, 'uk')}
                             {w.criticalNoSurcharge && (
-                              <Chip size="small" color="success" variant="outlined" label="без націнки сезону" sx={{ ml: 1 }} />
+                              <StatusChip tone="critical" label="без націнки сезону" sx={{ ml: 1 }} />
                             )}
                           </TableCell>
                           {hasSeasons && (
