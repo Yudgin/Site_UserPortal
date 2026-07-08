@@ -465,6 +465,18 @@
   НЕ сделано (следующий шаг): пуш ответа менеджера из инбокса обратно в Telegram
   (нужен серверный эндпоинт отправки + проверка ID-токена админа через firebase-admin);
   точный расчёт 48 рабочих часов для срока эскалации (сейчас приблизительно +48ч).
+- Общее ядро агрегатора (`server/messengerCore.js`, `createMessengerCore`): прайс-контекст,
+  сессии, профиль по телефону, ИИ-ответ (CHAT_SYSTEM), эскалация — переиспользуется всеми каналами.
+  `telegram.js` отрефакторен на ядро (поведение прежнее, перепроверено).
+- Viber-бот (`server/viber.js`, `registerViberBot`) — второй канал: webhook `/api/viber/webhook`
+  с проверкой подписи `X-Viber-Content-Signature` (HMAC-SHA256 сырого тела токеном; в index.js
+  добавлен захват `req.rawBody`), `conversation_started` → приветствие в теле ответа, событие
+  `message` → сессия `chatSessions` (channel='viber', channelUserId=sender.id) + ответ ИИ, эскалация
+  в общий инбокс. Отправка — `chatapi.viber.com/pa/send_message` с `X-Viber-Auth-Token`. Настройка:
+  `GET /api/viber/setup?url=…&secret=…`. Env: `VIBER_BOT_TOKEN`, `VIBER_WEBHOOK_SECRET`. Проверено на
+  симулированных событиях (верная подпись→200+сессия+ИИ; неверная→403). ВАЖНО: Viber НЕ передаёт
+  телефон клиента → привязка к профилю по телефону недоступна (идентификация по sender.id);
+  Viber Chatbot (Bot API) токен создаётся через партнёра/панель Viber (платно, см. план).
 
 - Изображения в базе знаний: у статьи появилось поле `images` (`KnowledgeImage {url, path, caption?}`),
   загрузка через Firebase Storage (`knowledgeService.uploadImage/deleteImage`, `src/api/firebase.ts`

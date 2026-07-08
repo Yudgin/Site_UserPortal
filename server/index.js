@@ -9,6 +9,7 @@ import { getFirestore } from 'firebase-admin/firestore'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { registerTelegramBot } from './telegram.js'
+import { registerViberBot } from './viber.js'
 
 dotenv.config()
 
@@ -39,7 +40,8 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }))
-app.use(express.json())
+// rawBody сохраняем для проверки подписи Viber-вебхука (HMAC-SHA256 сырого тела).
+app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf } }))
 
 // TurboSMS API configuration
 const TURBOSMS_API_URL = 'https://api.turbosms.ua'
@@ -943,7 +945,9 @@ app.post('/api/ai/build-complaint', async (req, res) => {
 // ============ Telegram-бот (первый канал агрегатора мессенджеров) ============
 // Регистрируем ПОСЛЕ определения AI-констант (anthropic, AI_MODEL, CHAT_SYSTEM,
 // mergeConsecutiveMessages, buildUsage) — бот переиспользует ту же логику ИИ.
-registerTelegramBot(app, { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM, mergeConsecutiveMessages, buildUsage })
+const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM, mergeConsecutiveMessages, buildUsage }
+registerTelegramBot(app, messengerDeps)
+registerViberBot(app, messengerDeps)
 
 // JSON Server for mock API
 const router = jsonServer.router(path.join(__dirname, 'db.json'))
