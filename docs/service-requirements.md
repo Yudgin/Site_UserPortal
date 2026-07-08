@@ -471,10 +471,11 @@
   экспортирует `storage`). В редакторе (`KnowledgeAdminPage`) — секция «Иллюстрации» (загрузка,
   превью, подписи, удаление); на публичной странице (`KnowledgeArticlePage`) картинки рендерятся под
   текстом с подписями. Правила `storage.rules` (публичное чтение `knowledge/**`, запись — только админ,
-  ≤8 МБ, только image/*) + `firebase.json` (секция storage). ВНИМАНИЕ: Firebase Storage на проекте
-  ещё НЕ активирован (bucket `droidmaps-runferry.firebasestorage.app` не создан) — нужно один раз нажать
-  «Get Started» в консоли Storage, после чего задеплоить `storage.rules` (`firebase deploy --only storage`);
-  до этого загрузка изображений работать не будет.
+  ≤8 МБ, только image/*) + `firebase.json` (секция storage). Firebase Storage АКТИВИРОВАН: дефолтный
+  bucket `droidmaps-runferry.firebasestorage.app` пересоздан в **europe-west3 (Франкфурт, STANDARD)**
+  через firebasestorage API (deleteDefaultBucket + defaultBucket.create с immutable location) —
+  первоначально консоль создала его в US-CENTRAL1, локация необратима, поэтому пересоздали пустым в ЕС.
+  `storage.rules` задеплоены; сквозной путь проверен (upload + публичное чтение по Firebase URL → 200 PNG).
 
 **Периодический адверсариальный аудит (последний прогон):** 4 измерения × верификация на опровержение,
 подтверждено 5 находок, исправлено:
