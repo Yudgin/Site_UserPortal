@@ -548,7 +548,7 @@ const CHAT_SYSTEM = [
 
 app.post('/api/ai/estimate-chat', async (req, res) => {
   try {
-    const { messages = [], priceContext = '', corrections = [] } = req.body
+    const { messages = [], priceContext = '', knowledgeContext = '', corrections = [] } = req.body
 
     if (!anthropic) {
       return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
@@ -570,7 +570,10 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
     const corrText = Array.isArray(corrections) && corrections.length
       ? `\n\nВРАХУЙ ЦІ ПРАВИЛА (корекції поведінки від адміністратора):\n${corrections.map((c) => `- ${c}`).join('\n')}`
       : ''
-    const system = CHAT_SYSTEM + corrText + (priceContext ? `\n\nПРАЙС (лише ці позиції можна використовувати для оцінки):\n${priceContext}` : '')
+    const selfHelp = knowledgeContext
+      ? `\n\nСАМОДОПОМОГА (безкоштовні рішення з бази знань). ЯКЩО проблема клієнта збігається з якимось матеріалом — СПЕРШУ доброзичливо запропонуй це безкоштовне рішення (стисло, по кроках), і лише потім платний ремонт:\n${knowledgeContext}`
+      : ''
+    const system = CHAT_SYSTEM + corrText + (priceContext ? `\n\nПРАЙС (лише ці позиції можна використовувати для оцінки):\n${priceContext}` : '') + selfHelp
 
     const message = await anthropic.messages.create({
       model: AI_MODEL,

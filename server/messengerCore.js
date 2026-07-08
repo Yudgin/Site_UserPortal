@@ -85,6 +85,30 @@ export function createMessengerCore(deps) {
     }
   }
 
+  // Компактная выжимка базы знаний (самопомощь/консультации) из knowledgeArticles.
+  // Зеркало buildKnowledgeContext в src/utils/aiContext.ts: статьи «для мастеров» не включаем.
+  const buildKnowledgeContext = async () => {
+    if (!adminDb) return ''
+    try {
+      const snap = await adminDb.collection('knowledgeArticles').limit(300).get()
+      const arts = snap.docs.map((d) => d.data()).filter((a) => a.active && !a.forMasters)
+      if (!arts.length) return ''
+      const lines = []
+      for (const a of arts) {
+        const flags = [a.forConsultation ? 'консультація' : '', a.forSelfService ? 'самодопомога' : ''].filter(Boolean).join('/')
+        lines.push(`### ${(a.title && a.title.uk) || ''} (${flags})`)
+        lines.push((a.body && a.body.uk) || '')
+        if (Array.isArray(a.videos) && a.videos.length) lines.push('Відео: ' + a.videos.map((v) => `${v.title} — ${v.url}`).join('; '))
+        if (Array.isArray(a.links) && a.links.length) lines.push('Посилання: ' + a.links.join('; '))
+        lines.push('')
+      }
+      return lines.join('\n')
+    } catch (e) {
+      console.error('core buildKnowledgeContext:', e.message)
+      return ''
+    }
+  }
+
   const newSession = (channel, channelUserId, name) => ({
     id: genSessionId(channel.slice(0, 3)),
     createdAt: nowIso(),
@@ -154,8 +178,14 @@ export function createMessengerCore(deps) {
     if (!history.length || history[0].role !== 'user') {
       return { reply: 'Опишіть, будь ласка, вашу проблему з корабликом.', needsManager: false }
     }
-    const priceContext = await buildPriceContext()
-    const system = CHAT_SYSTEM + (priceContext ? `\n\nПРАЙС (лише ці позиції можна використовувати для оцінки):\n${priceContext}` : '')
+    const [priceContext, knowledgeContext] = await Promise.all([buildPriceContext(), buildKnowledgeContext()])
+    const selfHelp = knowledgeContext
+      ? `\n\nСАМОДОПОМОГА (безкоштовні рішення з бази знань). ЯКЩО проблема клієнта збігається з якимось матеріалом — СПЕРШУ доброзичливо запропонуй це безкоштовне рішення (стисло, по кроках), і лише потім платний ремонт:\n${knowledgeContext}`
+      : ''
+    const system =
+      CHAT_SYSTEM +
+      (priceContext ? `\n\nПРАЙС (лише ці позиції можна використовувати для оцінки):\n${priceContext}` : '') +
+      selfHelp
     try {
       const msg = await anthropic.messages.create({
         model: AI_MODEL,

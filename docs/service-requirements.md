@@ -489,6 +489,13 @@
   первоначально консоль создала его в US-CENTRAL1, локация необратима, поэтому пересоздали пустым в ЕС.
   `storage.rules` задеплоены; сквозной путь проверен (upload + публичное чтение по Firebase URL → 200 PNG).
 
+- Self-help база знаний в оценке: `estimate-chat` теперь принимает `knowledgeContext` и инжектит его
+  как «САМОДОПОМОГА (безкоштовні рішення) — спершу запропонуй це, потім платний ремонт». `ClientChatPage`
+  прокидывает `knowledgeCtx` в estimate-вызов (`ai.ts` EstimateChatParams). В ботах (`messengerCore.aiReply`)
+  добавлен серверный `buildKnowledgeContext` (чтение `knowledgeArticles` через adminDb, без forMasters) —
+  Telegram/Viber тоже сначала предлагают бесплатную самопомощь. Проверено на «cell error»: и веб-оценка,
+  и Telegram-бот выдают шаги из статьи про зарядку (баланс-кабель, R=S, «не заряджати») перед сервисом.
+
 **Периодический адверсариальный аудит (последний прогон):** 4 измерения × верификация на опровержение,
 подтверждено 5 находок, исправлено:
 - [HIGH→MEDIUM, исправлено] `estimate-chat`/`knowledge-chat` слали Anthropic два подряд `assistant`

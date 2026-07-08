@@ -142,7 +142,7 @@ export default function ClientChatPage() {
     const emptyEstimate = { lines: [] as { label: string; price: number }[], total: 0 }
     const fail = { reply: 'Не вдалося отримати відповідь. Спробуйте ще раз.', needsManager: false, usage: undefined as AiUsage | undefined, offeredSelfRepair: false, warranty: 'unknown' as const, parts: [] as { name: string; qty: number }[], estimate: emptyEstimate }
     if (mode === 'estimate') {
-      const res = await aiApi.estimateChat({ messages: history, priceContext: priceCtx.current, corrections: corrections.current.estimate })
+      const res = await aiApi.estimateChat({ messages: history, priceContext: priceCtx.current, knowledgeContext: knowledgeCtx.current, corrections: corrections.current.estimate })
       if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: res.data.offeredSelfRepair, warranty: res.data.warranty, parts: res.data.parts || [], estimate: res.data.estimate || emptyEstimate }
       return { ...fail, reply: res.error?.message || fail.reply }
     }

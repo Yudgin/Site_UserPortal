@@ -42,6 +42,7 @@ export interface ChatMsgInput {
 export interface EstimateChatParams {
   messages: ChatMsgInput[]
   priceContext?: string // компактный прайс для контекста оценки
+  knowledgeContext?: string // выжимка базы знаний (самопомощь — предлагать бесплатное решение первым)
   corrections?: string[] // активные правки поведения ИИ (scope estimate/all)
 }
 
