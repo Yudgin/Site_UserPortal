@@ -265,6 +265,17 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
             токенов: {s.aiUsage.inputTokens + s.aiUsage.outputTokens}
           </Typography>
         )}
+        {s.estimate && s.estimate.lines.length > 0 && (
+          <Alert severity="success" icon={false} sx={{ mb: 2 }}>
+            <b>Предварительная оценка ИИ</b> ({new Date(s.estimate.at).toLocaleString('ru-RU')}):
+            <Box component="ul" sx={{ m: 0.5, pl: 2.5 }}>
+              {s.estimate.lines.map((l, i) => (
+                <li key={i}>{l.label} — <b>{l.price.toLocaleString('uk-UA')} грн</b></li>
+              ))}
+            </Box>
+            Итого: <b>{s.estimate.total.toLocaleString('uk-UA')} грн</b>
+          </Alert>
+        )}
         {s.authorization && (
           <Alert severity="info" sx={{ mb: 2 }}>
             <b>Согласование клиента:</b>

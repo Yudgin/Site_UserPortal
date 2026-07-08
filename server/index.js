@@ -512,6 +512,7 @@ const CHAT_SYSTEM = [
   'М’яко зазнач, що це орієнтовна автоматична оцінка, яка може бути неточною — ми наповнюємо базу знань і працюємо над її коректністю.',
   'ПОЛЯ ВІДПОВІДІ: offeredSelfRepair=true ЛИШЕ якщо ти реально запропонував клієнту виконати ремонт САМОСТІЙНО із заміною деталі (тобто потрібні комплектуючі); якщо йдеться лише про налаштування без деталей або про ремонт у нас — offeredSelfRepair=false. warranty: постав yes/no/unknown за контекстом розмови (опис кораблика, слова клієнта).',
   'ПОЛЕ parts: якщо offeredSelfRepair=true — заповни список комплектуючих, потрібних для самостійного ремонту (реальні назви деталей/матеріалів із прайсу, з кількістю). Якщо offeredSelfRepair=false — залиш порожній масив [].',
+  'ПОЛЕ estimate: якщо ти назвав клієнту конкретні ціни — продублюй їх структуровано: lines (позиція + ціна за наведеною розбивкою) і total (підсумок у грн). Якщо конкретної суми не називав — lines=[] і total=0.',
 ].join('\n')
 
 app.post('/api/ai/estimate-chat', async (req, res) => {
@@ -567,8 +568,29 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
                   required: ['name', 'qty'],
                 },
               },
+              estimate: {
+                type: 'object',
+                additionalProperties: false,
+                description: 'Структурована попередня оцінка, якщо названо конкретні ціни (інакше lines=[] і total=0)',
+                properties: {
+                  lines: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        label: { type: 'string', description: 'Назва позиції/роботи' },
+                        price: { type: 'number', description: 'Ціна позиції, грн' },
+                      },
+                      required: ['label', 'price'],
+                    },
+                  },
+                  total: { type: 'number', description: 'Підсумкова сума, грн' },
+                },
+                required: ['lines', 'total'],
+              },
             },
-            required: ['reply', 'needsManager', 'offeredSelfRepair', 'warranty', 'parts'],
+            required: ['reply', 'needsManager', 'offeredSelfRepair', 'warranty', 'parts', 'estimate'],
           },
         },
       },
@@ -579,7 +601,7 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
     try {
       parsed = JSON.parse(raw)
     } catch {
-      parsed = { reply: raw, needsManager: false, offeredSelfRepair: false, warranty: 'unknown', parts: [] }
+      parsed = { reply: raw, needsManager: false, offeredSelfRepair: false, warranty: 'unknown', parts: [], estimate: { lines: [], total: 0 } }
     }
 
     const parts = Array.isArray(parsed.parts)
@@ -587,6 +609,13 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
           .filter((p) => p && p.name)
           .map((p) => ({ name: String(p.name).trim(), qty: Number(p.qty) > 0 ? Number(p.qty) : 1 }))
       : []
+
+    const estLines = parsed.estimate && Array.isArray(parsed.estimate.lines)
+      ? parsed.estimate.lines
+          .filter((l) => l && l.label)
+          .map((l) => ({ label: String(l.label).trim(), price: Number(l.price) || 0 }))
+      : []
+    const estimate = { lines: estLines, total: Number(parsed.estimate?.total) || 0 }
 
     res.json({
       success: true,
@@ -596,6 +625,7 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
         offeredSelfRepair: !!parsed.offeredSelfRepair,
         warranty: ['yes', 'no', 'unknown'].includes(parsed.warranty) ? parsed.warranty : 'unknown',
         parts,
+        estimate,
         usage: buildUsage(message.usage),
       },
     })
@@ -802,6 +832,78 @@ app.post('/api/ai/build-pricing', async (req, res) => {
   } catch (error) {
     console.error('AI build-pricing error:', error?.message || error)
     res.status(500).json({ success: false, error: { code: 'AI_FAILED', message: 'Не вдалося сформувати послугу' } })
+  }
+})
+
+// ============ AI: шаблон жалобы из описания выполненного ремонта ============
+const BUILD_COMPLAINT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    symptom: { type: 'string', description: 'Як клієнт описує проблему (симптом), українською' },
+    keywords: { type: 'array', items: { type: 'string' }, description: 'Ключові слова для співставлення опису клієнта з шаблоном' },
+    diagnosticWorkCodes: { type: 'array', items: { type: 'string' }, description: 'Коди робіт діагностики (потрібні в будь-якому разі) — ЛИШЕ з наданого каталогу' },
+    variants: {
+      type: 'array',
+      description: 'Варіанти ремонту (кращий/ймовірний/гірший)',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          label: { type: 'string', description: 'Що робимо, українською' },
+          severity: { type: 'string', enum: ['best', 'likely', 'worst'] },
+          workCodes: { type: 'array', items: { type: 'string' }, description: 'Коди робіт цього варіанта — ЛИШЕ з наданого каталогу' },
+        },
+        required: ['label', 'severity', 'workCodes'],
+      },
+    },
+  },
+  required: ['symptom', 'keywords', 'diagnosticWorkCodes', 'variants'],
+}
+
+app.post('/api/ai/build-complaint', async (req, res) => {
+  try {
+    const { description = '', catalogContext = '' } = req.body
+    if (!anthropic) {
+      return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
+    }
+    if (!String(description).trim()) {
+      return res.status(400).json({ success: false, error: { code: 'MISSING_DESCRIPTION', message: 'Опишіть ремонт' } })
+    }
+
+    const system = [
+      'Ти — помічник сервісного центру RunFerry (прикормочні рибальські кораблики).',
+      'На основі опису ВИКОНАНОГО ремонту сформуй шаблон скарги: симптом (як це описав би клієнт), ключові слова, роботи діагностики (потрібні завжди) та варіанти ремонту (кращий/ймовірний/гірший випадок).',
+      'ВАЖЛИВО: у diagnosticWorkCodes та workCodes використовуй ЛИШЕ точні коди робіт із наданого каталогу. Якщо потрібної роботи в каталозі немає — не вигадуй код, а пропусти її.',
+      'Усі тексти — українською. Повертай лише структуру за схемою.',
+    ].join('\n')
+
+    const userContent = [
+      catalogContext ? `Каталог робіт (код — назва):\n${catalogContext}\n` : '',
+      `Опис виконаного ремонту:\n${description}`,
+    ].filter(Boolean).join('\n')
+
+    const message = await anthropic.messages.create({
+      model: AI_MODEL,
+      max_tokens: 4000,
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high', format: { type: 'json_schema', schema: BUILD_COMPLAINT_SCHEMA } },
+      system,
+      messages: [{ role: 'user', content: userContent }],
+    })
+
+    const raw = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch (e) {
+      return res.status(502).json({ success: false, error: { code: 'AI_PARSE_FAILED', message: 'ІІ повернув некоректну структуру' } })
+    }
+
+    res.json({ success: true, data: { ...parsed, usage: buildUsage(message.usage) } })
+  } catch (error) {
+    console.error('AI build-complaint error:', error?.message || error)
+    res.status(500).json({ success: false, error: { code: 'AI_FAILED', message: 'Не вдалося сформувати шаблон' } })
   }
 })
 

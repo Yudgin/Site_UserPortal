@@ -21,7 +21,15 @@ export interface PriceListDoc {
 
 const PRICE_DOC = 'current'
 const PRICE_COLLECTION = 'priceList'
+const PRICE_ARCHIVE_COLLECTION = 'priceArchive'
 const ESTIMATES_COLLECTION = 'priceEstimates'
+
+// Запись архива цен: снимок предыдущей версии каталога, сделанный перед перезаписью.
+export interface PriceArchiveEntry extends PriceListDoc {
+  archiveId: string
+  archivedAt: string // когда версия была вытеснена новой
+  supersededBy: string | null // кто сохранил новую версию поверх
+}
 
 // Собрать документ каталога из стартового сида
 export const seedPriceListDoc = (): PriceListDoc => ({
@@ -55,6 +63,23 @@ export const pricingService = {
       return false
     }
     try {
+      // Архив: перед перезаписью снимаем снимок текущей версии (история цен).
+      // Ошибка архивирования не должна срывать основное сохранение — изолируем.
+      try {
+        const prev = await getDoc(doc(db, PRICE_COLLECTION, PRICE_DOC))
+        if (prev.exists()) {
+          const archiveId = generateId()
+          const entry: PriceArchiveEntry = {
+            ...(prev.data() as PriceListDoc),
+            archiveId,
+            archivedAt: new Date().toISOString(),
+            supersededBy: auth.currentUser.email,
+          }
+          await setDoc(doc(db, PRICE_ARCHIVE_COLLECTION, archiveId), entry)
+        }
+      } catch (archiveErr) {
+        console.error('Error archiving previous price list:', archiveErr)
+      }
       const payload: PriceListDoc = {
         ...data,
         updatedAt: new Date().toISOString(),
@@ -65,6 +90,19 @@ export const pricingService = {
     } catch (error) {
       console.error('Error saving price list:', error)
       return false
+    }
+  },
+
+  // История версий прайса (архив), новые сверху. Только для администратора (см. rules).
+  listArchive: async (max = 100): Promise<PriceArchiveEntry[]> => {
+    if (!db) return []
+    try {
+      const q = query(collection(db, PRICE_ARCHIVE_COLLECTION), orderBy('archivedAt', 'desc'), limit(max))
+      const snap = await getDocs(q)
+      return snap.docs.map((d) => d.data() as PriceArchiveEntry)
+    } catch (error) {
+      console.error('Error listing price archive:', error)
+      return []
     }
   },
 

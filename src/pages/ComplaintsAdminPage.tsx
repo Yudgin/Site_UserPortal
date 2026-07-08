@@ -8,12 +8,13 @@ import {
 } from '@mui/material'
 import {
   Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Home as HomeIcon,
-  ReportProblem as ComplaintIcon, Save as SaveIcon,
+  ReportProblem as ComplaintIcon, Save as SaveIcon, AutoAwesome as AiIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { complaintTemplateService } from '@/api/complaintTemplateService'
+import { aiApi } from '@/api/endpoints/ai'
 import { tName, formatMoney, buildCatalog, workTurnkeyPrice } from '@/utils/pricing'
 import { BOAT_MODELS } from '@/types/clientBoat'
 import { SEVERITY_LABELS, SEVERITY_ORDER } from '@/types/complaint'
@@ -73,6 +74,7 @@ export default function ComplaintsAdminPage() {
   const [items, setItems] = useState<ComplaintTemplate[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<ComplaintTemplate | null>(null)
+  const [aiOpen, setAiOpen] = useState(false)
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' })
 
   const reload = async () => { setLoading(true); setItems(await complaintTemplateService.listAll()); setLoading(false) }
@@ -114,6 +116,7 @@ export default function ComplaintsAdminPage() {
         </Box>
         <Box sx={{ display: 'flex', gap: 1 }}>
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>Главная</Button>
+          <Button variant="outlined" color="secondary" startIcon={<AiIcon />} onClick={() => setAiOpen(true)}>AI из ремонта</Button>
           <Button variant="contained" startIcon={<AddIcon />} onClick={() => setEditing(blank())}>Добавить шаблон</Button>
         </Box>
       </Box>
@@ -155,6 +158,12 @@ export default function ComplaintsAdminPage() {
           )}
         </Paper>
       </Container>
+
+      {aiOpen && (
+        <AiComplaintDialog works={works}
+          onClose={() => setAiOpen(false)}
+          onGenerated={(draft) => { setAiOpen(false); setEditing(draft); notify('Черновик готов — проверьте и сохраните') }} />
+      )}
 
       {editing && (
         <TemplateDialog template={editing} works={works} variantTotal={variantTotal}
@@ -238,6 +247,61 @@ function TemplateDialog({ template, works, variantTotal, onClose, onSaved, onErr
       <DialogActions>
         <Button onClick={onClose}>Отмена</Button>
         <Button variant="contained" startIcon={saving ? <CircularProgress size={18} /> : <SaveIcon />} onClick={save} disabled={saving || !t.symptom.uk}>Сохранить</Button>
+      </DialogActions>
+    </Dialog>
+  )
+}
+
+// ==== AI-генератор шаблона из описания выполненного ремонта ====
+// Владелец вставляет описание сделанного ремонта → ИИ формирует симптом + диагностику +
+// варианты (используя только коды работ из каталога). Черновик открывается в обычном
+// редакторе шаблона для проверки и сохранения.
+function AiComplaintDialog({ works, onClose, onGenerated }: {
+  works: Work[]; onClose: () => void; onGenerated: (t: ComplaintTemplate) => void
+}) {
+  const [description, setDescription] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const generate = async () => {
+    setLoading(true); setError('')
+    const catalogContext = works.filter((w) => w.active).map((w) => `${w.code} — ${tName(w.name, 'uk')}`).join('\n')
+    const res = await aiApi.buildComplaint({ description: description.trim(), catalogContext })
+    setLoading(false)
+    if (!res.success || !res.data) { setError(res.error?.message || 'Не вдалося сформувати'); return }
+    const valid = (codes: string[]) => (codes || []).filter((c) => works.some((w) => w.code === c))
+    const d = res.data
+    const variants: RepairVariant[] = (d.variants || []).map((v) => ({
+      id: genId('v'), label: { uk: v.label }, severity: v.severity, workCodes: valid(v.workCodes),
+    }))
+    onGenerated({
+      id: '',
+      symptom: { uk: d.symptom || '' },
+      keywords: d.keywords || [],
+      diagnosticWorkCodes: valid(d.diagnosticWorkCodes),
+      variants: variants.length ? variants : [{ id: genId('v'), label: emptyLoc(), severity: 'likely', workCodes: [] }],
+      relatedModels: [], active: true, updatedAt: '', updatedBy: null,
+    })
+  }
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>AI: шаблон из описания ремонта</DialogTitle>
+      <DialogContent dividers>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Опишите выполненный ремонт (что было сломано, что диагностировали, что сделали). ИИ сформирует
+          черновик шаблона: симптом, ключевые слова и варианты ремонта с работами из каталога. Черновик
+          откроется для проверки перед сохранением.
+        </Typography>
+        <TextField fullWidth multiline minRows={5} autoFocus label="Описание ремонта"
+          placeholder="Напр.: Кораблик не плив після намотки водоростей. Розібрали редуктор, замінили зношену шестерню та сальник, змастили, зібрали, протестували на воді."
+          value={description} onChange={(e) => setDescription(e.target.value)} />
+        {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Отмена</Button>
+        <Button variant="contained" startIcon={loading ? <CircularProgress size={18} /> : <AiIcon />}
+          onClick={generate} disabled={loading || !description.trim()}>Сформировать</Button>
       </DialogActions>
     </Dialog>
   )

@@ -8,16 +8,16 @@ import {
 } from '@mui/material'
 import {
   Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Save as SaveIcon,
-  Home as HomeIcon, Calculate as CalcIcon, AutoAwesome as AiIcon,
+  Home as HomeIcon, Calculate as CalcIcon, AutoAwesome as AiIcon, History as HistoryIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
-import { PriceListDoc } from '@/api/pricingService'
+import { pricingService, PriceListDoc, type PriceArchiveEntry } from '@/api/pricingService'
 import { aiApi, BuildPricingResult } from '@/api/endpoints/ai'
 import type { Lang, LocalizedText, Work, Kit, Material, Addon, WorkCategory, SeasonRule, RateComponent, ServiceKind, KitSeasonMode } from '@/types/pricing'
 import { KIT_SEASON_LABELS } from '@/types/pricing'
-import { tName, formatMoney, buildCatalog, workTurnkeyPrice, computeLaborRate } from '@/utils/pricing'
+import { tName, formatMoney, buildCatalog, workTurnkeyPrice, computeLaborRate, resolveLaborRate } from '@/utils/pricing'
 
 const LANGS: { code: Lang; label: string }[] = [
   { code: 'uk', label: 'UA' }, { code: 'ru', label: 'RU' }, { code: 'en', label: 'EN' },
@@ -82,6 +82,7 @@ export default function PriceListAdminPage() {
   const [editAddon, setEditAddon] = useState<Addon | null>(null)
   const [editCategory, setEditCategory] = useState<WorkCategory | null>(null)
   const [aiOpen, setAiOpen] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
 
   useEffect(() => { loadFromServer() }, [loadFromServer])
   useEffect(() => { setDraft(structuredClone(catalog)) }, [catalog])
@@ -209,6 +210,7 @@ export default function PriceListAdminPage() {
         </Box>
         <Box sx={{ display: 'flex', gap: 1 }}>
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>Главная</Button>
+          <Button startIcon={<HistoryIcon />} onClick={() => setArchiveOpen(true)}>История цен</Button>
           <Button variant="outlined" color="secondary" startIcon={<AiIcon />} onClick={() => setAiOpen(true)}>
             AI-конструктор
           </Button>
@@ -512,6 +514,8 @@ export default function PriceListAdminPage() {
           onClose={() => setAiOpen(false)}
           onApply={(res) => { applyAiBuild(res); setAiOpen(false) }} />
       )}
+
+      {archiveOpen && <PriceArchiveDialog onClose={() => setArchiveOpen(false)} />}
 
       <Snackbar open={snackbar.open} autoHideDuration={3000} onClose={() => setSnackbar((s) => ({ ...s, open: false }))}>
         <Alert severity={snackbar.severity}>{snackbar.message}</Alert>
@@ -862,6 +866,54 @@ function CategoryDialog({ category, onClose, onSave }: { category: WorkCategory;
       <DialogActions>
         <Button onClick={onClose}>Отмена</Button>
         <Button variant="contained" onClick={() => onSave(c)} disabled={!c.name.uk}>Сохранить</Button>
+      </DialogActions>
+    </Dialog>
+  )
+}
+
+// ==== Диалог истории цен (архив версий прайса) ====
+function PriceArchiveDialog({ onClose }: { onClose: () => void }) {
+  const [entries, setEntries] = useState<PriceArchiveEntry[] | null>(null)
+
+  useEffect(() => { pricingService.listArchive().then(setEntries) }, [])
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="md" fullWidth>
+      <DialogTitle>История цен (архив версий)</DialogTitle>
+      <DialogContent dividers>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Каждый раз при сохранении прайса предыдущая версия попадает в архив. Здесь видно, когда версия
+          была заменена, кем, и какая была ставка нормо-часа.
+        </Typography>
+        {entries === null ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}><CircularProgress /></Box>
+        ) : entries.length === 0 ? (
+          <Alert severity="info">Архив пуст — версии появятся после следующих сохранений прайса.</Alert>
+        ) : (
+          <TableContainer>
+            <Table size="small">
+              <TableHead><TableRow>
+                <TableCell>Заменена</TableCell><TableCell>Кем заменена</TableCell>
+                <TableCell align="right">Ставка/год</TableCell><TableCell align="right">Работ</TableCell>
+                <TableCell align="right">Наборов</TableCell>
+              </TableRow></TableHead>
+              <TableBody>
+                {entries.map((e) => (
+                  <TableRow key={e.archiveId} hover>
+                    <TableCell>{new Date(e.archivedAt).toLocaleString('ru-RU')}</TableCell>
+                    <TableCell>{e.supersededBy || '—'}</TableCell>
+                    <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>{formatMoney(resolveLaborRate(e.settings))}</TableCell>
+                    <TableCell align="right">{e.works?.length ?? 0}</TableCell>
+                    <TableCell align="right">{e.kits?.length ?? 0}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        )}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Закрыть</Button>
       </DialogActions>
     </Dialog>
   )

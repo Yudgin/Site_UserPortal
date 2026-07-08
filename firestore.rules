@@ -43,6 +43,11 @@ service cloud.firestore {
       allow write: if isPriceAdmin();
     }
 
+    // Архив цен (история версий прайса). Пишется/читается только администратором.
+    match /priceArchive/{snapId} {
+      allow read, list, create, delete: if isPriceAdmin();
+    }
+
     // Сметы — открываются клиентом по прямой ссылке (get по id), листинг и запись —
     // только администратор. get вместо read закрывает утечку всех смет через collection-запрос.
     match /priceEstimates/{estId} {

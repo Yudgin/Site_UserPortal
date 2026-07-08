@@ -39,6 +39,14 @@ export interface ChatAiUsage {
   costUsd: number
 }
 
+// Структурированная предварительная оценка (последняя, что назвал ИИ в диалоге).
+// Хранится на сессии — менеджер видит смету не только текстом переписки.
+export interface PreliminaryEstimate {
+  lines: { label: string; price: number }[]
+  total: number
+  at: string // когда ИИ её сформировал
+}
+
 // Согласование объёма работ клиентом (заполняется в опроснике).
 // Позволяет заранее договориться, что можно делать без дополнительного согласования.
 export interface ServiceAuthorization {
@@ -77,6 +85,7 @@ export interface ChatSession {
   aiUsage?: ChatAiUsage // сумма токенов/стоимости ИИ по сессии
   authorization?: ServiceAuthorization // согласование объёма работ клиентом
   outcome?: ChatOutcome // чем закончилась переписка (для менеджера)
+  estimate?: PreliminaryEstimate // последняя структурированная предварительная оценка от ИИ
 }
 
 // Чем закончилась переписка по сервису

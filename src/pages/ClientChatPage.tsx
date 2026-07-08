@@ -18,6 +18,7 @@ import { knowledgeService } from '@/api/knowledgeService'
 import { behaviorCorrectionService, feedbackService } from '@/api/feedbackService'
 import { complaintTemplateService } from '@/api/complaintTemplateService'
 import { serviceTaskService } from '@/api/serviceTaskService'
+import { clientProfileService } from '@/api/clientProfileService'
 import { aiApi } from '@/api/endpoints/ai'
 import { buildPriceContext, buildKnowledgeContext, buildComplaintContext, activeCorrections } from '@/utils/aiContext'
 import { escalationDueDate } from '@/utils/workdays'
@@ -138,16 +139,17 @@ export default function ClientChatPage() {
 
   // Один вызов ИИ по истории диалога (диспатч по режиму)
   const callAi = async (history: ChatMsgInput[]) => {
-    const fail = { reply: 'Не вдалося отримати відповідь. Спробуйте ще раз.', needsManager: false, usage: undefined as AiUsage | undefined, offeredSelfRepair: false, warranty: 'unknown' as const, parts: [] as { name: string; qty: number }[] }
+    const emptyEstimate = { lines: [] as { label: string; price: number }[], total: 0 }
+    const fail = { reply: 'Не вдалося отримати відповідь. Спробуйте ще раз.', needsManager: false, usage: undefined as AiUsage | undefined, offeredSelfRepair: false, warranty: 'unknown' as const, parts: [] as { name: string; qty: number }[], estimate: emptyEstimate }
     if (mode === 'estimate') {
       const res = await aiApi.estimateChat({ messages: history, priceContext: priceCtx.current, corrections: corrections.current.estimate })
-      if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: res.data.offeredSelfRepair, warranty: res.data.warranty, parts: res.data.parts || [] }
+      if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: res.data.offeredSelfRepair, warranty: res.data.warranty, parts: res.data.parts || [], estimate: res.data.estimate || emptyEstimate }
       return { ...fail, reply: res.error?.message || fail.reply }
     }
     const res = await aiApi.knowledgeChat({
       messages: history, knowledgeContext: knowledgeCtx.current, corrections: corrections.current.consultation,
     })
-    if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: false, warranty: 'unknown' as const, parts: [] as { name: string; qty: number }[] }
+    if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: false, warranty: 'unknown' as const, parts: [] as { name: string; qty: number }[], estimate: emptyEstimate }
     return { ...fail, reply: res.error?.message || fail.reply }
   }
 
@@ -160,7 +162,7 @@ export default function ClientChatPage() {
     const baseMessages = extraClientMsg ? [...preload.messages, extraClientMsg] : preload.messages
     const history: ChatMsgInput[] = baseMessages.filter((m) => !m.internal).map((m) => ({ role: m.role, text: m.text }))
 
-    const { reply, needsManager, usage, offeredSelfRepair, warranty, parts } = await callAi(history)
+    const { reply, needsManager, usage, offeredSelfRepair, warranty, parts, estimate } = await callAi(history)
     setPartsOffer({ show: offeredSelfRepair, warranty, parts })
     const aiMsg: ChatMessage = { id: genMsgId(), role: 'ai', text: reply, at: new Date().toISOString() }
 
@@ -171,6 +173,8 @@ export default function ClientChatPage() {
       ...latest,
       messages: [...latest.messages, ...tail],
       aiUsage: accumulateUsage(latest.aiUsage, usage),
+      // Сохраняем последнюю непустую структурированную оценку (менеджер видит смету отдельно)
+      ...(estimate.lines.length ? { estimate: { lines: estimate.lines, total: estimate.total, at: new Date().toISOString() } } : {}),
     }
     if (needsManager && merged.status === 'active') applyEscalation(merged, 'Автоматичний помічник передав запит менеджеру')
     await chatSessionService.save(merged)
@@ -463,7 +467,7 @@ function PartsDialog({ sessionId, contact, free, suggestedParts, onClose, onDone
       `Доставка НП: ${city?.Description}, ${warehouse?.Description}; отримувач ${recipient.trim()}, тел. ${phone.trim()}`,
     ].filter(Boolean).join('\n')
 
-    await serviceTaskService.create({
+    const task = await serviceTaskService.create({
       type: 'parts-shipment',
       title: free ? 'Комплектуючі за гарантією (безкоштовно)' : 'Замовлення комплектуючих (платно)',
       details: `${free ? '[ГАРАНТІЯ, безкоштовно + доставка наша] ' : '[Платне замовлення] '}${detailsText}`,
@@ -480,6 +484,12 @@ function PartsDialog({ sessionId, contact, free, suggestedParts, onClose, onDone
         warehouse: warehouse?.Description,
         warehouseRef: warehouse?.Ref,
       },
+    })
+    // Профиль клиента по телефону: копим задачу и сессию (авто-слияние по номеру).
+    await clientProfileService.upsertByPhone(phone, {
+      name: recipient.trim(),
+      sessionId,
+      taskId: task?.id ?? null,
     })
     setSaving(false)
     onDone()

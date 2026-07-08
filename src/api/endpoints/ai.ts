@@ -86,6 +86,19 @@ export interface BuildPricingParams {
   laborRate?: number
 }
 
+// ==== AI-генератор шаблона жалобы из описания ремонта ====
+export interface AiBuiltComplaint {
+  symptom: string
+  keywords: string[]
+  diagnosticWorkCodes: string[]
+  variants: { label: string; severity: 'best' | 'likely' | 'worst'; workCodes: string[] }[]
+  usage?: AiUsage
+}
+export interface BuildComplaintParams {
+  description: string
+  catalogContext?: string
+}
+
 export const aiApi = {
   // Улучшить/переписать текст по промпту с учётом истории правок
   improveText: async (params: ImproveTextParams): Promise<ApiResponse<{ text: string; usage?: AiUsage }>> => {
@@ -108,7 +121,7 @@ export const aiApi = {
   // рекомендованных комплектующих (когда предложен самостоятельный ремонт).
   estimateChat: async (
     params: EstimateChatParams
-  ): Promise<ApiResponse<{ reply: string; needsManager: boolean; offeredSelfRepair: boolean; warranty: 'yes' | 'no' | 'unknown'; parts: { name: string; qty: number }[]; usage?: AiUsage }>> => {
+  ): Promise<ApiResponse<{ reply: string; needsManager: boolean; offeredSelfRepair: boolean; warranty: 'yes' | 'no' | 'unknown'; parts: { name: string; qty: number }[]; estimate: { lines: { label: string; price: number }[]; total: number }; usage?: AiUsage }>> => {
     try {
       const response = await axios.post(`${BACKEND_URL}/api/ai/estimate-chat`, params)
       return { success: true, data: response.data.data }
@@ -152,6 +165,22 @@ export const aiApi = {
         error: {
           code: error.response?.data?.error?.code || 'AI_ERROR',
           message: error.response?.data?.error?.message || 'Не вдалося сформувати послугу',
+        },
+      }
+    }
+  },
+
+  // AI-генератор шаблона жалобы: описание выполненного ремонта → симптом + диагностика + варианты
+  buildComplaint: async (params: BuildComplaintParams): Promise<ApiResponse<AiBuiltComplaint>> => {
+    try {
+      const response = await axios.post(`${BACKEND_URL}/api/ai/build-complaint`, params)
+      return { success: true, data: response.data.data }
+    } catch (error: any) {
+      return {
+        success: false,
+        error: {
+          code: error.response?.data?.error?.code || 'AI_ERROR',
+          message: error.response?.data?.error?.message || 'Не вдалося сформувати шаблон',
         },
       }
     }
