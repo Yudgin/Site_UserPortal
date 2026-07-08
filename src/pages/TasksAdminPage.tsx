@@ -94,7 +94,18 @@ export default function TasksAdminPage() {
                       <TableCell><Chip size="small" variant="outlined" label={TASK_TYPE_LABELS[t.type]} /></TableCell>
                       <TableCell>
                         <Typography variant="body2">{t.title}</Typography>
-                        {t.details && <Typography variant="caption" color="text.secondary">{t.details.slice(0, 80)}</Typography>}
+                        {t.details && <Typography variant="caption" color="text.secondary" display="block">{t.details.slice(0, 120)}</Typography>}
+                        {!!t.parts?.length && (
+                          <Box sx={{ mt: 0.5, display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                            {t.parts.map((p, i) => <Chip key={i} size="small" variant="outlined" label={`${p.name} ×${p.qty}`} />)}
+                          </Box>
+                        )}
+                        {t.shipping && (t.shipping.city || t.shipping.warehouse) && (
+                          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                            📦 {[t.shipping.city, t.shipping.warehouse].filter(Boolean).join(' · ')}
+                            {(t.shipping.recipient || t.shipping.phone) && ` · ${[t.shipping.recipient, t.shipping.phone].filter(Boolean).join(', ')}`}
+                          </Typography>
+                        )}
                       </TableCell>
                       <TableCell>{t.contact?.name || t.contact?.phone || '—'}</TableCell>
                       <TableCell>

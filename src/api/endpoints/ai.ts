@@ -104,10 +104,11 @@ export const aiApi = {
   },
 
   // Диалоговая оценка стоимости. Возвращает ответ, флаг эскалации, признак предложения
-  // самостоятельного ремонта (нужны комплектующие) и статус гарантии.
+  // самостоятельного ремонта (нужны комплектующие), статус гарантии и список
+  // рекомендованных комплектующих (когда предложен самостоятельный ремонт).
   estimateChat: async (
     params: EstimateChatParams
-  ): Promise<ApiResponse<{ reply: string; needsManager: boolean; offeredSelfRepair: boolean; warranty: 'yes' | 'no' | 'unknown'; usage?: AiUsage }>> => {
+  ): Promise<ApiResponse<{ reply: string; needsManager: boolean; offeredSelfRepair: boolean; warranty: 'yes' | 'no' | 'unknown'; parts: { name: string; qty: number }[]; usage?: AiUsage }>> => {
     try {
       const response = await axios.post(`${BACKEND_URL}/api/ai/estimate-chat`, params)
       return { success: true, data: response.data.data }

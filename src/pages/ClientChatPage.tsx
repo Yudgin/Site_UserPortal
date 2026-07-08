@@ -3,13 +3,15 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   Box, Container, Paper, Typography, TextField, IconButton, Button, ToggleButton,
   ToggleButtonGroup, Alert, CircularProgress, Chip, Dialog, DialogTitle, DialogContent,
-  DialogActions, Snackbar, Divider,
+  DialogActions, Snackbar, Divider, Autocomplete, Stack,
 } from '@mui/material'
 import {
   Send as SendIcon, SupportAgent as ManagerIcon, ThumbUp as ThumbUpIcon,
   ThumbDown as ThumbDownIcon, AutoAwesome as AiIcon, Build as RepairIcon,
-  Inventory2 as PartsIcon, CheckCircle as DoneIcon,
+  Inventory2 as PartsIcon, CheckCircle as DoneIcon, Add as AddIcon,
+  DeleteOutline as DeleteIcon, LocalShipping as ShippingIcon,
 } from '@mui/icons-material'
+import { searchCities, getWarehouses, type NPCity, type NPWarehouse } from '@/api/endpoints/novaposhta'
 import { chatSessionService } from '@/api/chatSessionService'
 import { pricingService } from '@/api/pricingService'
 import { knowledgeService } from '@/api/knowledgeService'
@@ -45,7 +47,7 @@ export default function ClientChatPage() {
   const [partsOpen, setPartsOpen] = useState(false)
   // Предложение комплектующих показываем ТОЛЬКО когда ИИ предложил самостоятельный ремонт;
   // при гарантии — «отримати безкоштовно», иначе — «замовити».
-  const [partsOffer, setPartsOffer] = useState<{ show: boolean; warranty: 'yes' | 'no' | 'unknown' }>({ show: false, warranty: 'unknown' })
+  const [partsOffer, setPartsOffer] = useState<{ show: boolean; warranty: 'yes' | 'no' | 'unknown'; parts: { name: string; qty: number }[] }>({ show: false, warranty: 'unknown', parts: [] })
   const [ctxReady, setCtxReady] = useState(false)
 
   // Контекст для ИИ (загружается один раз)
@@ -136,16 +138,16 @@ export default function ClientChatPage() {
 
   // Один вызов ИИ по истории диалога (диспатч по режиму)
   const callAi = async (history: ChatMsgInput[]) => {
-    const fail = { reply: 'Не вдалося отримати відповідь. Спробуйте ще раз.', needsManager: false, usage: undefined as AiUsage | undefined, offeredSelfRepair: false, warranty: 'unknown' as const }
+    const fail = { reply: 'Не вдалося отримати відповідь. Спробуйте ще раз.', needsManager: false, usage: undefined as AiUsage | undefined, offeredSelfRepair: false, warranty: 'unknown' as const, parts: [] as { name: string; qty: number }[] }
     if (mode === 'estimate') {
       const res = await aiApi.estimateChat({ messages: history, priceContext: priceCtx.current, corrections: corrections.current.estimate })
-      if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: res.data.offeredSelfRepair, warranty: res.data.warranty }
+      if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: res.data.offeredSelfRepair, warranty: res.data.warranty, parts: res.data.parts || [] }
       return { ...fail, reply: res.error?.message || fail.reply }
     }
     const res = await aiApi.knowledgeChat({
       messages: history, knowledgeContext: knowledgeCtx.current, corrections: corrections.current.consultation,
     })
-    if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: false, warranty: 'unknown' as const }
+    if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: false, warranty: 'unknown' as const, parts: [] as { name: string; qty: number }[] }
     return { ...fail, reply: res.error?.message || fail.reply }
   }
 
@@ -158,8 +160,8 @@ export default function ClientChatPage() {
     const baseMessages = extraClientMsg ? [...preload.messages, extraClientMsg] : preload.messages
     const history: ChatMsgInput[] = baseMessages.filter((m) => !m.internal).map((m) => ({ role: m.role, text: m.text }))
 
-    const { reply, needsManager, usage, offeredSelfRepair, warranty } = await callAi(history)
-    setPartsOffer({ show: offeredSelfRepair, warranty })
+    const { reply, needsManager, usage, offeredSelfRepair, warranty, parts } = await callAi(history)
+    setPartsOffer({ show: offeredSelfRepair, warranty, parts })
     const aiMsg: ChatMessage = { id: genMsgId(), role: 'ai', text: reply, at: new Date().toISOString() }
 
     // Перечитать ещё раз перед сохранением — менеджер мог дописать пока ИИ отвечал
@@ -291,6 +293,7 @@ export default function ClientChatPage() {
       )}
       {partsOpen && (
         <PartsDialog sessionId={session.id} contact={session.contact} free={partsOffer.warranty === 'yes'}
+          suggestedParts={partsOffer.parts}
           onClose={() => setPartsOpen(false)}
           onDone={() => { setPartsOpen(false); setOutcome('parts-shipment'); setSnackbar('Заявку на комплектуючі прийнято — ми зв’яжемося з вами.') }} />
       )}
@@ -391,55 +394,176 @@ function FeedbackDialog({ sessionId, onClose, onDone }: { sessionId: string; onC
 
 // Заявка на отправку/заказ комплектующих клиенту (создаёт задачу сервиса).
 // free=true — гарантийный случай (бесплатно + доставка за наш счёт); иначе — платный заказ.
-function PartsDialog({ sessionId, contact, free, onClose, onDone }: {
+// suggestedParts — авто-сформированный ИИ список комплектующих (клиент может править).
+// Адрес доставки — Новая Почта (город + отделение) с живой автоподсказкой через серверный прокси.
+function PartsDialog({ sessionId, contact, free, suggestedParts, onClose, onDone }: {
   sessionId: string
   contact: { name?: string; phone?: string } | null
   free: boolean
+  suggestedParts: { name: string; qty: number }[]
   onClose: () => void
   onDone: () => void
 }) {
-  const [details, setDetails] = useState('')
-  const [name, setName] = useState(contact?.name || '')
+  const [parts, setParts] = useState<{ name: string; qty: number }[]>(
+    suggestedParts.length ? suggestedParts.map((p) => ({ name: p.name, qty: p.qty })) : [{ name: '', qty: 1 }]
+  )
+  const [note, setNote] = useState('')
+  const [recipient, setRecipient] = useState(contact?.name || '')
   const [phone, setPhone] = useState(contact?.phone || '')
   const [saving, setSaving] = useState(false)
 
+  // Новая Почта: город
+  const [city, setCity] = useState<NPCity | null>(null)
+  const [cityInput, setCityInput] = useState('')
+  const [cityOpts, setCityOpts] = useState<NPCity[]>([])
+  const [loadingCity, setLoadingCity] = useState(false)
+  // Новая Почта: отделение
+  const [warehouse, setWarehouse] = useState<NPWarehouse | null>(null)
+  const [whInput, setWhInput] = useState('')
+  const [whOpts, setWhOpts] = useState<NPWarehouse[]>([])
+  const [loadingWh, setLoadingWh] = useState(false)
+
+  // Автоподсказка городов (дебаунс 350мс)
+  useEffect(() => {
+    const q = cityInput.trim()
+    if (q.length < 2) { setCityOpts([]); return }
+    setLoadingCity(true)
+    const t = setTimeout(async () => {
+      const r = await searchCities(q)
+      setCityOpts(r); setLoadingCity(false)
+    }, 350)
+    return () => clearTimeout(t)
+  }, [cityInput])
+
+  // Автоподсказка отделений выбранного города (дебаунс 350мс)
+  useEffect(() => {
+    if (!city) { setWhOpts([]); return }
+    setLoadingWh(true)
+    const t = setTimeout(async () => {
+      const r = await getWarehouses(city.Ref, whInput.trim())
+      setWhOpts(r); setLoadingWh(false)
+    }, 350)
+    return () => clearTimeout(t)
+  }, [city, whInput])
+
+  const setPart = (i: number, patch: Partial<{ name: string; qty: number }>) =>
+    setParts((ps) => ps.map((p, idx) => (idx === i ? { ...p, ...patch } : p)))
+  const addPart = () => setParts((ps) => [...ps, { name: '', qty: 1 }])
+  const removePart = (i: number) => setParts((ps) => (ps.length > 1 ? ps.filter((_, idx) => idx !== i) : ps))
+
+  const cleanParts = parts.map((p) => ({ name: p.name.trim(), qty: p.qty > 0 ? p.qty : 1 })).filter((p) => p.name)
+  const canSubmit = cleanParts.length > 0 && !!recipient.trim() && !!phone.trim() && !!city && !!warehouse
+
   const submit = async () => {
+    if (!canSubmit) return
     setSaving(true)
-    const c = (name.trim() || phone.trim())
-      ? { ...(name.trim() ? { name: name.trim() } : {}), ...(phone.trim() ? { phone: phone.trim() } : {}) }
-      : null
+    const detailsText = [
+      cleanParts.length ? 'Комплектуючі:\n' + cleanParts.map((p) => `• ${p.name} — ${p.qty} шт`).join('\n') : '',
+      note.trim() ? `Примітка: ${note.trim()}` : '',
+      `Доставка НП: ${city?.Description}, ${warehouse?.Description}; отримувач ${recipient.trim()}, тел. ${phone.trim()}`,
+    ].filter(Boolean).join('\n')
+
     await serviceTaskService.create({
       type: 'parts-shipment',
       title: free ? 'Комплектуючі за гарантією (безкоштовно)' : 'Замовлення комплектуючих (платно)',
-      details: `${free ? '[ГАРАНТІЯ, безкоштовно + доставка наша] ' : '[Платне замовлення] '}${details.trim()}`,
-      contact: c,
+      details: `${free ? '[ГАРАНТІЯ, безкоштовно + доставка наша] ' : '[Платне замовлення] '}${detailsText}`,
+      contact: { name: recipient.trim(), phone: phone.trim() },
       sessionId,
       origin: 'client',
       assignee: null,
+      parts: cleanParts,
+      shipping: {
+        recipient: recipient.trim(),
+        phone: phone.trim(),
+        city: city?.Description,
+        cityRef: city?.Ref,
+        warehouse: warehouse?.Description,
+        warehouseRef: warehouse?.Ref,
+      },
     })
     setSaving(false)
     onDone()
   }
 
   return (
-    <Dialog open onClose={onClose} maxWidth="xs" fullWidth>
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>{free ? 'Отримати комплектуючі (безкоштовно)' : 'Замовити комплектуючі'}</DialogTitle>
       <DialogContent dividers>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           {free
-            ? 'Ваш кораблик на гарантії — комплектуючі та доставку оплачуємо ми. Опишіть, яка деталь потрібна.'
-            : 'Опишіть, які комплектуючі потрібні (модель деталі, що саме замінюєте). Ми узгодимо вартість і доставку.'}
+            ? 'Ваш кораблик на гарантії — комплектуючі та доставку оплачуємо ми. Перевірте перелік і вкажіть, куди надіслати.'
+            : 'Перевірте перелік комплектуючих (можна відредагувати) і вкажіть, куди надіслати. Ми узгодимо вартість і доставку.'}
         </Typography>
-        <TextField fullWidth multiline minRows={3} label="Які комплектуючі потрібні?" value={details}
-          onChange={(e) => setDetails(e.target.value)} sx={{ mb: 2 }} />
-        <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: '1fr 1fr' }}>
-          <TextField size="small" label="Ім'я" value={name} onChange={(e) => setName(e.target.value)} />
-          <TextField size="small" label="Телефон" value={phone} onChange={(e) => setPhone(e.target.value)} />
+
+        {/* Список комплектующих (префилл от ИИ, редактируемый) */}
+        <Typography variant="subtitle2" sx={{ mb: 1 }}>Комплектуючі</Typography>
+        <Stack spacing={1} sx={{ mb: 1 }}>
+          {parts.map((p, i) => (
+            <Box key={i} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+              <TextField size="small" fullWidth label="Назва деталі" value={p.name}
+                onChange={(e) => setPart(i, { name: e.target.value })} />
+              <TextField size="small" type="number" label="К-сть" value={p.qty}
+                onChange={(e) => setPart(i, { qty: Math.max(1, Number(e.target.value) || 1) })}
+                sx={{ width: 90 }} inputProps={{ min: 1 }} />
+              <IconButton size="small" onClick={() => removePart(i)} disabled={parts.length <= 1}>
+                <DeleteIcon fontSize="small" />
+              </IconButton>
+            </Box>
+          ))}
+        </Stack>
+        <Button size="small" startIcon={<AddIcon />} onClick={addPart} sx={{ mb: 2 }}>Додати позицію</Button>
+
+        <TextField fullWidth multiline minRows={2} size="small" label="Примітка (необов'язково)" value={note}
+          onChange={(e) => setNote(e.target.value)} sx={{ mb: 2 }} />
+
+        {/* Куда отправлять — Новая Почта */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+          <ShippingIcon fontSize="small" color="action" />
+          <Typography variant="subtitle2">Куди надіслати (Нова Пошта)</Typography>
         </Box>
+        <Stack spacing={2}>
+          <Autocomplete
+            options={cityOpts}
+            getOptionLabel={(o) => o.Description}
+            filterOptions={(x) => x}
+            value={city}
+            onChange={(_, v) => { setCity(v); setWarehouse(null); setWhInput('') }}
+            onInputChange={(_, v) => setCityInput(v)}
+            isOptionEqualToValue={(a, b) => a.Ref === b.Ref}
+            loading={loadingCity}
+            loadingText="Пошук…" noOptionsText={cityInput.trim().length < 2 ? 'Введіть назву міста' : 'Нічого не знайдено'}
+            renderInput={(params) => (
+              <TextField {...params} size="small" label="Місто / населений пункт" required
+                InputProps={{ ...params.InputProps, endAdornment: (<>{loadingCity ? <CircularProgress size={16} /> : null}{params.InputProps.endAdornment}</>) }} />
+            )}
+          />
+          <Autocomplete
+            options={whOpts}
+            getOptionLabel={(o) => o.Description}
+            filterOptions={(x) => x}
+            value={warehouse}
+            onChange={(_, v) => setWarehouse(v)}
+            onInputChange={(_, v) => setWhInput(v)}
+            isOptionEqualToValue={(a, b) => a.Ref === b.Ref}
+            loading={loadingWh}
+            disabled={!city}
+            loadingText="Пошук…" noOptionsText={city ? 'Відділень не знайдено' : 'Спершу оберіть місто'}
+            renderInput={(params) => (
+              <TextField {...params} size="small" label="Відділення / поштомат" required
+                InputProps={{ ...params.InputProps, endAdornment: (<>{loadingWh ? <CircularProgress size={16} /> : null}{params.InputProps.endAdornment}</>) }} />
+            )}
+          />
+          <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: '1fr 1fr' }}>
+            <TextField size="small" label="ПІБ отримувача" required value={recipient}
+              onChange={(e) => setRecipient(e.target.value)} />
+            <TextField size="small" label="Телефон" required value={phone}
+              onChange={(e) => setPhone(e.target.value)} />
+          </Box>
+        </Stack>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Скасувати</Button>
-        <Button variant="contained" onClick={submit} disabled={saving || !details.trim()}>Надіслати запит</Button>
+        <Button variant="contained" onClick={submit} disabled={saving || !canSubmit}>Надіслати запит</Button>
       </DialogActions>
     </Dialog>
   )

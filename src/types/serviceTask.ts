@@ -20,6 +20,22 @@ export const TASK_STATUS_LABELS: Record<ServiceTaskStatus, string> = {
   cancelled: 'Отменена',
 }
 
+// Позиция комплектующих в заявке на отправку
+export interface PartItem {
+  name: string
+  qty: number
+}
+
+// Адрес доставки Новой Почтой (для отправки комплектующих)
+export interface ShippingAddress {
+  recipient?: string // ФИО получателя
+  phone?: string
+  city?: string // название населённого пункта (как отображается)
+  cityRef?: string // ref НП для повторного запроса отделений
+  warehouse?: string // описание отделения
+  warehouseRef?: string
+}
+
 export interface ServiceTask {
   id: string
   type: ServiceTaskType
@@ -30,6 +46,8 @@ export interface ServiceTask {
   sessionId: string | null // из какой чат-сессии
   origin: 'client' | 'admin' | 'ai' // кто создал
   assignee: string | null // ответственный
+  parts?: PartItem[] // авто-сформированный список комплектующих (заявка parts-shipment)
+  shipping?: ShippingAddress // куда отправлять (Новая Почта)
   createdAt: string
   updatedAt: string
   createdBy: string | null

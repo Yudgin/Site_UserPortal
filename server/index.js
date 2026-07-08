@@ -511,6 +511,7 @@ const CHAT_SYSTEM = [
   'Тон стриманий і чесний; сервіс покращується, точних строків не обіцяй.',
   'М’яко зазнач, що це орієнтовна автоматична оцінка, яка може бути неточною — ми наповнюємо базу знань і працюємо над її коректністю.',
   'ПОЛЯ ВІДПОВІДІ: offeredSelfRepair=true ЛИШЕ якщо ти реально запропонував клієнту виконати ремонт САМОСТІЙНО із заміною деталі (тобто потрібні комплектуючі); якщо йдеться лише про налаштування без деталей або про ремонт у нас — offeredSelfRepair=false. warranty: постав yes/no/unknown за контекстом розмови (опис кораблика, слова клієнта).',
+  'ПОЛЕ parts: якщо offeredSelfRepair=true — заповни список комплектуючих, потрібних для самостійного ремонту (реальні назви деталей/матеріалів із прайсу, з кількістю). Якщо offeredSelfRepair=false — залиш порожній масив [].',
 ].join('\n')
 
 app.post('/api/ai/estimate-chat', async (req, res) => {
@@ -553,8 +554,21 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
               needsManager: { type: 'boolean', description: 'Чи потрібно підключити менеджера' },
               offeredSelfRepair: { type: 'boolean', description: 'true, якщо у відповіді ти запропонував клієнту виконати ремонт САМОСТІЙНО (для якого потрібні комплектуючі)' },
               warranty: { type: 'string', enum: ['yes', 'no', 'unknown'], description: 'Статус гарантії кораблика за контекстом розмови' },
+              parts: {
+                type: 'array',
+                description: 'Комплектуючі для самостійного ремонту (лише коли offeredSelfRepair=true, інакше [])',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    name: { type: 'string', description: 'Назва деталі/комплектуючої' },
+                    qty: { type: 'number', description: 'Кількість' },
+                  },
+                  required: ['name', 'qty'],
+                },
+              },
             },
-            required: ['reply', 'needsManager', 'offeredSelfRepair', 'warranty'],
+            required: ['reply', 'needsManager', 'offeredSelfRepair', 'warranty', 'parts'],
           },
         },
       },
@@ -565,8 +579,14 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
     try {
       parsed = JSON.parse(raw)
     } catch {
-      parsed = { reply: raw, needsManager: false, offeredSelfRepair: false, warranty: 'unknown' }
+      parsed = { reply: raw, needsManager: false, offeredSelfRepair: false, warranty: 'unknown', parts: [] }
     }
+
+    const parts = Array.isArray(parsed.parts)
+      ? parsed.parts
+          .filter((p) => p && p.name)
+          .map((p) => ({ name: String(p.name).trim(), qty: Number(p.qty) > 0 ? Number(p.qty) : 1 }))
+      : []
 
     res.json({
       success: true,
@@ -575,6 +595,7 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
         needsManager: !!parsed.needsManager,
         offeredSelfRepair: !!parsed.offeredSelfRepair,
         warranty: ['yes', 'no', 'unknown'].includes(parsed.warranty) ? parsed.warranty : 'unknown',
+        parts,
         usage: buildUsage(message.usage),
       },
     })
