@@ -4,13 +4,31 @@ import axios from 'axios'
 import dotenv from 'dotenv'
 import jsonServer from 'json-server'
 import Anthropic from '@anthropic-ai/sdk'
+import { initializeApp, applicationDefault, getApps } from 'firebase-admin/app'
+import { getFirestore } from 'firebase-admin/firestore'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { registerTelegramBot } from './telegram.js'
 
 dotenv.config()
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+
+// firebase-admin для серверной записи в Firestore (Telegram-бот пишет chatSessions/
+// clientProfiles напрямую как доверенный backend). Креды — через ADC (в деплое —
+// сервис-аккаунт рантайма; локально — gcloud application-default). Ленивая инициализация:
+// если ADC нет, adminDb-операции упадут и будут пойманы, бот просто не сохранит сессию.
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'droidmaps-runferry'
+let adminDb = null
+try {
+  const firebaseApp = getApps().length
+    ? getApps()[0]
+    : initializeApp({ credential: applicationDefault(), projectId: FIREBASE_PROJECT_ID })
+  adminDb = getFirestore(firebaseApp)
+} catch (e) {
+  console.warn('⚠️  firebase-admin init failed — Telegram bot persistence disabled:', e.message)
+}
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -921,6 +939,11 @@ app.post('/api/ai/build-complaint', async (req, res) => {
     res.status(500).json({ success: false, error: { code: 'AI_FAILED', message: 'Не вдалося сформувати шаблон' } })
   }
 })
+
+// ============ Telegram-бот (первый канал агрегатора мессенджеров) ============
+// Регистрируем ПОСЛЕ определения AI-констант (anthropic, AI_MODEL, CHAT_SYSTEM,
+// mergeConsecutiveMessages, buildUsage) — бот переиспользует ту же логику ИИ.
+registerTelegramBot(app, { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM, mergeConsecutiveMessages, buildUsage })
 
 // JSON Server for mock API
 const router = jsonServer.router(path.join(__dirname, 'db.json'))

@@ -71,6 +71,17 @@ export const defaultAuthorization = (): ServiceAuthorization => ({
   estimateIncreasePctThreshold: 25,
 })
 
+// Канал, из которого пришёл диалог. 'web' — онлайн-чат на сайте (по умолчанию),
+// остальные — мессенджеры-агрегатор.
+export type ChatChannel = 'web' | 'telegram' | 'viber' | 'whatsapp'
+
+export const CHANNEL_LABELS: Record<ChatChannel, string> = {
+  web: 'Сайт',
+  telegram: 'Telegram',
+  viber: 'Viber',
+  whatsapp: 'WhatsApp',
+}
+
 export interface ChatSession {
   id: string
   createdAt: string
@@ -78,6 +89,8 @@ export interface ChatSession {
   status: ChatStatus
   lang: string
   requestId: string | null // привязка к заявке 1С (если есть)
+  channel?: ChatChannel // канал обращения (по умолчанию 'web')
+  channelUserId?: string // идентификатор пользователя в мессенджере (chat_id/sender.id/wa_id)
   contact: { name?: string; phone?: string } | null
   messages: ChatMessage[]
   escalation: ChatEscalation | null
