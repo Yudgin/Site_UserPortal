@@ -29,6 +29,18 @@ import {
   Store as DistributorIcon,
   Build as RepairsIcon,
   Palette as DesignIcon,
+  Calculate as PriceListIcon,
+  Description as TermsIcon,
+  MenuBook as KnowledgeIcon,
+  SupportAgent as InboxIcon,
+  Feedback as FeedbackIcon,
+  Web as PresentationIcon,
+  Assignment as QuestionnaireIcon,
+  RequestQuote as PublicPriceIcon,
+  Groups as ClientsIcon,
+  ReportProblem as ComplaintIcon,
+  Assignment as TaskIcon,
+  Person as ProfileIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { useBoatStore } from '@/store/boatStore'
@@ -84,6 +96,18 @@ export default function Layout() {
 
   // Add admin menu for developers only
   if (user?.role === 'developer') {
+    menuItems.push({ text: 'Прайс-лист', icon: <PriceListIcon />, path: '/pricelist-admin' })
+    menuItems.push({ text: 'Жалобы→работы', icon: <ComplaintIcon />, path: '/complaints-admin' })
+    menuItems.push({ text: 'Соглашение', icon: <TermsIcon />, path: '/service-content-admin' })
+    menuItems.push({ text: 'База знаний', icon: <KnowledgeIcon />, path: '/knowledge-admin' })
+    menuItems.push({ text: 'Обращения', icon: <InboxIcon />, path: '/manager-inbox' })
+    menuItems.push({ text: 'Задачи', icon: <TaskIcon />, path: '/tasks-admin' })
+    menuItems.push({ text: 'Клиенты', icon: <ClientsIcon />, path: '/clients-admin' })
+    menuItems.push({ text: 'Профили', icon: <ProfileIcon />, path: '/client-profiles' })
+    menuItems.push({ text: 'Отзывы ИИ', icon: <FeedbackIcon />, path: '/feedback-admin' })
+    menuItems.push({ text: 'Презентация', icon: <PresentationIcon />, path: '/presentation' })
+    menuItems.push({ text: 'Опросник', icon: <QuestionnaireIcon />, path: '/questionnaire' })
+    menuItems.push({ text: 'Публичный прайс', icon: <PublicPriceIcon />, path: '/price' })
     menuItems.push({ text: 'Admin', icon: <AdminIcon />, path: '/admin' })
   }
 

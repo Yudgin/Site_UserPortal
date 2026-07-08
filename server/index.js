@@ -3,6 +3,7 @@ import cors from 'cors'
 import axios from 'axios'
 import dotenv from 'dotenv'
 import jsonServer from 'json-server'
+import Anthropic from '@anthropic-ai/sdk'
 import path from 'path'
 import { fileURLToPath } from 'url'
 
@@ -382,6 +383,404 @@ app.post('/api/novaposhta/track', async (req, res) => {
       success: false,
       error: { code: 'NP_FAILED', message: 'Failed to track parcel' },
     })
+  }
+})
+
+// ============ AI Text Assistant (Claude) ============
+// Улучшение/переписывание текстовых сообщений по промпту пользователя.
+// Ключ живёт только на сервере. Переиспользуется для соглашения, диагностики и т.д.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || ''
+const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null
+
+if (!ANTHROPIC_API_KEY) {
+  console.warn('⚠️  ANTHROPIC_API_KEY is not set — AI text endpoints will fail (see .env.example)')
+}
+
+// Модель и тарифы Claude ($/1M токенов) — для учёта стоимости коммуникации
+const AI_MODEL = 'claude-opus-4-8'
+const AI_PRICE = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }
+
+// Собрать сведения об использовании токенов и стоимости из ответа Claude
+const buildUsage = (usage = {}) => {
+  const inputTokens = usage.input_tokens || 0
+  const outputTokens = usage.output_tokens || 0
+  const cacheRead = usage.cache_read_input_tokens || 0
+  const cacheWrite = usage.cache_creation_input_tokens || 0
+  const costUsd =
+    (inputTokens * AI_PRICE.input +
+      outputTokens * AI_PRICE.output +
+      cacheRead * AI_PRICE.cacheRead +
+      cacheWrite * AI_PRICE.cacheWrite) /
+    1e6
+  return {
+    model: AI_MODEL,
+    inputTokens,
+    outputTokens,
+    cacheRead,
+    cacheWrite,
+    costUsd: Math.round(costUsd * 10000) / 10000, // до 4 знаков
+  }
+}
+
+// Краткая инструкция по типу текста (контекст задаётся клиентом)
+const AI_CONTEXTS = {
+  terms: 'Це текст угоди про використання сервісу з ремонту (умови обслуговування) для клієнтів рибальських прикормочних корабликів.',
+  diagnostics: 'Це результати технічної діагностики несправності, які пише майстер сервісного центру для клієнта.',
+  knowledge: 'Це стаття бази знань сервісного центру — інструкція з експлуатації або самостійного обслуговування прикормочних рибальських корабликів. Пиши зрозуміло, покроково.',
+  generic: 'Це текст повідомлення для клієнта сервісного центру.',
+}
+
+app.post('/api/ai/improve-text', async (req, res) => {
+  try {
+    const { currentText = '', userPrompt = '', history = [], context = 'generic', lang = 'uk' } = req.body
+
+    if (!anthropic) {
+      return res.status(503).json({
+        success: false,
+        error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано (ANTHROPIC_API_KEY відсутній)' },
+      })
+    }
+    if (!userPrompt || !String(userPrompt).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_PROMPT', message: 'Опишіть, що потрібно змінити' },
+      })
+    }
+
+    const contextNote = AI_CONTEXTS[context] || AI_CONTEXTS.generic
+    const historyText = (Array.isArray(history) ? history : [])
+      .slice(-10)
+      .map((h, i) => `${i + 1}. Запит: ${h.prompt}${h.resultPreview ? `\n   Результат: ${h.resultPreview}` : ''}`)
+      .join('\n')
+
+    const system = [
+      'Ти — редактор ділових текстів для українського сервісного центру.',
+      contextNote,
+      'Пиши завжди УКРАЇНСЬКОЮ мовою, незалежно від мови запиту користувача (навіть якщо запит російською). ' +
+        'Це вимога законодавства України; мультимовність буде додано згодом.',
+      'Повертай ЛИШЕ готовий новий текст — без пояснень, без лапок, без markdown-обгортки.',
+      'Зберігай діловий стиль і зміст; змінюй саме те, про що просить користувач, і не додавай зайвого.',
+    ].join('\n')
+    void lang // мова відповіді завжди українська; параметр lang — на майбутнє (мультимовність)
+
+    const userContent = [
+      historyText ? `Історія попередніх правок (для наступності):\n${historyText}\n` : '',
+      `Поточний текст:\n"""\n${currentText}\n"""\n`,
+      `Що потрібно змінити:\n${userPrompt}`,
+    ].filter(Boolean).join('\n')
+
+    const message = await anthropic.messages.create({
+      model: 'claude-opus-4-8',
+      max_tokens: 4096,
+      output_config: { effort: 'low' },
+      system,
+      messages: [{ role: 'user', content: userContent }],
+    })
+
+    const text = (message.content || [])
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('')
+      .trim()
+
+    res.json({ success: true, data: { text, usage: buildUsage(message.usage) } })
+  } catch (error) {
+    console.error('AI improve-text error:', error?.message || error)
+    res.status(500).json({
+      success: false,
+      error: { code: 'AI_FAILED', message: 'Не вдалося обробити запит ІІ' },
+    })
+  }
+})
+
+// Системный промпт диалогового консультанта (оценка стоимости с эскалацией)
+const CHAT_SYSTEM = [
+  'Ти — консультант сервісного центру RunFerry, що обслуговує прикормочні рибальські кораблики.',
+  'Завдання: допомогти клієнту зрозуміти орієнтовну вартість ремонту або апгрейду на основі наданого прайсу.',
+  'Відповідай ЛИШЕ українською мовою, навіть якщо клієнт пише російською. Якщо клієнт звертається російською — у першій відповіді ввічливо додай: «Розумію російську, але за вимогами законодавства спілкуюся державною мовою.»',
+  'Оцінюй вартість ТІЛЬКИ на основі наданого прайсу; не вигадуй цін і робіт. Це орієнтовна оцінка — точний кошторис складе майстер після діагностики.',
+  'Якщо точної позиції немає, але є близька або сумісна — назви орієнтовну вартість за найсуміснішою позицією прайсу, чітко зазначивши, що це приблизно і знадобиться діагностика. Не поспішай з ескалацією.',
+  'Сезон: до ремонту застосовується сезонна націнка; до апгрейдів (встановлення обладнання, оновлення ПЗ) націнка високого сезону НЕ застосовується. Критичні роботи (не працює мотор, заміна сервоприводу керма чи бункера) також йдуть БЕЗ націнки високого сезону.',
+  'Про високий сезон говори м’яко й чесно: наша мета — не заробити на клієнті якнайбільше, а розумно розподілити ресурси сервісу, щоб допомогти якомога більшій кількості клієнтів у стислі строки. Якщо кораблик справний — підкажи, що ремонт можна зробити вигідніше в міжсезоння або додати пільгові позиції.',
+  'Якщо проблему реально усунути самостійно (є відповідна самодопомога в контексті) — спершу доброзичливо запропонуй це рішення, і лише потім платний ремонт. Ми допомагаємо, а не витягуємо гроші.',
+  'ГАРАНТІЯ (1 рік з дати продажу; статус гарантії буває вказаний в описі кораблика). Якщо кораблик НА ГАРАНТІЇ і йдеться про механічну частину — запропонуй клієнту на вибір ДВА варіанти: (1) ми зробимо це БЕЗКОШТОВНО за гарантією — надішліть кораблик нам, транспортні витрати теж покриває фірма; або (2) якщо він хоче зробити самостійно — ми БЕЗКОШТОВНО надішлемо потрібні комплектуючі (доставку теж оплачуємо ми). Пиши «надішліть», а не «принесіть». НЕ пиши, що самостійна заміна позбавляє гарантії. Якщо статус гарантії невідомий — спершу ввічливо уточни у клієнта, чи кораблик на гарантії.',
+  'Якщо для симптому є типовий шаблон з варіантами ремонту — покажи «можливо це, або це» з орієнтовними сумами (кращий/гірший випадок) і зазнач, що точний варіант визначить діагностика.',
+  'КОЛИ НАЗИВАЄШ ВАРТІСТЬ набору чи ремонту — завжди показуй розбивку по окремих операціях (список позицій з цінами), а не лише загальну суму: так клієнту видно, з чого складається ціна, і сума не виглядає лякаючою.',
+  'Не забувай додати до підсумку загальні роботи (приймання, підготовка, тест на воді, сушіння, пакування), якщо вони ще не входять у обраний набір — вони супроводжують будь-який ремонт.',
+  'Пропонуй підключити менеджера (needsManager=true) ЛИШЕ якщо питання зовсім поза межами оцінки вартості (гарантія, претензії, повернення коштів, юридичні питання) або клієнт прямо просить людину. Тоді повідом, що менеджер долучиться протягом 48 годин у робочі дні.',
+  'Тон стриманий і чесний; сервіс покращується, точних строків не обіцяй.',
+  'М’яко зазнач, що це орієнтовна автоматична оцінка, яка може бути неточною — ми наповнюємо базу знань і працюємо над її коректністю.',
+  'ПОЛЯ ВІДПОВІДІ: offeredSelfRepair=true ЛИШЕ якщо ти реально запропонував клієнту виконати ремонт САМОСТІЙНО із заміною деталі (тобто потрібні комплектуючі); якщо йдеться лише про налаштування без деталей або про ремонт у нас — offeredSelfRepair=false. warranty: постав yes/no/unknown за контекстом розмови (опис кораблика, слова клієнта).',
+].join('\n')
+
+app.post('/api/ai/estimate-chat', async (req, res) => {
+  try {
+    const { messages = [], priceContext = '', corrections = [] } = req.body
+
+    if (!anthropic) {
+      return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
+    }
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ success: false, error: { code: 'NO_MESSAGES', message: 'Порожній діалог' } })
+    }
+
+    // Внутренние заметки менеджера в промпт не идут; client → user, ai/manager → assistant
+    const chatMessages = messages
+      .filter((m) => !m.internal && m.text)
+      .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text) }))
+    if (chatMessages.length === 0 || chatMessages[0].role !== 'user') {
+      return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
+    }
+
+    const corrText = Array.isArray(corrections) && corrections.length
+      ? `\n\nВРАХУЙ ЦІ ПРАВИЛА (корекції поведінки від адміністратора):\n${corrections.map((c) => `- ${c}`).join('\n')}`
+      : ''
+    const system = CHAT_SYSTEM + corrText + (priceContext ? `\n\nПРАЙС (лише ці позиції можна використовувати для оцінки):\n${priceContext}` : '')
+
+    const message = await anthropic.messages.create({
+      model: AI_MODEL,
+      max_tokens: 1500,
+      system,
+      messages: chatMessages,
+      output_config: {
+        format: {
+          type: 'json_schema',
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              reply: { type: 'string', description: 'Відповідь клієнту українською' },
+              needsManager: { type: 'boolean', description: 'Чи потрібно підключити менеджера' },
+              offeredSelfRepair: { type: 'boolean', description: 'true, якщо у відповіді ти запропонував клієнту виконати ремонт САМОСТІЙНО (для якого потрібні комплектуючі)' },
+              warranty: { type: 'string', enum: ['yes', 'no', 'unknown'], description: 'Статус гарантії кораблика за контекстом розмови' },
+            },
+            required: ['reply', 'needsManager', 'offeredSelfRepair', 'warranty'],
+          },
+        },
+      },
+    })
+
+    const raw = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = { reply: raw, needsManager: false, offeredSelfRepair: false, warranty: 'unknown' }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        reply: parsed.reply || '',
+        needsManager: !!parsed.needsManager,
+        offeredSelfRepair: !!parsed.offeredSelfRepair,
+        warranty: ['yes', 'no', 'unknown'].includes(parsed.warranty) ? parsed.warranty : 'unknown',
+        usage: buildUsage(message.usage),
+      },
+    })
+  } catch (error) {
+    console.error('AI estimate-chat error:', error?.message || error)
+    res.status(500).json({ success: false, error: { code: 'AI_FAILED', message: 'Не вдалося обробити запит ІІ' } })
+  }
+})
+
+// ============ AI-консультант (эксплуатация + самопомощь) ============
+const KNOWLEDGE_SYSTEM = [
+  'Ти — консультант сервісного центру RunFerry (прикормочні рибальські кораблики).',
+  'Допомагай клієнту з питаннями експлуатації (як зарядити акумулятор, налаштувати автопілот тощо) на основі наданої бази знань.',
+  'Якщо проблему можна вирішити самостійно і безкоштовно — ОБОВ’ЯЗКОВО запропонуй це першим (матеріали самодопомоги, відео/статті). Покажи, що наша мета — допомогти, а не заробити. Лише якщо самостійно складно — згадай про платний сервіс (offeredSelfHelp=true, якщо запропонував самодопомогу).',
+  'Відповідай ЛИШЕ українською. Якщо клієнт пише російською — у першій відповіді додай: «Розумію російську, але за вимогами законодавства спілкуюся державною мовою.»',
+  'Якщо в базі знань Є релевантний матеріал — ОБОВ’ЯЗКОВО використай його у відповіді, навіть якщо він короткий; переказуй кроки з бази своїми словами, дай посилання на відео/статті, якщо вони вказані. Не кажи «матеріалу немає», якщо він насправді є в базі. Не вигадуй інструкцій поза базою. Менеджера (needsManager=true) пропонуй ЛИШЕ коли в базі справді немає нічого релевантного.',
+  'М’яко попереджай: відповіді автоматизовані й можуть бути неточними — ми наповнюємо базу знань і працюємо над її коректністю.',
+].join('\n')
+
+app.post('/api/ai/knowledge-chat', async (req, res) => {
+  try {
+    const { messages = [], knowledgeContext = '', corrections = [] } = req.body
+
+    if (!anthropic) {
+      return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
+    }
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ success: false, error: { code: 'NO_MESSAGES', message: 'Порожній діалог' } })
+    }
+
+    const chatMessages = messages
+      .filter((m) => !m.internal && m.text)
+      .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text) }))
+    if (chatMessages.length === 0 || chatMessages[0].role !== 'user') {
+      return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
+    }
+
+    // Правки поведения ИИ (behaviorCorrections) инжектятся как дополнительные правила
+    const correctionText = Array.isArray(corrections) && corrections.length
+      ? `\n\nДОДАТКОВІ ПРАВИЛА (корекції поведінки, дотримуйся їх):\n${corrections.map((c, i) => `${i + 1}. ${c}`).join('\n')}`
+      : ''
+    const knowledgeText = knowledgeContext ? `\n\nБАЗА ЗНАНЬ (використовуй лише ці матеріали):\n${knowledgeContext}` : ''
+    const system = KNOWLEDGE_SYSTEM + knowledgeText + correctionText
+
+    const message = await anthropic.messages.create({
+      model: AI_MODEL,
+      max_tokens: 1500,
+      system,
+      messages: chatMessages,
+      output_config: {
+        format: {
+          type: 'json_schema',
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              reply: { type: 'string', description: 'Відповідь клієнту українською' },
+              needsManager: { type: 'boolean' },
+              offeredSelfHelp: { type: 'boolean', description: 'Чи запропоновано самостійне вирішення' },
+            },
+            required: ['reply', 'needsManager', 'offeredSelfHelp'],
+          },
+        },
+      },
+    })
+
+    const raw = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = { reply: raw, needsManager: false, offeredSelfHelp: false }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        reply: parsed.reply || '',
+        needsManager: !!parsed.needsManager,
+        offeredSelfHelp: !!parsed.offeredSelfHelp,
+        usage: buildUsage(message.usage),
+      },
+    })
+  } catch (error) {
+    console.error('AI knowledge-chat error:', error?.message || error)
+    res.status(500).json({ success: false, error: { code: 'AI_FAILED', message: 'Не вдалося обробити запит ІІ' } })
+  }
+})
+
+// ============ AI-конструктор услуг прайса ============
+// Владелец описывает услугу словами — ИИ разбивает её на детальні підпослуги
+// (роботи в нормо-годинах, матеріали, набір), спираючись на наявний каталог.
+const BUILD_PRICING_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    summary: { type: 'string', description: 'Коротке пояснення, що зроблено (українською)' },
+    materials: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          code: { type: 'string' },
+          name: { type: 'string', description: 'Назва українською' },
+          unit: { type: 'string', description: 'Одиниця (шт, мл, компл.)' },
+          price: { type: 'number' },
+        },
+        required: ['code', 'name', 'unit', 'price'],
+      },
+    },
+    works: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          code: { type: 'string' },
+          name: { type: 'string', description: 'Назва українською' },
+          categoryId: { type: 'string', description: 'id категорії з наданого каталогу' },
+          laborHours: { type: 'number' },
+          dedupe: { type: 'string', enum: ['once', 'perComplaint'] },
+          materials: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { materialCode: { type: 'string' }, qty: { type: 'number' } },
+              required: ['materialCode', 'qty'],
+            },
+          },
+          reused: { type: 'boolean', description: 'true, якщо це наявна робота (code вже є в каталозі)' },
+        },
+        required: ['code', 'name', 'categoryId', 'laborHours', 'dedupe', 'materials', 'reused'],
+      },
+    },
+    kit: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        code: { type: 'string' },
+        name: { type: 'string', description: 'Назва українською' },
+        serviceKind: { type: 'string', enum: ['repair', 'upgrade'] },
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { workCode: { type: 'string' }, qty: { type: 'number' } },
+            required: ['workCode', 'qty'],
+          },
+        },
+      },
+      required: ['code', 'name', 'serviceKind', 'items'],
+    },
+  },
+  required: ['summary', 'materials', 'works', 'kit'],
+}
+
+app.post('/api/ai/build-pricing', async (req, res) => {
+  try {
+    const { instruction = '', catalogContext = '', laborRate = 0 } = req.body
+
+    if (!anthropic) {
+      return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
+    }
+    if (!String(instruction).trim()) {
+      return res.status(400).json({ success: false, error: { code: 'MISSING_INSTRUCTION', message: 'Опишіть послугу' } })
+    }
+
+    const system = [
+      'Ти — помічник з формування прайсу сервісного центру RunFerry (прикормочні рибальські кораблики).',
+      'Розбий описану власником послугу на детальні позиції: роботи (у нормо-годинах), матеріали (запчастини/витратні) та, за потреби, набір (kit).',
+      `Ставка нормо-години: ${laborRate} грн. Якщо власник вказує ЦІНУ роботи (напр. «за роботу 4000»), розподіли нормо-години по підроботах так, щоб їх сума × ставку приблизно дорівнювала цій ціні.`,
+      'Матеріали (деталі, напр. ехолот) — окремі позиції з вказаною ціною, прив’язані до відповідної роботи.',
+      'ПЕРЕВИКОРИСТОВУЙ наявні спільні роботи з каталогу (приймання, транспортування, пакування тощо): для reused=true став ТОЧНИЙ code з наданого каталогу (напр. w-receive) і НЕ змінюй їх нормо-години. Не вигадуй нові коди для наявних робіт і не дублюй їх. Нові роботи — reused=false, з новими кодами у стилі наявних.',
+      'Обирай categoryId лише з наданого каталогу. serviceKind: repair (поломка) або upgrade (встановлення обладнання/оновлення ПЗ — без сезонної націнки).',
+      'Усі назви — українською. Повертай лише структуру за схемою.',
+    ].join('\n')
+
+    const userContent = [
+      catalogContext ? `Наявний каталог (для контексту, стилю та перевикористання):\n${catalogContext}\n` : '',
+      `Опис послуги від власника:\n${instruction}`,
+    ].filter(Boolean).join('\n')
+
+    const message = await anthropic.messages.create({
+      model: AI_MODEL,
+      max_tokens: 8000,
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high', format: { type: 'json_schema', schema: BUILD_PRICING_SCHEMA } },
+      system,
+      messages: [{ role: 'user', content: userContent }],
+    })
+
+    const raw = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch (e) {
+      return res.status(502).json({ success: false, error: { code: 'AI_PARSE_FAILED', message: 'ІІ повернув некоректну структуру' } })
+    }
+
+    res.json({ success: true, data: { ...parsed, usage: buildUsage(message.usage) } })
+  } catch (error) {
+    console.error('AI build-pricing error:', error?.message || error)
+    res.status(500).json({ success: false, error: { code: 'AI_FAILED', message: 'Не вдалося сформувати послугу' } })
   }
 })
 

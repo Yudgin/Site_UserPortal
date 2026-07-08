@@ -46,12 +46,13 @@ import LanguageSelector from '@/components/common/LanguageSelector'
 import LoadingSpinner from '@/components/common/LoadingSpinner'
 import ClientInfoEditor from '@/components/common/ClientInfoEditor'
 import { serviceApi, ServiceRequestData, ClientInfo } from '@/api/endpoints/service'
+import { serviceContentService, SERVICE_CONTENT_KEYS } from '@/api/serviceContentService'
 import { useSettingsStore } from '@/store/settingsStore'
 import { useNavigate } from 'react-router-dom'
 import { Home as HomeIcon } from '@mui/icons-material'
 
 export default function ServiceSharePage() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const navigate = useNavigate()
   const { requestId } = useParams<{ requestId: string }>()
   const { addServiceRequest } = useSettingsStore()
@@ -59,6 +60,8 @@ export default function ServiceSharePage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [data, setData] = useState<ServiceRequestData | null>(null)
+  // Текст соглашения из Firestore (редактируется в админке); fallback — перевод i18n
+  const [termsText, setTermsText] = useState<string | null>(null)
 
   // Action loading states
   const [acceptingTerms, setAcceptingTerms] = useState(false)
@@ -84,6 +87,17 @@ export default function ServiceSharePage() {
       loadData()
     }
   }, [requestId])
+
+  // Загрузить редактируемый текст соглашения (по текущему языку, с fallback на украинский)
+  useEffect(() => {
+    ;(async () => {
+      const doc = await serviceContentService.load(SERVICE_CONTENT_KEYS.terms)
+      if (doc?.content) {
+        const c = doc.content as Record<string, string>
+        setTermsText(c[i18n.language] || c.uk || null)
+      }
+    })()
+  }, [i18n.language])
 
   const loadData = async () => {
     if (!requestId) return
@@ -314,7 +328,7 @@ export default function ServiceSharePage() {
                 variant="body2"
                 sx={{ whiteSpace: 'pre-line' }}
               >
-                {t('service.termsText')}
+                {termsText || t('service.termsText')}
               </Typography>
             </Paper>
             <Button

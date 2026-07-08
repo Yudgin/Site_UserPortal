@@ -27,6 +27,108 @@ service cloud.firestore {
       allow update, delete: if request.auth != null && resource.data.userId == request.auth.uid;
     }
 
+    // Администратор прайс-листа определяется по email (см. src/config/access.ts).
+    // email_verified обязателен: иначе можно зарегистрировать admin@runferry.de без
+    // подтверждения почты и получить админ-права записи.
+    function isPriceAdmin() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'admin@runferry.de';
+    }
+
+    // Прайс-лист (каталог работ, наборов, материалов, настроек) — публичное чтение,
+    // запись только администратору.
+    match /priceList/{docId} {
+      allow read: if true;
+      allow write: if isPriceAdmin();
+    }
+
+    // Сметы — открываются клиентом по прямой ссылке (get по id), листинг и запись —
+    // только администратор. get вместо read закрывает утечку всех смет через collection-запрос.
+    match /priceEstimates/{estId} {
+      allow get: if true;
+      allow list: if isPriceAdmin();
+      allow create, update, delete: if isPriceAdmin();
+    }
+
+    // Редактируемые тексты сервиса (соглашение и т.п.) — публичное чтение,
+    // запись только администратору.
+    match /serviceContent/{docId} {
+      allow read: if true;
+      allow write: if isPriceAdmin();
+    }
+
+    // Сессии диалога клиента с ИИ/менеджером — доступ по непубличной ссылке (16-символьный id).
+    // get — по знанию id (клиент/менеджер по ссылке); list (перечисление всех сессий, в т.ч.
+    // с PII contact) — только администратор. Аноним создаёт и дополняет свою сессию по её id.
+    // MVP: update по знанию id; ужесточить полевыми правилами позже.
+    match /chatSessions/{sessionId} {
+      allow get: if true;
+      allow list: if isPriceAdmin();
+      allow create: if true;
+      // Клиент дополняет свою сессию по знанию id, но не может подменить id/дату создания
+      // и не может УКОРОТИТЬ/переписать историю — только дополнять (size только растёт).
+      // Это ограничивает подмену чужой переписки (id теперь криптостойкий).
+      // Администратор — полный доступ.
+      allow update: if isPriceAdmin()
+        || (request.resource.data.id == resource.data.id
+            && request.resource.data.createdAt == resource.data.createdAt
+            && request.resource.data.messages.size() >= resource.data.messages.size());
+      allow delete: if isPriceAdmin();
+    }
+
+    // База знаний (консультации, самопомощь) — публичное чтение, запись администратору
+    match /knowledgeArticles/{docId} {
+      allow read: if true;
+      allow write: if isPriceAdmin();
+    }
+
+    // Обратная связь клиентов — создаёт любой; читает/изменяет только администратор
+    // (содержит контактные данные клиента). Лёгкая защита от абьюза — лимит полей;
+    // полноценно — App Check + rate-limit (в бэклоге).
+    match /feedback/{docId} {
+      allow create: if request.resource.data.keys().size() <= 14;
+      allow read, update, delete: if isPriceAdmin();
+    }
+
+    // Правки поведения ИИ — публичное чтение (инжектятся в промпт), запись администратору
+    match /behaviorCorrections/{docId} {
+      allow read: if true;
+      allow write: if isPriceAdmin();
+    }
+
+    // База клиентов и их корабликов — создаёт любой (опросник); читает/меняет только
+    // администратор (содержит контактные данные). Пополнение из 1С идёт через сервер
+    // (Admin SDK минует правила).
+    match /clientBoats/{docId} {
+      // Лёгкая защита от абьюза — лимит полей; полноценно — App Check + rate-limit (в бэклоге).
+      allow create: if request.resource.data.keys().size() <= 20;
+      allow read, update, delete: if isPriceAdmin();
+    }
+
+    // Шаблоны жалоб (симптом → диагностика + варианты ремонта) — публичное чтение
+    // (контекст для ИИ-оценки), запись администратору.
+    match /complaintTemplates/{docId} {
+      allow read: if true;
+      allow write: if isPriceAdmin();
+    }
+
+    // Задачи сервиса (отправка комплектующих, доп. работа…) — создаёт любой (клиент из
+    // чата), читает/меняет только администратор. Лёгкая защита от абьюза — лимит полей.
+    match /serviceTasks/{docId} {
+      allow create: if request.resource.data.keys().size() <= 14;
+      allow read, update, delete: if isPriceAdmin();
+    }
+
+    // Профили клиентов (ключ = нормализованный телефон). Клиентские потоки (опросник,
+    // заявка) делают merge-upsert (arrayUnion только добавляет) — поэтому create/update
+    // разрешены всем, но с лимитом полей. Чтение/список — только администратор (PII).
+    // Полноценно от абьюза — App Check + rate-limit (в бэклоге).
+    match /clientProfiles/{docId} {
+      allow create, update: if request.resource.data.keys().size() <= 10;
+      allow read, list, delete: if isPriceAdmin();
+    }
+
     // Deny all other access by default
     match /{document=**} {
       allow read, write: if false;

@@ -24,6 +24,12 @@ import {
   ListItemText,
   Collapse,
   Chip,
+  Switch,
+  FormControlLabel,
+  Checkbox,
+  Divider,
+  Stack,
+  Link,
 } from '@mui/material'
 import {
   Phone as PhoneIcon,
@@ -35,6 +41,10 @@ import {
 } from '@mui/icons-material'
 import LanguageSelector from '@/components/common/LanguageSelector'
 import { serviceApi, ServiceCenter, ServiceTypeItem, NewRepairRequest } from '@/api/endpoints/service'
+import { chatSessionService } from '@/api/chatSessionService'
+import { clientProfileService } from '@/api/clientProfileService'
+import { aiApi } from '@/api/endpoints/ai'
+import { defaultAuthorization, NO_REAPPROVAL_DEVIATION_PCT } from '@/types/chat'
 import { searchCities, getWarehouses, NPCity, NPWarehouse } from '@/api/endpoints/novaposhta'
 import { useSettingsStore } from '@/store/settingsStore'
 
@@ -70,6 +80,12 @@ export default function NewRepairPage() {
     t('repair.stepService', 'Сервіс'),
     t('repair.stepDelivery', 'Доставка'),
   ]
+  // Из чата тип сервиса уже подразумевается (ремонт) — шаг «Тип сервісу» пропускаем,
+  // тип подбираем автоматически. stepFlow — реальные индексы шагов в порядке показа.
+  const fromChat = !!searchParams.get('chat')
+  const stepFlow = fromChat ? [0, 2, 3] : [0, 1, 2, 3]
+  const displayLabels = stepFlow.map((i) => steps[i])
+  const displayIndex = Math.max(0, stepFlow.indexOf(activeStep))
 
   // Service types
   const [serviceTypes, setServiceTypes] = useState<ServiceTypeItem[]>([])
@@ -102,6 +118,10 @@ export default function NewRepairPage() {
   const [loadingWarehouses, setLoadingWarehouses] = useState(false)
 
   // Submit state
+  // Согласование объёма работ + принятие условий (на стадии заявки)
+  const [authorization, setAuthorization] = useState(defaultAuthorization())
+  const [acceptedTerms, setAcceptedTerms] = useState(false)
+
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<{ id: string } | null>(null)
@@ -126,6 +146,51 @@ export default function NewRepairPage() {
       }
     }
   }, [searchParams, serviceTypes])
+
+  // Prefill from chat session (arriving from estimate chat: /repair/new?chat=<id>).
+  // Контакт переносим, а описание проблемы — ИИ-резюме диалога (неисправность + план),
+  // а не сырой текст переписки.
+  useEffect(() => {
+    const chatId = searchParams.get('chat')
+    if (!chatId) return
+    ;(async () => {
+      const s = await chatSessionService.load(chatId)
+      if (!s) return
+      if (s.contact?.phone) setPhone((p) => p || s.contact!.phone!)
+      if (s.contact?.name) setFirstName((n) => n || s.contact!.name!)
+      const firstClient = s.messages.find((m) => m.role === 'client' && !m.internal)
+      const convo = s.messages
+        .filter((m) => !m.internal && m.text)
+        .map((m) => `${m.role === 'client' ? 'Клієнт' : m.role === 'manager' ? 'Менеджер' : 'Помічник'}: ${m.text}`)
+        .join('\n')
+      let summary = firstClient?.text || ''
+      if (convo) {
+        const res = await aiApi.improveText({
+          currentText: convo,
+          userPrompt: 'Підсумуй це звернення для заявки на ремонт: коротко (2–4 речення) опиши, яка несправність і що плануємо зробити (якщо це зрозуміло з діалогу). Без вступних фраз, лише суть.',
+          context: 'diagnostics',
+          lang: 'uk',
+        })
+        if (res.success && res.data?.text) summary = res.data.text
+      }
+      if (summary) setComplaint((c) => c || summary)
+    })()
+  }, [searchParams]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Из чата тип сервиса не спрашиваем — авто-выбираем первый доступный (лист дерева).
+  useEffect(() => {
+    if (!fromChat || selectedServiceType || serviceTypes.length === 0) return
+    const firstLeaf = (items: ServiceTypeItem[]): { id: string; name: string; path: string[] } | null => {
+      for (const it of items) {
+        if (!it.List || it.List.length === 0) return { id: it.ID, name: it.Name, path: [] }
+        const found = firstLeaf(it.List)
+        if (found) return found
+      }
+      return null
+    }
+    const leaf = firstLeaf(serviceTypes)
+    if (leaf) setSelectedServiceType(leaf)
+  }, [fromChat, serviceTypes, selectedServiceType])
 
   // Auto-fill form from user profile
   useEffect(() => {
@@ -285,7 +350,7 @@ export default function NewRepairPage() {
   // Step validation
   const isStep1Valid = isValidPhone(phone) && lastName.trim() && firstName.trim()
   const isStep2Valid = selectedServiceType !== null
-  const isStep3Valid = selectedServiceCenter && complaint.trim()
+  const isStep3Valid = selectedServiceCenter && complaint.trim() && acceptedTerms
   const isStep4Valid = selectedCity && selectedWarehouse
 
   // Toggle expand item
@@ -347,11 +412,13 @@ export default function NewRepairPage() {
   }
 
   const handleNext = () => {
-    setActiveStep((prev) => prev + 1)
+    const i = stepFlow.indexOf(activeStep)
+    setActiveStep(stepFlow[Math.min(i + 1, stepFlow.length - 1)])
   }
 
   const handleBack = () => {
-    setActiveStep((prev) => prev - 1)
+    const i = stepFlow.indexOf(activeStep)
+    setActiveStep(stepFlow[Math.max(i - 1, 0)])
   }
 
   const handleSubmit = async () => {
@@ -375,6 +442,19 @@ export default function NewRepairPage() {
     const result = await serviceApi.createRepairRequest(request)
 
     if (result.success && result.data) {
+      // Сохраняем согласование в связанную чат-сессию (если заявка из чата) — менеджер увидит его.
+      const chatId = searchParams.get('chat')
+      if (chatId) {
+        const s = await chatSessionService.load(chatId)
+        if (s) await chatSessionService.save({ ...s, authorization, outcome: 'repair-request' })
+      }
+      // Профиль клиента по телефону (авто-слияние по номеру)
+      if (phone.trim()) {
+        await clientProfileService.upsertByPhone(phone, {
+          name: `${lastName} ${firstName}`.trim(),
+          sessionId: chatId || null,
+        })
+      }
       setSuccess({ id: result.data.ID })
     } else {
       setError(result.error?.message || t('common.error'))
@@ -445,8 +525,8 @@ export default function NewRepairPage() {
           </Typography>
 
           {/* Stepper */}
-          <Stepper activeStep={activeStep} sx={{ mb: 4 }}>
-            {steps.map((label) => (
+          <Stepper activeStep={displayIndex} sx={{ mb: 4 }}>
+            {displayLabels.map((label) => (
               <Step key={label}>
                 <StepLabel>{label}</StepLabel>
               </Step>
@@ -576,6 +656,28 @@ export default function NewRepairPage() {
                 fullWidth
                 placeholder={t('repair.complaintPlaceholder', 'Опишіть проблему з вашим пристроєм...')}
               />
+
+              {/* Согласование объёма работ (переключатели с интервалами) */}
+              <Divider textAlign="left"><Typography variant="caption">Погодження робіт</Typography></Divider>
+              <Alert severity="info" icon={false} sx={{ fontSize: 13, py: 0.5 }}>
+                Якщо фактична смета відрізняється від попередньої не більше ніж на {NO_REAPPROVAL_DEVIATION_PCT}% —
+                додаткове погодження не потрібне.
+              </Alert>
+              <Stack spacing={1.5} sx={{ alignItems: 'flex-start' }}>
+                <FormControlLabel sx={{ alignItems: 'flex-start', m: 0 }}
+                  control={<Switch checked={authorization.fixOtherVisibleDefects} onChange={(e) => setAuthorization({ ...authorization, fixOtherVisibleDefects: e.target.checked })} />}
+                  label="Усувати інші видимі дефекти, виявлені під час діагностики/ремонту" />
+                <FormControlLabel sx={{ alignItems: 'flex-start', m: 0 }}
+                  control={<Switch checked={authorization.autoApproveNewDefects} onChange={(e) => setAuthorization({ ...authorization, autoApproveNewDefects: e.target.checked })} />}
+                  label={`Дозволяю роботи по нових дефектах без окремого погодження, якщо їх вартість ≤ ${authorization.newDefectsBoatPctThreshold}% вартості кораблика`} />
+                <FormControlLabel sx={{ alignItems: 'flex-start', m: 0 }}
+                  control={<Switch checked={authorization.autoApproveEstimateIncrease} onChange={(e) => setAuthorization({ ...authorization, autoApproveEstimateIncrease: e.target.checked })} />}
+                  label={`Дозволяю ремонт без додаткового погодження, якщо смета зросла, але не більше ніж на ${authorization.estimateIncreasePctThreshold}%`} />
+              </Stack>
+
+              <FormControlLabel sx={{ alignItems: 'flex-start', m: 0 }}
+                control={<Checkbox checked={acceptedTerms} onChange={(e) => setAcceptedTerms(e.target.checked)} />}
+                label={<Typography variant="body2">Я приймаю <Link href="/service-content-admin" target="_blank" rel="noopener">умови обслуговування</Link> сервісу</Typography>} />
 
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                 <Button onClick={handleBack}>{t('common.back')}</Button>

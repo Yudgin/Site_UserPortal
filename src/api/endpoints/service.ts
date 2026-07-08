@@ -133,6 +133,18 @@ const normalizeResponse = (raw: any): ServiceRequestData => {
     }
   }
 
+  // Гарантируем стабильный id у вариантов ремонта: если 1С не отдаёт id, синтезируем
+  // по индексу. UI использует id как value радиокнопки, отправляет его в API и по нему
+  // резолвит выбранный вариант — без нормализации связь value↔id ломается.
+  const normalizeRepairOptions = (options: any): RepairOption[] => {
+    if (!Array.isArray(options)) return []
+    return options.map((o, idx) => ({
+      id: String(o?.id ?? o?.ID ?? `opt-${idx}`),
+      description: o?.description || o?.Description || '',
+      price: Number(o?.price ?? o?.Price ?? 0),
+    }))
+  }
+
   return {
     requestId: raw.requestId || raw.FixNumber || raw.request_id || '',
     clientInfo: normalizeClientInfo(raw.ClientInfo || raw.clientInfo),
@@ -145,7 +157,7 @@ const normalizeResponse = (raw: any): ServiceRequestData => {
       statusHistory: normalizeStatusHistory(raw.shipment?.statusHistory || raw.status_history || []),
     },
     complaint: raw.complaint || raw.preinspection || '',
-    repairOptions: raw.repairOptions || raw.repair_options || [],
+    repairOptions: normalizeRepairOptions(raw.repairOptions || raw.repair_options || []),
     selectedRepairOptionId: raw.selectedRepairOptionId || raw.selected_option?.id || null,
     selectedRepairConfirmedAt: raw.selectedRepairConfirmedAt || raw.selected_option?.selected_at || null,
     comments: raw.comments || raw.Comunacation || [],

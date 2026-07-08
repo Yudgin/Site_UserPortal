@@ -19,6 +19,20 @@ import NewRepairPage from '@/pages/NewRepairPage'
 import RepairsPage from '@/pages/RepairsPage'
 import PixelEditorPage from '@/pages/PixelEditorPage'
 import DesignPage from '@/pages/DesignPage'
+import PriceListAdminPage from '@/pages/PriceListAdminPage'
+import ServiceContentAdminPage from '@/pages/ServiceContentAdminPage'
+import KnowledgeAdminPage from '@/pages/KnowledgeAdminPage'
+import ClientChatPage from '@/pages/ClientChatPage'
+import ManagerInboxPage from '@/pages/ManagerInboxPage'
+import FeedbackAdminPage from '@/pages/FeedbackAdminPage'
+import ServicePresentationPage from '@/pages/ServicePresentationPage'
+import QuestionnairePage from '@/pages/QuestionnairePage'
+import PublicPriceListPage from '@/pages/PublicPriceListPage'
+import KnowledgeArticlePage from '@/pages/KnowledgeArticlePage'
+import ClientsAdminPage from '@/pages/ClientsAdminPage'
+import ClientProfilesAdminPage from '@/pages/ClientProfilesAdminPage'
+import ComplaintsAdminPage from '@/pages/ComplaintsAdminPage'
+import TasksAdminPage from '@/pages/TasksAdminPage'
 import Layout from '@/components/common/Layout'
 
 interface ProtectedRouteProps {
@@ -58,8 +72,10 @@ const ProtectedRoute = ({ children }: ProtectedRouteProps) => {
     )
   }
 
-  // Only redirect to connect-boat if boats are synced but empty
+  // Only redirect to connect-boat if boats are synced but empty.
+  // Администратор (developer) видит панель (и меню) даже без привязанной лодки.
   if (isSynced && boats.length === 0) {
+    if (user.role === 'developer') return <>{children}</>
     return <Navigate to="/connect-boat" replace />
   }
 
@@ -117,6 +133,112 @@ export const AppRoutes = () => {
       <Route path="/serviceshare/:requestId" element={<ServiceSharePage />} />
       <Route path="/service/:requestId" element={<ServiceSharePage />} />
       <Route path="/repair/new" element={<NewRepairPage />} />
+
+      {/* Service presentation - public marketing page */}
+      <Route path="/presentation" element={<ServicePresentationPage />} />
+
+      {/* Intake questionnaire - public */}
+      <Route path="/questionnaire" element={<QuestionnairePage />} />
+
+      {/* Public price list - public */}
+      <Route path="/price" element={<PublicPriceListPage />} />
+
+      {/* Public knowledge article view - public */}
+      <Route path="/help/:id" element={<KnowledgeArticlePage />} />
+
+      {/* Client AI chat - public (session protected by unguessable id) */}
+      <Route path="/chat" element={<ClientChatPage />} />
+      <Route path="/chat/:sessionId" element={<ClientChatPage />} />
+
+      {/* Manager inbox (escalated chats) - requires auth (email-gated inside) */}
+      <Route
+        path="/manager-inbox"
+        element={
+          <AuthenticatedRoute>
+            <ManagerInboxPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Feedback + AI behavior corrections admin - requires auth (email-gated inside) */}
+      <Route
+        path="/feedback-admin"
+        element={
+          <AuthenticatedRoute>
+            <FeedbackAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Clients & boats database - requires auth (email-gated inside) */}
+      <Route
+        path="/clients-admin"
+        element={
+          <AuthenticatedRoute>
+            <ClientsAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Client profiles (merged by phone) - requires auth (email-gated inside) */}
+      <Route
+        path="/client-profiles"
+        element={
+          <AuthenticatedRoute>
+            <ClientProfilesAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Complaint templates (symptom → works) - requires auth (email-gated inside) */}
+      <Route
+        path="/complaints-admin"
+        element={
+          <AuthenticatedRoute>
+            <ComplaintsAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Service tasks (parts shipment, extra work…) - requires auth (email-gated inside) */}
+      <Route
+        path="/tasks-admin"
+        element={
+          <AuthenticatedRoute>
+            <TasksAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Price list admin - requires auth (email-gated inside), no boat needed */}
+      <Route
+        path="/pricelist-admin"
+        element={
+          <AuthenticatedRoute>
+            <PriceListAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Service content admin (agreement text) - requires auth (email-gated inside) */}
+      <Route
+        path="/service-content-admin"
+        element={
+          <AuthenticatedRoute>
+            <ServiceContentAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Knowledge base admin - requires auth (email-gated inside) */}
+      <Route
+        path="/knowledge-admin"
+        element={
+          <AuthenticatedRoute>
+            <KnowledgeAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
 
       {/* Boat configurator - public */}
       <Route path="/configurator" element={<BoatConfiguratorPage />} />

@@ -1,0 +1,274 @@
+// Прайс-лист и сметы по сервису
+//
+// Модель разбивает сервисную работу на мелкие детализированные операции.
+// Каждая операция (Work) измеряется в нормо-часах (как в автосервисе) и может
+// тянуть за собой материалы (Material) и опциональные доп. товары/услуги (Addon).
+// Быстрые наборы (Kit) — внутренний инструмент: один выбор менеджера
+// разворачивается в длинный список недорогих работ, из которых складывается смета.
+
+// Языки локализации (совпадает с src/i18n)
+export type Lang = 'uk' | 'en' | 'ru' | 'de' | 'pl' | 'ro'
+
+// Локализованный текст. uk обязателен как основной/fallback язык проекта,
+// остальные языки — опционально (см. helper tName в src/utils/pricing.ts).
+export type LocalizedText = { uk: string } & Partial<Record<Lang, string>>
+
+// В проекте валюта одна — гривна (UAH). Тип оставлен на будущее расширение.
+export type Currency = 'UAH'
+
+// Категория работ — для группировки в прайс-листе и админке
+export interface WorkCategory {
+  id: string
+  name: LocalizedText
+  order: number
+}
+
+// Материал (расходник), привязывается к работе. Цена фиксированная (без сезона).
+export interface Material {
+  id: string
+  code: string
+  name: LocalizedText
+  unit: LocalizedText // единица измерения: шт, мл, компл.
+  price: number // цена за единицу, грн
+  // Отметка «продажа нового оборудования»: если этот материал попал в смету,
+  // наценка высокого сезона снимается со ВСЕЙ сметы (достаточно одной такой позиции).
+  waivesHighSeasonSurcharge?: boolean
+  active: boolean
+}
+
+// Доп. товар или услуга, привязывается к работе (например «утилизация салфеток»)
+export interface Addon {
+  id: string
+  code: string
+  name: LocalizedText
+  kind: 'service' | 'product'
+  // product — фиксированная цена; service — тоже фикс. цена (сезон к доп. не применяется,
+  // см. решение по сезонности: коэффициент только на основную работу).
+  price: number // грн
+  active: boolean
+}
+
+// Ссылка на материал внутри работы (сколько единиц нужно на одну работу)
+export interface WorkMaterialRef {
+  materialId: string
+  qty: number
+}
+
+// Ссылка на доп. услугу/товар внутри работы
+export interface WorkAddonRef {
+  addonId: string
+  // true — включён в смету сразу; false — предлагается опционально (менеджер/клиент решает)
+  includedByDefault: boolean
+}
+
+// Как работа ведёт себя в смете с несколькими жалобами:
+//  • 'once'          — выполняется один раз на всю смету, даже если нужна нескольким
+//                       жалобам (приёмка, транспортировка, упаковка) → дубликаты объединяются;
+//  • 'perComplaint'  — выполняется отдельно для каждой жалобы (настройка, ремонт) → суммируется.
+export type WorkDedupe = 'once' | 'perComplaint'
+
+// Работа (операция) — базовая единица прайс-листа
+export interface Work {
+  id: string
+  code: string // артикул, напр. "W-DRY-01"
+  name: LocalizedText
+  description?: LocalizedText
+  categoryId: string
+  laborHours: number // нормо-часы
+  dedupe: WorkDedupe // поведение при нескольких жалобах в смете
+  // Отметка «без сезонной наценки»: если эта работа попала в смету, наценка высокого
+  // сезона снимается со ВСЕЙ сметы (достаточно одной такой позиции). Напр. работы по
+  // установке нового оборудования. Обобщает serviceKind='upgrade' на уровень позиции.
+  waivesHighSeasonSurcharge?: boolean
+  // Критическая работа (не работает мотор, замена сервопривода руля/бункера): наценка
+  // высокого сезона НЕ применяется к этой позиции, но ТОЛЬКО к ней (в отличие от
+  // waivesHighSeasonSurcharge, который снимает наценку со всей сметы).
+  criticalNoSurcharge?: boolean
+  materials: WorkMaterialRef[]
+  addons: WorkAddonRef[]
+  publicVisible: boolean // показывать ли в публичном прайс-листе
+  active: boolean
+}
+
+// Позиция набора
+export interface KitItem {
+  workId: string
+  qty: number
+}
+
+// Тип обращения:
+//  • 'repair'  — устранение поломки. Сезонная наценка применяется; в высокий/средний
+//                сезон клиенту можно предложить отложить сервис до дешёвого сезона,
+//                если кораблик пока эксплуатируется.
+//  • 'upgrade' — установка доп. оборудования или обновление (эхолот, ПО автопилота).
+//                Выполняется сразу; наценка высокого сезона НЕ применяется.
+export type ServiceKind = 'repair' | 'upgrade'
+
+// Быстрый набор — разворачивается в список работ. Внутренний инструмент менеджера.
+// Сезонный режим набора:
+//  • normal — обычная работа: действуют сезонные коэффициенты (наценка/скидка) на позиции;
+//  • critical — критическая поломка: позиции набора БЕЗ наценки высокого сезона (скидка низкого — остаётся);
+//  • benefit — льготный: без наценки высокого сезона, И при добавлении в смету снимает наценку со ВСЕЙ сметы.
+export type KitSeasonMode = 'normal' | 'critical' | 'benefit'
+
+export const KIT_SEASON_LABELS: Record<KitSeasonMode, string> = {
+  normal: 'Обычная (сезон действует)',
+  critical: 'Критическая (без наценки сезона)',
+  benefit: 'Льготная (снимает наценку со всей сметы)',
+}
+
+export interface Kit {
+  id: string
+  code: string
+  name: LocalizedText
+  description?: LocalizedText
+  categoryId: string
+  serviceKind: ServiceKind
+  seasonMode?: KitSeasonMode // сезонное поведение набора (по умолчанию 'normal')
+  items: KitItem[]
+  active: boolean
+}
+
+// Сезонное правило (зима −25% → 0.75, высокий сезон +50% → 1.5, обычный → 1.0)
+export interface SeasonRule {
+  id: string
+  name: LocalizedText
+  coefficient: number
+  months: number[] // месяцы (1–12) для авто-применения по календарю
+}
+
+// ==== Расшифровка ставки нормо-часа ====
+//
+// Ставка клиенту складывается из компонентов: зарплата мастеру + налоги на ФОТ +
+// администрирование + норма прибыли + налог с оборота (ФОП). Клиент может раскрыть
+// расшифровку по клику на ставку. Итоговая ставка вычисляется из компонентов.
+
+// От какой базы считается процентный компонент:
+//  • 'salary'     — от базовой зарплаты (налоги на ФОТ: НДФЛ, военный сбор, ЕСВ);
+//  • 'cumulative' — от накопленной суммы (наценка: администрирование, прибыль);
+//  • 'revenue'    — от итоговой выручки, gross-up (налог с оборота ФОП).
+export type RateComponentBase = 'salary' | 'cumulative' | 'revenue'
+
+export interface RateComponent {
+  id: string
+  name: LocalizedText
+  kind: 'amount' | 'percent' // amount — абсолютная сумма (зарплата), percent — процент
+  value: number // грн (amount) или % (percent)
+  base?: RateComponentBase // для percent: от чего считать (по умолчанию 'cumulative')
+}
+
+export interface RateBreakdown {
+  components: RateComponent[]
+}
+
+// Глобальные настройки ценообразования (редактирует администратор)
+export interface PricingSettings {
+  currency: Currency
+  // Ставка нормо-часа, грн. Если задан rateBreakdown — вычисляется из него,
+  // иначе используется это значение напрямую (см. resolveLaborRate).
+  laborRatePerHour: number
+  rateBreakdown?: RateBreakdown
+  seasons: SeasonRule[]
+  // Ручной оверрайд активного сезона по id; null → авто по текущему месяцу
+  activeSeasonOverride: string | null
+  // Общие работы, сопутствующие любому ремонту (приёмка, подготовка к тесту, упаковка…).
+  // Коды работ прайса; при сборке любой сметы они добавляются автоматически, если ещё
+  // не включены (в т.ч. через набор). Дедупликация — по dedupe='once'.
+  commonWorkCodes?: string[]
+  updatedAt: string
+  updatedBy: string | null
+}
+
+// ==== Смета (результат расчёта) ====
+
+export type EstimateLineType = 'labor' | 'material' | 'addon'
+
+// Одна строка детальной сметы
+export interface EstimateLine {
+  type: EstimateLineType
+  refId: string // workId | materialId | addonId
+  code: string
+  name: LocalizedText
+  qty: number
+  laborHours?: number // для строк type='labor'
+  unitPrice: number // цена за единицу ДО сезонного коэффициента, грн
+  seasonApplied: boolean // применён ли сезонный коэффициент к этой строке (только labor)
+  lineTotal: number // итог строки, грн (с учётом сезона для labor)
+  sourceKitId?: string // из какого набора пришла работа (для группировки)
+  fromWorkId?: string // к какой работе относится материал/доп.
+  // Мульти-жалобы:
+  complaintIndex?: number // к какой жалобе относится (индекс секции)
+  merged?: boolean // объединено из нескольких жалоб (dedupe='once')
+  mergedCount?: number // сколько жалоб требовало эту позицию (>1 при merged)
+}
+
+// Ссылка на жалобу внутри сметы (для истории и базы знаний AI)
+export interface EstimateComplaintRef {
+  complaint: string
+  kitId?: string
+  serviceKind?: ServiceKind // поломка или апгрейд (влияет на сезонную наценку)
+}
+
+// Смета целиком. Сохраняется в Firestore и служит обучающим примером для AI-оценки.
+export interface Estimate {
+  id: string
+  requestId: string | null // привязка к заявке 1С (если смета из заявки)
+  title: string
+  complaint: string // сводная жалоба (для совместимости; детали — в sections)
+  sections?: EstimateComplaintRef[] // разбивка по жалобам (мульти-жалобы)
+  lines: EstimateLine[]
+  laborTotal: number // сумма работ (с сезоном), грн
+  materialsTotal: number
+  addonsTotal: number
+  seasonId: string
+  seasonCoefficient: number // сырой коэффициент активного сезона (какой сезон)
+  seasonSurchargeApplied: boolean // фактически ли применена наценка (>1) к работам сметы
+  laborRatePerHour: number // ставка на момент составления сметы (фиксируем для истории)
+  total: number
+  currency: Currency
+  source: 'manual' | 'kit' | 'ai' // как собрана смета
+  createdAt: string
+  createdBy: string | null
+}
+
+// ==== База знаний для AI-оценки ====
+//
+// Перегенерируется после накопления новых смет (порог KB_REBUILD_THRESHOLD).
+// AI опирается на неё и на прайс-лист, не выдумывая позиции.
+
+export interface KnowledgeEntry {
+  problemType: string // нормализованный тип проблемы
+  aliases: string[] // варианты формулировок жалоб клиентов
+  suggestedKitIds: string[] // подходящие наборы из прайса
+  suggestedWorkIds: string[] // подходящие работы из прайса
+  priceRange: { min: number; max: number; avg: number }
+  sampleCount: number // на скольких сметах основано
+}
+
+export interface KnowledgeBase {
+  entries: KnowledgeEntry[]
+  generatedAt: string
+  basedOnEstimates: number // всего смет учтено
+  estimatesSinceRebuild: number // накоплено новых с последней генерации
+  version: number
+}
+
+// Порог перегенерации базы знаний (по числу новых смет)
+export const KB_REBUILD_THRESHOLD = 5
+
+// ==== Предложение отложить сервис (сезонная экономия) ====
+//
+// Для поломок в сезон с наценкой (коэф > 1): если кораблик ещё можно эксплуатировать,
+// клиенту выгоднее сделать сервис в дешёвый сезон. Апгрейды сюда не попадают —
+// они выполняются сразу и без сезонной наценки.
+export interface DeferSuggestion {
+  applicable: boolean
+  currentSeasonId: string
+  currentCoefficient: number
+  bestSeasonId: string // сезон с минимальным коэффициентом
+  bestCoefficient: number
+  currentTotal: number // итог сметы сейчас
+  bestTotal: number // итог, если отложить до дешёвого сезона
+  savings: number // экономия, грн
+  reason: 'high-season' | 'not-applicable' | 'boat-not-usable' | 'upgrade-only'
+}

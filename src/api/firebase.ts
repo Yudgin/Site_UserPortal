@@ -10,7 +10,7 @@ import {
   onAuthStateChanged,
   User as FirebaseUser,
 } from 'firebase/auth'
-import { getFirestore, Firestore } from 'firebase/firestore'
+import { initializeFirestore, getFirestore, Firestore } from 'firebase/firestore'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -24,7 +24,18 @@ const firebaseConfig = {
 // Initialize Firebase only if config is available
 const app = firebaseConfig.apiKey ? initializeApp(firebaseConfig) : null
 export const auth = app ? getAuth(app) : null
-export const db: Firestore | null = app ? getFirestore(app) : null
+// ignoreUndefinedProperties: Firestore по умолчанию бросает на полях со значением
+// undefined. Наши сборщики смет/записей иногда формируют опциональные поля как
+// undefined — включаем игнорирование, чтобы setDoc не падал.
+// try/catch — на случай повторной инициализации (HMR): initializeFirestore нельзя вызвать дважды.
+const makeDb = (a: NonNullable<typeof app>): Firestore => {
+  try {
+    return initializeFirestore(a, { ignoreUndefinedProperties: true })
+  } catch {
+    return getFirestore(a)
+  }
+}
+export const db: Firestore | null = app ? makeDb(app) : null
 
 const googleProvider = new GoogleAuthProvider()
 const facebookProvider = new FacebookAuthProvider()

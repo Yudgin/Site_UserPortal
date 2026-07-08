@@ -5,6 +5,7 @@ import { useAuthStore } from '@/store/authStore'
 import { useBoatStore } from '@/store/boatStore'
 import { useSettingsStore } from '@/store/settingsStore'
 import { firebaseAuth } from '@/api/firebase'
+import { isAdminEmail } from '@/config/access'
 
 function App() {
   const { setUser, setLoading, isLoading } = useAuthStore()
@@ -23,7 +24,8 @@ function App() {
           displayName: firebaseUser.displayName,
           photoURL: firebaseUser.photoURL,
           phoneNumber: firebaseUser.phoneNumber,
-          role: 'user',
+          // Роль администратора прайс-листа выдаётся по email (см. config/access.ts)
+          role: isAdminEmail(firebaseUser.email) ? 'developer' : 'user',
           createdAt: firebaseUser.metadata.creationTime || new Date().toISOString(),
           lastLogin: new Date().toISOString(),
         })
