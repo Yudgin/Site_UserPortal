@@ -82,6 +82,15 @@ export const CHANNEL_LABELS: Record<ChatChannel, string> = {
   whatsapp: 'WhatsApp',
 }
 
+// Тема обращения (определяется ботом-консьержем: сервис/ремонт, покупка/продажа, другое)
+export type ChatTopic = 'service' | 'sales' | 'other'
+
+export const TOPIC_LABELS: Record<ChatTopic, string> = {
+  service: 'Сервіс',
+  sales: 'Продаж',
+  other: 'Інше',
+}
+
 export interface ChatSession {
   id: string
   createdAt: string
@@ -91,6 +100,7 @@ export interface ChatSession {
   requestId: string | null // привязка к заявке 1С (если есть)
   channel?: ChatChannel // канал обращения (по умолчанию 'web')
   channelUserId?: string // идентификатор пользователя в мессенджере (chat_id/sender.id/wa_id)
+  topic?: ChatTopic // тема обращения (сервис/продажа/другое) — определяет бот-консьерж
   contact: { name?: string; phone?: string } | null
   messages: ChatMessage[]
   escalation: ChatEscalation | null

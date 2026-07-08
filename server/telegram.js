@@ -44,7 +44,7 @@ export function registerTelegramBot(app, deps) {
       if (m.text && m.text.trim() === '/start') {
         await send(
           chatId,
-          'Вітаємо у сервісі RunFerry! 🚤\n\nОпишіть вашу проблему з корабликом — я орієнтовно оціню ремонт. Щоб ми могли з вами зв’язатися, поділіться, будь ласка, номером телефону кнопкою нижче.',
+          'Вітаємо у RunFerry! 🚤\n\nНапишіть, чим допомогти: ремонт/сервіс кораблика, купівля нового чи інше питання. Щоб ми могли з вами зв’язатися, поділіться, будь ласка, номером телефону кнопкою нижче.',
           {
             reply_markup: {
               keyboard: [[{ text: '📱 Поділитися номером', request_contact: true }]],
@@ -82,10 +82,11 @@ export function registerTelegramBot(app, deps) {
       }
 
       session.messages.push({ id: genMsgId(), role: 'client', text, at: nowIso() })
-      const { reply, needsManager, usage } = await core.aiReply(session)
+      const { reply, needsManager, intent, usage } = await core.aiReply(session)
       session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
       if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)
-      if (needsManager) core.applyEscalation(session)
+      session.topic = intent
+      if (needsManager) core.applyEscalation(session, intent)
       await core.saveSession(session)
       await send(chatId, reply)
       if (needsManager) {

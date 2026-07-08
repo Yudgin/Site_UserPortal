@@ -13,7 +13,7 @@ import {
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import { chatSessionService } from '@/api/chatSessionService'
-import { NO_REAPPROVAL_DEVIATION_PCT, OUTCOME_LABELS, CHANNEL_LABELS } from '@/types/chat'
+import { NO_REAPPROVAL_DEVIATION_PCT, OUTCOME_LABELS, CHANNEL_LABELS, TOPIC_LABELS } from '@/types/chat'
 import type { ChatSession, ChatMessage, ChatReminder } from '@/types/chat'
 
 const genId = (): string => Math.random().toString(36).slice(2, 10)
@@ -140,6 +140,9 @@ export default function ManagerInboxPage() {
                       <TableCell>
                         {s.channel && s.channel !== 'web' && (
                           <Chip size="small" color="info" variant="outlined" sx={{ mr: 0.5 }} label={CHANNEL_LABELS[s.channel]} />
+                        )}
+                        {s.topic && s.topic !== 'service' && (
+                          <Chip size="small" color={s.topic === 'sales' ? 'success' : 'default'} variant="outlined" sx={{ mr: 0.5 }} label={TOPIC_LABELS[s.topic]} />
                         )}
                         {s.contact?.name || s.contact?.phone || '—'}
                       </TableCell>

@@ -156,12 +156,17 @@ export function createMessengerCore(deps) {
       )
   }
 
-  const applyEscalation = (session) => {
+  const ESCALATION_REASON = {
+    service: 'Автоматичний помічник передав сервісний запит менеджеру',
+    sales: 'Питання щодо купівлі/продажу кораблика — потрібен менеджер з продажу',
+    other: 'Автоматичний помічник передав запит менеджеру',
+  }
+  const applyEscalation = (session, intent = 'service') => {
     if (session.status !== 'active') return
     session.status = 'escalated'
     session.escalation = {
       escalatedAt: nowIso(),
-      reason: 'Автоматичний помічник передав запит менеджеру',
+      reason: ESCALATION_REASON[intent] || ESCALATION_REASON.service,
       dueAt: escalationDue(),
       resolvedAt: null,
       managerEmail: null,
@@ -198,8 +203,12 @@ export function createMessengerCore(deps) {
             schema: {
               type: 'object',
               additionalProperties: false,
-              properties: { reply: { type: 'string' }, needsManager: { type: 'boolean' } },
-              required: ['reply', 'needsManager'],
+              properties: {
+                reply: { type: 'string' },
+                needsManager: { type: 'boolean' },
+                intent: { type: 'string', enum: ['service', 'sales', 'other'], description: 'Тема звернення: сервіс/ремонт, купівля/продаж, інше' },
+              },
+              required: ['reply', 'needsManager', 'intent'],
             },
           },
         },
@@ -209,16 +218,17 @@ export function createMessengerCore(deps) {
       try {
         parsed = JSON.parse(raw)
       } catch {
-        parsed = { reply: raw, needsManager: false }
+        parsed = { reply: raw, needsManager: false, intent: 'service' }
       }
       return {
         reply: parsed.reply || 'Вибачте, не вдалося сформувати відповідь.',
         needsManager: !!parsed.needsManager,
+        intent: ['service', 'sales', 'other'].includes(parsed.intent) ? parsed.intent : 'service',
         usage: buildUsage(msg.usage),
       }
     } catch (e) {
       console.error('core aiReply error:', e.message)
-      return { reply: 'Вибачте, сталася технічна помилка. Спробуйте, будь ласка, ще раз трохи пізніше.', needsManager: false }
+      return { reply: 'Вибачте, сталася технічна помилка. Спробуйте, будь ласка, ще раз трохи пізніше.', needsManager: false, intent: 'service' }
     }
   }
 

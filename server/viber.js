@@ -13,7 +13,7 @@ import { createMessengerCore, nowIso, genMsgId, accumulateUsage } from './messen
 
 const SENDER_NAME = 'RunFerry'
 const WELCOME =
-  'Вітаємо у сервісі RunFerry! 🚤 Опишіть, будь ласка, вашу проблему з корабликом — і я орієнтовно оціню ремонт та підкажу, що можна зробити.'
+  'Вітаємо у RunFerry! 🚤 Напишіть, чим допомогти: ремонт/сервіс кораблика, купівля нового чи інше питання — і я підкажу або підключу менеджера.'
 
 export function registerViberBot(app, deps) {
   const core = createMessengerCore(deps)
@@ -77,10 +77,11 @@ export function registerViberBot(app, deps) {
       }
 
       session.messages.push({ id: genMsgId(), role: 'client', text, at: nowIso() })
-      const { reply, needsManager, usage } = await core.aiReply(session)
+      const { reply, needsManager, intent, usage } = await core.aiReply(session)
       session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
       if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)
-      if (needsManager) core.applyEscalation(session)
+      session.topic = intent
+      if (needsManager) core.applyEscalation(session, intent)
       await core.saveSession(session)
       await send(userId, reply)
       if (needsManager) {
