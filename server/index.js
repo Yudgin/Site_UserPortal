@@ -422,6 +422,17 @@ const buildUsage = (usage = {}) => {
   }
 }
 
+// Anthropic Messages API требует чередования ролей user/assistant. В нашем диалоге
+// подряд могут идти сообщения от ИИ и менеджера (оба → assistant) — их нужно слить
+// в одно, иначе API отклонит запрос (400 roles must alternate).
+const mergeConsecutiveMessages = (msgs) =>
+  msgs.reduce((acc, m) => {
+    const last = acc[acc.length - 1]
+    if (last && last.role === m.role) last.content += '\n\n' + m.content
+    else acc.push({ role: m.role, content: m.content })
+    return acc
+  }, [])
+
 // Краткая инструкция по типу текста (контекст задаётся клиентом)
 const AI_CONTEXTS = {
   terms: 'Це текст угоди про використання сервісу з ремонту (умови обслуговування) для клієнтів рибальських прикормочних корабликів.',
@@ -527,9 +538,11 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
     }
 
     // Внутренние заметки менеджера в промпт не идут; client → user, ai/manager → assistant
-    const chatMessages = messages
-      .filter((m) => !m.internal && m.text)
-      .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text) }))
+    const chatMessages = mergeConsecutiveMessages(
+      messages
+        .filter((m) => !m.internal && m.text)
+        .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text) }))
+    )
     if (chatMessages.length === 0 || chatMessages[0].role !== 'user') {
       return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
     }
@@ -656,9 +669,11 @@ app.post('/api/ai/knowledge-chat', async (req, res) => {
       return res.status(400).json({ success: false, error: { code: 'NO_MESSAGES', message: 'Порожній діалог' } })
     }
 
-    const chatMessages = messages
-      .filter((m) => !m.internal && m.text)
-      .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text) }))
+    const chatMessages = mergeConsecutiveMessages(
+      messages
+        .filter((m) => !m.internal && m.text)
+        .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text) }))
+    )
     if (chatMessages.length === 0 || chatMessages[0].role !== 'user') {
       return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
     }

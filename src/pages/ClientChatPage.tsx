@@ -430,7 +430,7 @@ function PartsDialog({ sessionId, contact, free, suggestedParts, onClose, onDone
   // Автоподсказка городов (дебаунс 350мс)
   useEffect(() => {
     const q = cityInput.trim()
-    if (q.length < 2) { setCityOpts([]); return }
+    if (q.length < 2) { setCityOpts([]); setLoadingCity(false); return }
     setLoadingCity(true)
     const t = setTimeout(async () => {
       const r = await searchCities(q)
@@ -441,7 +441,7 @@ function PartsDialog({ sessionId, contact, free, suggestedParts, onClose, onDone
 
   // Автоподсказка отделений выбранного города (дебаунс 350мс)
   useEffect(() => {
-    if (!city) { setWhOpts([]); return }
+    if (!city) { setWhOpts([]); setLoadingWh(false); return }
     setLoadingWh(true)
     const t = setTimeout(async () => {
       const r = await getWarehouses(city.Ref, whInput.trim())
