@@ -122,7 +122,7 @@ export const aiApi = {
   // рекомендованных комплектующих (когда предложен самостоятельный ремонт).
   estimateChat: async (
     params: EstimateChatParams
-  ): Promise<ApiResponse<{ reply: string; needsManager: boolean; offeredSelfRepair: boolean; warranty: 'yes' | 'no' | 'unknown'; parts: { name: string; qty: number }[]; estimate: { lines: { label: string; price: number }[]; total: number }; usage?: AiUsage }>> => {
+  ): Promise<ApiResponse<{ reply: string; needsManager: boolean; offeredSelfRepair: boolean; warranty: 'yes' | 'no' | 'unknown'; parts: { name: string; qty: number }[]; estimate: { lines: { label: string; price: number; workCode?: string }[]; total: number }; usage?: AiUsage }>> => {
     try {
       const response = await axios.post(`${BACKEND_URL}/api/ai/estimate-chat`, params)
       return { success: true, data: response.data.data }

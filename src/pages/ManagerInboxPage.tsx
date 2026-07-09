@@ -8,11 +8,14 @@ import {
 import {
   Home as HomeIcon, SupportAgent as InboxIcon, Send as SendIcon, NoteAdd as NoteIcon,
   CheckCircle as ResolveIcon, ContentCopy as CopyIcon, Refresh as RefreshIcon,
-  NotificationsActive as ReminderIcon,
+  NotificationsActive as ReminderIcon, LocalOffer as OfferIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
+import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { chatSessionService } from '@/api/chatSessionService'
+import { pricingService } from '@/api/pricingService'
+import { buildEstimate, aiEstimateToWorkInputs } from '@/utils/pricing'
 import { NO_REAPPROVAL_DEVIATION_PCT, OUTCOME_LABELS, CHANNEL_LABELS, TOPIC_LABELS } from '@/types/chat'
 import type { ChatSession, ChatMessage, ChatReminder } from '@/types/chat'
 
@@ -197,6 +200,10 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
   const [saving, setSaving] = useState(false)
   const [reminderNote, setReminderNote] = useState('')
   const [reminderAt, setReminderAt] = useState('')
+  const [creatingOffer, setCreatingOffer] = useState(false)
+  const navigate = useNavigate()
+  const { catalog, indexed, loadFromServer } = usePricingStore()
+  useEffect(() => { loadFromServer() }, [loadFromServer])
 
   const persist = async (next: ChatSession) => {
     setSaving(true)
@@ -205,6 +212,33 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
     if (ok) { setS(next); onSaved(next) }
     else onNotify('Не удалось сохранить')
     return ok
+  }
+
+  // Материализовать оценку ИИ в смету stage='ai' (по распознанным работам прайса) и открыть
+  // редактор предложения, засеянный ею. Нераспознанные позиции сообщаем мастеру.
+  const createOfferFromAi = async () => {
+    if (!s.estimate || !s.estimate.lines.length) return
+    const { works, unmatched } = aiEstimateToWorkInputs(s.estimate.lines, indexed)
+    if (!works.length) {
+      onNotify('ІІ не розпізнав робіт прайсу — зберіть пропозицію вручну')
+      navigate('/offer-editor')
+      return
+    }
+    setCreatingOffer(true)
+    try {
+      const est = buildEstimate({
+        works, catalog: indexed, settings: catalog.settings,
+        meta: { requestId: s.requestId ?? null, title: 'Оцінка ІІ', source: 'ai', createdBy: managerEmail },
+      })
+      const saved = await pricingService.saveEstimate({ ...est, kind: 'preliminary', stage: 'ai', status: 'draft' })
+      if (!saved) { onNotify('Не вдалося зберегти оцінку ІІ'); return }
+      if (unmatched.length) onNotify(`ІІ не розпізнав: ${unmatched.join(', ')} — додайте в редакторі`)
+      navigate(`/offer-editor?parent=${saved.id}`)
+    } catch (e) {
+      onNotify(e instanceof Error ? e.message : 'Помилка')
+    } finally {
+      setCreatingOffer(false)
+    }
   }
 
   const sendReply = async () => {
@@ -282,6 +316,11 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
               ))}
             </Box>
             Итого: <b>{s.estimate.total.toLocaleString('uk-UA')} грн</b>
+            <Box sx={{ mt: 1 }}>
+              <Button size="small" variant="contained" startIcon={<OfferIcon />} disabled={creatingOffer} onClick={createOfferFromAi}>
+                {creatingOffer ? 'Готуємо…' : 'Створити пропозицію з оцінки ІІ'}
+              </Button>
+            </Box>
           </Alert>
         )}
         {s.authorization && (

@@ -692,6 +692,26 @@ export const analyzeSeasonalWaiver = (estimate: Estimate, catalog: PriceCatalog)
   return { waived, hasSurcharge, seasonCoefficient: coef, surchargePercent, discountPercent, messageUk, avoidLabelUk }
 }
 
+// ==== AI-оценка → работы прайса (для засева редактора предложения) ====
+//
+// AI-оценка возвращает строки {label, price, workCode?}. workCode проставляется best-effort,
+// когда ИИ узнал работу прайса. Здесь маппим распознанные строки на реальные работы каталога
+// (по code), а нераспознанные возвращаем списком, чтобы мастер добавил их вручную.
+export const aiEstimateToWorkInputs = (
+  lines: { label: string; price: number; workCode?: string }[],
+  catalog: PriceCatalog
+): { works: EstimateWorkInput[]; unmatched: string[] } => {
+  const byCode = new Map(Object.values(catalog.works).map((w) => [w.code, w]))
+  const works: EstimateWorkInput[] = []
+  const unmatched: string[] = []
+  for (const l of lines || []) {
+    const w = l.workCode ? byCode.get(l.workCode) : undefined
+    if (w && w.active) works.push({ workId: w.id, qty: 1 })
+    else unmatched.push(l.label)
+  }
+  return { works, unmatched }
+}
+
 // ==== Предварительная → фактическая калькуляция ====
 //
 // Сравнение план/факт и логика необходимости повторного согласования с клиентом.

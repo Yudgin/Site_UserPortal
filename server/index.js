@@ -622,6 +622,7 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
                       properties: {
                         label: { type: 'string', description: 'Назва позиції/роботи' },
                         price: { type: 'number', description: 'Ціна позиції, грн' },
+                        workCode: { type: 'string', description: 'Код роботи з ПРАЙСУ (те, що в дужках [код] у прайсі, БЕЗ дужок), ЯКЩО ця позиція відповідає конкретній роботі з прайсу. Якщо позиція не відповідає жодній роботі прайсу — НЕ додавай це поле і не вигадуй код.' },
                       },
                       required: ['label', 'price'],
                     },
@@ -654,7 +655,7 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
     const estLines = parsed.estimate && Array.isArray(parsed.estimate.lines)
       ? parsed.estimate.lines
           .filter((l) => l && l.label)
-          .map((l) => ({ label: String(l.label).trim(), price: Number(l.price) || 0 }))
+          .map((l) => ({ label: String(l.label).trim(), price: Number(l.price) || 0, ...(l.workCode ? { workCode: String(l.workCode).trim() } : {}) }))
       : []
     const estimate = { lines: estLines, total: Number(parsed.estimate?.total) || 0 }
 

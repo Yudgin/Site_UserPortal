@@ -42,7 +42,8 @@ export interface ChatAiUsage {
 // Структурированная предварительная оценка (последняя, что назвал ИИ в диалоге).
 // Хранится на сессии — менеджер видит смету не только текстом переписки.
 export interface PreliminaryEstimate {
-  lines: { label: string; price: number }[]
+  // workCode — код работы прайса, если ИИ распознал позицию (для засева редактора предложения)
+  lines: { label: string; price: number; workCode?: string }[]
   total: number
   at: string // когда ИИ её сформировал
 }
