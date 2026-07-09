@@ -19,6 +19,7 @@ import { useAuthStore } from '@/store/authStore'
 import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { pricingService } from '@/api/pricingService'
+import { serviceRequestService } from '@/api/serviceRequestService'
 import { secureId } from '@/utils/id'
 import { buildEstimate, tName, formatMoney, type EstimateWorkInput } from '@/utils/pricing'
 import type { Estimate, EstimateOffer, ServiceKind } from '@/types/pricing'
@@ -34,6 +35,7 @@ export default function OfferEditorPage() {
 
   const parentId = params.get('parent') || '' // засев из оценки ИИ / существующей сметы
   const loadOfferId = params.get('offer') || '' // открыть существующее предложение
+  const serviceRequestId = params.get('request') || '' // привязка к нашей заявке на обслуживание
 
   const [offerId, setOfferId] = useState('')
   const [title, setTitle] = useState('')
@@ -118,6 +120,7 @@ export default function OfferEditorPage() {
         stage: 'proposed',
         status: 'approved', // вариант утверждён мастером (это его предложение)
         offerId: oid,
+        serviceRequestId: serviceRequestId || null,
         variantLabel: label.trim(),
         variantOrder: variants.length,
         parentEstimateId: parentId || null,
@@ -128,11 +131,13 @@ export default function OfferEditorPage() {
       setVariants(nextVariants)
       // upsert предложения. На ПЕРВОМ варианте инициализируем; далее пишем ТОЛЬКО свои поля
       // (title/variantIds) через merge — иначе затрём выбор клиента (selectedVariantId/status/chosenAt).
+      const isFirst = !offerId
       const offerPatch: Partial<EstimateOffer> & { id: string } = offerId
         ? { id: oid, title: title || currentEstimate.title || 'Пропозиція', variantIds: nextVariants.map((v) => v.id) }
         : {
             id: oid,
             requestId: currentEstimate.requestId ?? null,
+            serviceRequestId: serviceRequestId || null,
             title: title || currentEstimate.title || 'Пропозиція',
             variantIds: nextVariants.map((v) => v.id),
             selectedVariantId: null,
@@ -141,6 +146,10 @@ export default function OfferEditorPage() {
             createdBy: user?.email ?? null,
           }
       await pricingService.saveOffer(offerPatch)
+      // При создании предложения привязываем его к заявке и двигаем её статус.
+      if (isFirst && serviceRequestId) {
+        await serviceRequestService.save({ id: serviceRequestId, offerId: oid, status: 'offered' }).catch(() => {})
+      }
       setOfferId(oid)
       setOfferStatus((s) => s || 'pending_choice')
       // очистить конструктор под следующий вариант

@@ -268,6 +268,7 @@ export interface Estimate {
   kind?: EstimateKind // роль сметы (по умолчанию 'preliminary')
   stage?: EstimateStage // стадия: 'ai' | 'proposed' | 'actual' (уточняет kind)
   status?: EstimateStatus // статус жизненного цикла (для фактической)
+  serviceRequestId?: string | null // привязка к НАШЕЙ заявке на обслуживание (serviceRequests)
   parentEstimateId?: string | null // из чего выросла: proposed←ai, actual←выбранный proposed-вариант
   // Для stage='proposed' — принадлежность к предложению (набору вариантов) и подпись варианта:
   offerId?: string | null
@@ -287,6 +288,7 @@ export interface Estimate {
 export interface EstimateOffer {
   id: string
   requestId: string | null // привязка к заявке 1С (если из заявки)
+  serviceRequestId?: string | null // привязка к НАШЕЙ заявке на обслуживание (serviceRequests)
   title: string // заголовок предложения (кораблик/скарга)
   variantIds: string[] // id вариантов (Estimate stage='proposed')
   selectedVariantId: string | null // выбранный клиентом вариант (путь ремонта)

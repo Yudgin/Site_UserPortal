@@ -19,6 +19,7 @@ import { useAuthStore } from '@/store/authStore'
 import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { pricingService } from '@/api/pricingService'
+import { serviceRequestService } from '@/api/serviceRequestService'
 import { paymentsApi, FopPublic } from '@/api/endpoints/payments'
 import {
   buildEstimate, estimate2goods, compareEstimates, needsReapproval, tName, formatMoney,
@@ -37,7 +38,7 @@ export default function ActualEstimateEditorPage() {
   const { catalog, indexed, loadFromServer, isLoading } = usePricingStore()
 
   const parentId = params.get('parent') || ''
-  const requestIdParam = params.get('request') || ''
+  const serviceRequestId = params.get('request') || '' // наша заявка на обслуживание
 
   const [prelim, setPrelim] = useState<Estimate | null>(null)
   const [rows, setRows] = useState<WorkRow[]>([])
@@ -90,14 +91,14 @@ export default function ActualEstimateEditorPage() {
       settings: catalog.settings,
       serviceKind,
       meta: {
-        requestId: requestIdParam || prelim?.requestId || null,
+        requestId: prelim?.requestId ?? null, // 1С-ссылка (унаследованная от предложения), если есть
         title: title || (prelim?.title ?? ''),
         complaint: complaint || (prelim?.complaint ?? ''),
         source: 'manual',
         createdBy: user?.email ?? null,
       },
     })
-  }, [rows, indexed, catalog.settings, serviceKind, title, complaint, requestIdParam, prelim, user])
+  }, [rows, indexed, catalog.settings, serviceKind, title, complaint, prelim, user])
 
   const comparison = useMemo(() => (prelim && actual ? compareEstimates(prelim, actual) : null), [prelim, actual])
   const reapproval = useMemo(() => (prelim && actual ? needsReapproval(prelim, actual) : null), [prelim, actual])
@@ -134,18 +135,22 @@ export default function ActualEstimateEditorPage() {
         }
       }
       const required = reapproval?.required ?? false
+      const srId = serviceRequestId || prelim?.serviceRequestId || null
       const toSave: Estimate = {
         ...actual,
         id: savedId || '', // повторное сохранение перезапишет ту же смету
         kind: 'actual',
         status: required ? 'pending_approval' : 'approved',
         parentEstimateId: prelim?.id ?? null,
+        serviceRequestId: srId,
         receiptGoods: estimate2goods(actual, 'uk'),
         fopId,
       }
       const res = await pricingService.saveEstimate(toSave)
       if (!res) { notify('Не вдалося зберегти кошторис', 'error'); return null }
       setSavedId(res.id)
+      // Привязываем факт к заявке и двигаем её в «в роботі».
+      if (srId) await serviceRequestService.save({ id: srId, actualEstimateId: res.id, status: 'in_work' }).catch(() => {})
       // Факт собран по выбранному варианту → «замораживаем» предложение: клиент больше не может
       // переизбрать путь (иначе оффер и факт/чек разойдутся).
       if (prelim?.offerId) {

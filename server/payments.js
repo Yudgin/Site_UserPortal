@@ -128,6 +128,12 @@ export function registerPayments(app, deps) {
         ...(receipt ? { taxUrl: receipt.taxUrl || null, fiscalCode: receipt.fiscalCode || null } : {}),
         updatedAt: nowIso(),
       }, { merge: true })
+      // Двигаем НАШУ заявку в «виконано» и привязываем оплату.
+      if (order.serviceRequestId) {
+        await adminDb.collection('serviceRequests').doc(String(order.serviceRequestId)).set({
+          paymentId: order.orderId, status: 'done', updatedAt: nowIso(),
+        }, { merge: true })
+      }
     } catch (e) {
       console.error('estimate writeback:', e.message)
     }
@@ -184,7 +190,7 @@ export function registerPayments(app, deps) {
   // Ядро создания оплаты (переиспользуется HTTP-роутом и оплатой из сметы).
   // Возвращает { ok:true, data } или { ok:false, status, code, message }. Деньги — server-authoritative:
   // amount обязан точно совпадать с суммой позиций (в копейках), иначе чек и списание разойдутся.
-  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId }) => {
+  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId, serviceRequestId }) => {
     const fop = getFop(fopId)
     if (!fop) return { ok: false, status: 400, code: 'BAD_FOP', message: 'Невідомий ФОП' }
 
@@ -202,6 +208,7 @@ export function registerPayments(app, deps) {
     const order = {
       orderId, fopId, amount: amountKop / 100, goods, method, status: 'pending', createdAt: nowIso(),
       ...(deliveryEmail ? { deliveryEmail } : {}), ...(estimateId ? { estimateId: String(estimateId) } : {}),
+      ...(serviceRequestId ? { serviceRequestId: String(serviceRequestId) } : {}),
     }
 
     if (method.startsWith('liqpay')) {
@@ -309,6 +316,7 @@ export function registerPayments(app, deps) {
           fopId: est.fopId, amount, goods, method: method || 'liqpay-card',
           description: description || `Оплата RunFerry (кошторис ${estimateId})`,
           clientPhone, resultUrl, deliveryEmail: deliveryEmail || undefined, estimateId,
+          serviceRequestId: est.serviceRequestId || null,
         })
         if (!r.ok) {
           await ref.set({ payInitiatedAt: null }, { merge: true }).catch(() => {}) // снять claim → можно повторить
@@ -451,8 +459,12 @@ export function registerPayments(app, deps) {
         // Повторный выбор того же варианта — идемпотентно, не переписываем chosenAt.
         if (offer.selectedVariantId === String(variantId) && offer.status === 'chosen') return { ok: true }
         tx.set(ref, { selectedVariantId: String(variantId), status: 'chosen', chosenAt: nowIso(), updatedAt: nowIso() }, { merge: true })
-        return { ok: true }
+        return { ok: true, serviceRequestId: offer.serviceRequestId || null }
       })
+      // Клиент выбрал путь → двигаем нашу заявку в «погоджено».
+      if (out.ok && out.serviceRequestId) {
+        await adminDb.collection('serviceRequests').doc(String(out.serviceRequestId)).set({ status: 'approved', updatedAt: nowIso() }, { merge: true }).catch(() => {})
+      }
       if (!out.ok) return res.status(out.status).json({ success: false, error: { code: out.code, message: out.message } })
       return res.json({ success: true })
     } catch (err) {

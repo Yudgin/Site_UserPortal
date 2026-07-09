@@ -38,6 +38,8 @@ import EstimateSharePage from '@/pages/EstimateSharePage'
 import OfferEditorPage from '@/pages/OfferEditorPage'
 import OfferSharePage from '@/pages/OfferSharePage'
 import PaymentsAdminPage from '@/pages/PaymentsAdminPage'
+import ServiceRequestPage from '@/pages/ServiceRequestPage'
+import ServiceRequestsListPage from '@/pages/ServiceRequestsListPage'
 import Layout from '@/components/common/Layout'
 
 interface ProtectedRouteProps {
@@ -257,6 +259,24 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <PaymentsAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Service requests (заявки) - requires auth (email-gated inside) */}
+      <Route
+        path="/service-requests"
+        element={
+          <AuthenticatedRoute>
+            <ServiceRequestsListPage />
+          </AuthenticatedRoute>
+        }
+      />
+      <Route
+        path="/service-request/:id"
+        element={
+          <AuthenticatedRoute>
+            <ServiceRequestPage />
           </AuthenticatedRoute>
         }
       />

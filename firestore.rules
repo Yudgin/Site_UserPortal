@@ -72,6 +72,12 @@ service cloud.firestore {
       allow read, list, create, update, delete: if isPriceAdmin();
     }
 
+    // Заявки на обслуживание (наша локальная сущность-хаб). Содержат контакт клиента (PII) и
+    // связи с калькуляциями/оплатой — доступ только администратору.
+    match /serviceRequests/{reqId} {
+      allow read, list, create, update, delete: if isPriceAdmin();
+    }
+
     // Редактируемые тексты сервиса (соглашение и т.п.) — публичное чтение,
     // запись только администратору.
     match /serviceContent/{docId} {

@@ -16,6 +16,7 @@ import { isAdminEmail } from '@/config/access'
 import { chatSessionService } from '@/api/chatSessionService'
 import { messengerApi } from '@/api/endpoints/messenger'
 import { pricingService } from '@/api/pricingService'
+import { serviceRequestService } from '@/api/serviceRequestService'
 import { buildEstimate, aiEstimateToWorkInputs } from '@/utils/pricing'
 import { NO_REAPPROVAL_DEVIATION_PCT, OUTCOME_LABELS, CHANNEL_LABELS, TOPIC_LABELS } from '@/types/chat'
 import type { ChatSession, ChatMessage, ChatReminder } from '@/types/chat'
@@ -205,9 +206,14 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
   const [reminderNote, setReminderNote] = useState('')
   const [reminderAt, setReminderAt] = useState('')
   const [creatingOffer, setCreatingOffer] = useState(false)
+  const [existingRequestId, setExistingRequestId] = useState<string | null>(null)
   const navigate = useNavigate()
   const { catalog, indexed, loadFromServer } = usePricingStore()
   useEffect(() => { loadFromServer() }, [loadFromServer])
+  // Уже есть заявка по этому обращению? (чтобы предлагать «Відкрити», а не плодить дубли)
+  useEffect(() => {
+    serviceRequestService.listBySession(s.id).then((rs) => { if (rs.length) setExistingRequestId(rs[0].id) })
+  }, [s.id])
 
   const persist = async (next: ChatSession) => {
     setSaving(true)
@@ -218,26 +224,34 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
     return ok
   }
 
-  // Материализовать оценку ИИ в смету stage='ai' (по распознанным работам прайса) и открыть
-  // редактор предложения, засеянный ею. Нераспознанные позиции сообщаем мастеру.
-  const createOfferFromAi = async () => {
-    if (!s.estimate || !s.estimate.lines.length) return
-    const { works, unmatched } = aiEstimateToWorkInputs(s.estimate.lines, indexed)
-    if (!works.length) {
-      onNotify('ІІ не розпізнав робіт прайсу — зберіть пропозицію вручну')
-      navigate('/offer-editor')
-      return
-    }
+  // Создать НАШУ заявку на обслуживание из обращения. Если у ИИ была оценка — материализуем её
+  // в смету stage='ai' (для последующего засева предложения) и привязываем к заявке.
+  const createServiceRequest = async () => {
     setCreatingOffer(true)
     try {
-      const est = buildEstimate({
-        works, catalog: indexed, settings: catalog.settings,
-        meta: { requestId: s.requestId ?? null, title: 'Оцінка ІІ', source: 'ai', createdBy: managerEmail },
+      let aiEstimateId: string | null = null
+      if (s.estimate && s.estimate.lines.length) {
+        const { works, unmatched } = aiEstimateToWorkInputs(s.estimate.lines, indexed)
+        if (works.length) {
+          const est = buildEstimate({ works, catalog: indexed, settings: catalog.settings, meta: { title: 'Оцінка ІІ', source: 'ai', createdBy: managerEmail } })
+          const saved = await pricingService.saveEstimate({ ...est, kind: 'preliminary', stage: 'ai', status: 'draft' })
+          if (saved) aiEstimateId = saved.id
+          if (unmatched.length) onNotify(`ІІ не розпізнав: ${unmatched.join(', ')} — додайте в редакторі`)
+        }
+      }
+      const complaint = s.messages.filter((m) => m.role === 'client' && !m.internal).map((m) => m.text)[0] || ''
+      const created = await serviceRequestService.save({
+        sessionId: s.id,
+        externalRequestId: s.requestId ?? null,
+        clientName: s.contact?.name,
+        clientPhone: s.contact?.phone,
+        complaint,
+        status: 'new',
+        aiEstimateId,
+        createdBy: managerEmail,
       })
-      const saved = await pricingService.saveEstimate({ ...est, kind: 'preliminary', stage: 'ai', status: 'draft' })
-      if (!saved) { onNotify('Не вдалося зберегти оцінку ІІ'); return }
-      if (unmatched.length) onNotify(`ІІ не розпізнав: ${unmatched.join(', ')} — додайте в редакторі`)
-      navigate(`/offer-editor?parent=${saved.id}`)
+      if (!created) { onNotify('Не вдалося створити заявку'); return }
+      navigate(`/service-request/${created.id}`)
     } catch (e) {
       onNotify(e instanceof Error ? e.message : 'Помилка')
     } finally {
@@ -319,6 +333,15 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
             <> · <i>номер ще не отримано (бот попросить у клієнта)</i></>
           )}
         </Alert>
+        <Box sx={{ mb: 2 }}>
+          {existingRequestId ? (
+            <Button variant="contained" startIcon={<OfferIcon />} onClick={() => navigate(`/service-request/${existingRequestId}`)}>Відкрити заявку</Button>
+          ) : (
+            <Button variant="contained" startIcon={<OfferIcon />} disabled={creatingOffer} onClick={createServiceRequest}>
+              {creatingOffer ? 'Створюємо…' : 'Створити заявку на обслуговування'}
+            </Button>
+          )}
+        </Box>
         {s.status === 'escalated' && s.escalation && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             Эскалировано: {new Date(s.escalation.escalatedAt).toLocaleString('ru-RU')}. Причина: {s.escalation.reason}.
@@ -340,11 +363,6 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
               ))}
             </Box>
             Итого: <b>{s.estimate.total.toLocaleString('uk-UA')} грн</b>
-            <Box sx={{ mt: 1 }}>
-              <Button size="small" variant="contained" startIcon={<OfferIcon />} disabled={creatingOffer} onClick={createOfferFromAi}>
-                {creatingOffer ? 'Готуємо…' : 'Створити пропозицію з оцінки ІІ'}
-              </Button>
-            </Box>
           </Alert>
         )}
         {s.authorization && (

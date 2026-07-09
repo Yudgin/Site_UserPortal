@@ -43,6 +43,7 @@ import {
   Person as ProfileIcon,
   ReceiptLong as EstimateIcon,
   Payments as PaymentsIcon,
+  AssignmentTurnedIn as RequestIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { useBoatStore } from '@/store/boatStore'
@@ -106,6 +107,7 @@ export default function Layout() {
     menuItems.push({ text: 'Соглашение', icon: <TermsIcon />, path: '/service-content-admin' })
     menuItems.push({ text: 'База знаний', icon: <KnowledgeIcon />, path: '/knowledge-admin' })
     menuItems.push({ text: 'Обращения', icon: <InboxIcon />, path: '/manager-inbox' })
+    menuItems.push({ text: 'Заявки', icon: <RequestIcon />, path: '/service-requests' })
     menuItems.push({ text: 'Задачи', icon: <TaskIcon />, path: '/tasks-admin' })
     menuItems.push({ text: 'Клиенты', icon: <ClientsIcon />, path: '/clients-admin' })
     menuItems.push({ text: 'Профили', icon: <ProfileIcon />, path: '/client-profiles' })
