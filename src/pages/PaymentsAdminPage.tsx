@@ -27,8 +27,17 @@ const receiptChip = (p: PaymentRow) => {
 
 const statusChip = (s: string) => {
   if (s === 'paid') return <Chip size="small" color="success" variant="outlined" label="оплачено" />
+  if (s === 'FAILURE') return <Chip size="small" color="error" variant="outlined" label="помилка" />
+  if (s === 'EXPIRED') return <Chip size="small" color="error" variant="outlined" label="протерміновано" />
   if (s === 'pending' || s === 'WAITING_FOR_CLIENT' || s === 'WAITING_FOR_STORE_CONFIRM') return <Chip size="small" color="warning" variant="outlined" label={s === 'pending' ? 'очікує' : 'очікує банк'} />
   return <Chip size="small" variant="outlined" label={s} />
+}
+
+// Безопасное форматирование даты (не 'Invalid Date' на неожиданном формате)
+const fmtDate = (s?: string): string => {
+  if (!s) return '—'
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? '—' : d.toLocaleString('uk-UA')
 }
 
 export default function PaymentsAdminPage() {
@@ -134,7 +143,7 @@ export default function PaymentsAdminPage() {
             <TableBody>
               {shown.map((p) => (
                 <TableRow key={p.orderId} hover>
-                  <TableCell>{p.createdAt ? new Date(p.createdAt).toLocaleString('uk-UA') : '—'}</TableCell>
+                  <TableCell>{fmtDate(p.createdAt)}</TableCell>
                   <TableCell>{p.fopId}</TableCell>
                   <TableCell>{p.provider || p.method || '—'}</TableCell>
                   <TableCell align="right">{formatMoney(p.amount)}</TableCell>
@@ -144,7 +153,7 @@ export default function PaymentsAdminPage() {
                     {p.taxUrl && <Link href={p.taxUrl} target="_blank" rel="noreferrer" sx={{ ml: 1, fontSize: 12 }}>відкрити</Link>}
                   </TableCell>
                   <TableCell align="right">
-                    {p.status === 'paid' && !p.receiptId && (
+                    {p.status === 'paid' && !p.receiptId && p.receiptStatus !== 'no-checkbox' && (
                       <Button size="small" variant="outlined" startIcon={<ReceiptIcon />} disabled={busy === p.orderId} onClick={() => refiscalize(p.orderId)}>
                         {busy === p.orderId ? '…' : 'Виписати чек'}
                       </Button>

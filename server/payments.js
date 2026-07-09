@@ -96,8 +96,23 @@ export function registerPayments(app, deps) {
   }
   const notifyOwnerNoReceipt = async (order, reason) => {
     if (!order || order.ownerNotified) return
+    // Атомарно «застолбить» отправку (ownerNotified), чтобы параллельные ретрай-вебхуки не
+    // задублировали алерт. Ветка no-checkbox идёт до claimFiscalization, поэтому свой claim здесь.
+    let claimed = false
+    try {
+      claimed = await adminDb.runTransaction(async (tx) => {
+        const ref = col().doc(order.orderId)
+        const s = await tx.get(ref)
+        if (!s.exists || s.data().ownerNotified) return false
+        tx.set(ref, { ownerNotified: true }, { merge: true })
+        return true
+      })
+    } catch (e) {
+      console.error('ownerNotified claim:', e.message)
+      return
+    }
+    if (!claimed) return
     await notifyOwner(`⚠️ RunFerry: оплата ${order.orderId} на ${order.amount} грн пройшла, але ЧЕК НЕ ВИБИТО (${reason}). ФОП ${order.fopId}. Перевірте в адмінці оплат.`)
-    await saveOrder({ orderId: order.orderId, ownerNotified: true })
   }
 
   // Обратная запись в фактическую смету (priceEstimates), из которой создана оплата.
