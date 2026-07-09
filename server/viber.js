@@ -4,9 +4,9 @@
 // Входящие -> chatSessions (channel='viber'). Требует Viber Chatbot (Bot API) токен
 // (создаётся через партнёра / панель Viber; см. docs/messenger-integration-plan.md).
 //
-// Важно: Viber НЕ передаёт номер телефона клиента — привязка к профилю по телефону
-// (как в Telegram через «поділитися контактом») здесь недоступна; клиента идентифицируем
-// по sender.id (channelUserId). Телефон при необходимости уточняем в переписке.
+// Важно: Viber НЕ передаёт номер телефона клиента (нет кнопки «поділитися контактом»).
+// Поэтому бот ПРОСИТ клиента прислать номер текстом (core.phoneAskLine) и извлекает его из
+// сообщения (core.captureContactPhone → normalizePhone), после чего привязывает clientProfile.
 import axios from 'axios'
 import crypto from 'crypto'
 import { createMessengerCore, nowIso, genMsgId, accumulateUsage } from './messengerCore.js'
@@ -77,13 +77,15 @@ export function registerViberBot(app, deps) {
       }
 
       session.messages.push({ id: genMsgId(), role: 'client', text, at: nowIso() })
+      await core.captureContactPhone(session, text) // клиент присылает номер текстом (Viber не даёт телефон)
       const { reply, needsManager, intent, usage } = await core.aiReply(session)
       session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
       if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)
       session.topic = intent
       if (needsManager) core.applyEscalation(session, intent)
+      const ask = core.phoneAskLine(session) // если номера ещё нет — попросити (один раз)
       await core.saveSession(session)
-      await send(userId, reply)
+      await send(userId, ask ? `${reply}\n\n${ask}` : reply)
       if (needsManager) {
         await send(userId, 'Ваш запит передано менеджеру — ми зв’яжемося з вами найближчим часом. 🙌')
       }

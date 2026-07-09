@@ -55,6 +55,7 @@ export function registerTelegramBot(app, deps) {
 
     // Сообщение клиента.
     session.messages.push({ id: genMsgId(), role: 'client', text, at: nowIso() })
+    await core.captureContactPhone(session, text) // клиент мог прислать номер текстом
     if (session.botPaused) {
       // Диалог ведёт человек — сохраняем сообщение (видно в инбоксе), но ИИ не отвечает.
       await core.saveSession(session)
@@ -65,8 +66,9 @@ export function registerTelegramBot(app, deps) {
     if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)
     session.topic = intent
     if (needsManager) core.applyEscalation(session, intent)
+    const ask = core.phoneAskLine(session) // просим номер (Business: кнопки контакта нет)
     await core.saveSession(session)
-    await send(chatId, reply, { business_connection_id: connId })
+    await send(chatId, ask ? `${reply}\n\n${ask}` : reply, { business_connection_id: connId })
     if (needsManager) {
       await send(chatId, 'Ваш запит передано менеджеру — ми зв’яжемося з вами найближчим часом. 🙌', { business_connection_id: connId })
     }
@@ -143,13 +145,15 @@ export function registerTelegramBot(app, deps) {
       }
 
       session.messages.push({ id: genMsgId(), role: 'client', text, at: nowIso() })
+      await core.captureContactPhone(session, text) // клиент мог прислать номер текстом (не кнопкой)
       const { reply, needsManager, intent, usage } = await core.aiReply(session)
       session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
       if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)
       session.topic = intent
       if (needsManager) core.applyEscalation(session, intent)
+      const ask = core.phoneAskLine(session) // если номера ещё нет — попросить (один раз)
       await core.saveSession(session)
-      await send(chatId, reply)
+      await send(chatId, ask ? `${reply}\n\n${ask}` : reply)
       if (needsManager) {
         await send(chatId, 'Ваш запит передано менеджеру — ми зв’яжемося з вами найближчим часом. 🙌')
       }

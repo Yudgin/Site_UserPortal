@@ -147,7 +147,10 @@ export default function ManagerInboxPage() {
                         {s.topic && s.topic !== 'service' && (
                           <Chip size="small" color={s.topic === 'sales' ? 'success' : 'default'} variant="outlined" sx={{ mr: 0.5 }} label={TOPIC_LABELS[s.topic]} />
                         )}
-                        {s.contact?.name || s.contact?.phone || '—'}
+                        {s.contact?.name || '—'}
+                        {s.contact?.phone && (
+                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>📱 {s.contact.phone}</Typography>
+                        )}
                       </TableCell>
                       <TableCell>{lastText(s)}</TableCell>
                       <TableCell align="right">{usdCost(s) ? `$${usdCost(s).toFixed(3)}` : '—'}</TableCell>
@@ -295,6 +298,17 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
         </Tooltip>
       </DialogTitle>
       <DialogContent dividers>
+        <Alert severity={s.contact?.phone ? 'info' : 'warning'} icon={false} sx={{ mb: 2 }}>
+          <b>Клієнт:</b> {s.contact?.name || '—'}
+          {s.contact?.phone ? (
+            <>
+              {' · 📱 '}<b>{s.contact.phone}</b>
+              <Button size="small" startIcon={<CopyIcon />} sx={{ ml: 1 }} onClick={() => { navigator.clipboard.writeText(s.contact!.phone!); onNotify('Номер скопійовано') }}>копіювати</Button>
+            </>
+          ) : (
+            <> · <i>номер ще не отримано (бот попросить у клієнта)</i></>
+          )}
+        </Alert>
         {s.status === 'escalated' && s.escalation && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             Эскалировано: {new Date(s.escalation.escalatedAt).toLocaleString('ru-RU')}. Причина: {s.escalation.reason}.

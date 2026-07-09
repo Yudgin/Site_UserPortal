@@ -21,6 +21,20 @@ export const normalizePhone = (raw) => {
   return d
 }
 
+// Извлечь украинский телефон из свободного текста (когда клиент присылает номер сообщением —
+// для Viber и Telegram Business, где кнопки «поділитися контактом» нет). Возвращает '' если нет.
+export const extractPhone = (text) => {
+  const candidates = String(text || '').match(/[+\d][\d\s()\-]{7,}\d/g) || []
+  for (const c of candidates) {
+    const norm = normalizePhone(c)
+    if (norm.length === 12 && norm.startsWith('380')) return norm
+  }
+  return ''
+}
+
+// Просьба прислать телефон (один раз на сессию), пока номера ещё нет.
+const PHONE_ASK = 'Підкажіть, будь ласка, ваш номер телефону для зв’язку (наприклад +380XX XXX XX XX) — щоб ми могли з вами зв’язатися.'
+
 // Ставка нормо-часа из расшифровки (зеркало computeLaborRate в src/utils/pricing.ts)
 const computeRate = (breakdown) => {
   const comps = (breakdown && breakdown.components) || []
@@ -156,6 +170,24 @@ export function createMessengerCore(deps) {
       )
   }
 
+  // Захват телефона из текста клиента (если ещё не сохранён) + привязка профиля. true, если захвачен.
+  const captureContactPhone = async (session, text) => {
+    if (session.contact && session.contact.phone) return false
+    const phone = extractPhone(text)
+    if (!phone) return false
+    session.contact = { ...(session.contact || {}), phone }
+    await upsertProfile(phone, { name: session.contact && session.contact.name, sessionId: session.id })
+    return true
+  }
+
+  // Вернуть строку-просьбу прислать телефон, если его ещё нет и ещё не просили (ставит phoneAsked).
+  const phoneAskLine = (session) => {
+    if (session.contact && session.contact.phone) return ''
+    if (session.phoneAsked) return ''
+    session.phoneAsked = true
+    return PHONE_ASK
+  }
+
   const ESCALATION_REASON = {
     service: 'Автоматичний помічник передав сервісний запит менеджеру',
     sales: 'Питання щодо купівлі/продажу кораблика — потрібен менеджер з продажу',
@@ -232,7 +264,7 @@ export function createMessengerCore(deps) {
     }
   }
 
-  return { buildPriceContext, newSession, findSession, saveSession, upsertProfile, applyEscalation, aiReply }
+  return { buildPriceContext, newSession, findSession, saveSession, upsertProfile, applyEscalation, aiReply, captureContactPhone, phoneAskLine }
 }
 
 export default createMessengerCore
