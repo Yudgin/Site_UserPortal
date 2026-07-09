@@ -48,6 +48,12 @@ service cloud.firestore {
       allow read, list, create, delete: if isPriceAdmin();
     }
 
+    // Оплаты и чеки. Пишутся ТОЛЬКО backend-ом (firebase-admin, минуя правила).
+    // С клиента — только чтение админом (содержат суммы/ФОП/статусы).
+    match /payments/{orderId} {
+      allow read, list: if isPriceAdmin();
+    }
+
     // Сметы — открываются клиентом по прямой ссылке (get по id), листинг и запись —
     // только администратор. get вместо read закрывает утечку всех смет через collection-запрос.
     match /priceEstimates/{estId} {

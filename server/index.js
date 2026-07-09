@@ -10,6 +10,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { registerTelegramBot } from './telegram.js'
 import { registerViberBot } from './viber.js'
+import { registerPayments } from './payments.js'
 
 dotenv.config()
 
@@ -40,8 +41,10 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }))
-// rawBody сохраняем для проверки подписи Viber-вебхука (HMAC-SHA256 сырого тела).
+// rawBody сохраняем для проверки подписи Viber-/monobank-вебхуков (HMAC-SHA256 сырого тела).
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf } }))
+// LiqPay шлёт вебхук form-urlencoded (поля data + signature)
+app.use(express.urlencoded({ extended: true }))
 
 // TurboSMS API configuration
 const TURBOSMS_API_URL = 'https://api.turbosms.ua'
@@ -964,6 +967,9 @@ const MESSENGER_SYSTEM = MESSENGER_PREAMBLE + '\n' + CHAT_SYSTEM
 const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM: MESSENGER_SYSTEM, mergeConsecutiveMessages, buildUsage }
 registerTelegramBot(app, messengerDeps)
 registerViberBot(app, messengerDeps)
+
+// Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
+registerPayments(app, { adminDb })
 
 // JSON Server for mock API (данные карты-портала: boats/reservoirs/…).
 // Изолируем: сбой mock-роутера (напр. отсутствует db.json) НЕ должен ронять сервер ботов/AI.

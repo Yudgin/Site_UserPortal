@@ -532,6 +532,24 @@
     --no-cpu-throttling --env-vars-file <env> --allow-unauthenticated`; фронт `npm run build` +
     `firebase deploy --only hosting`. Redeploy бэкенда — та же команда (env берётся из server/.env обоих репо).
 
+- Движок оплат (МУЛЬТИ-ФОП) — backend, начат:
+  - `server/fops.js` — реестр ФОП из env `FOPS_CONFIG` (JSON; секреты только там). Каждый ФОП: liqpay/
+    monoChast/monoAcquire/checkbox. `listFopsPublic` — без секретов (для UI).
+  - `server/liqpay.js` — LiqPay: `buildCheckout` (paytype card/paypart/moment_part), `verifyCallback`
+    (подпись `base64(sha1(priv+data+priv))`), decode.
+  - `server/monoChast.js` — monobank «Частини»: create/confirm/state, HMAC-SHA256 подпись + проверка колбэка.
+  - `server/checkbox.js` — ПРРО: signin(pin) с кэшем токена, ensureShift, `sellReceipt` (копейки/тысячные,
+    идемпотентный id), closeShift.
+  - `server/payments.js` — эндпоинты `/api/fops`, `/api/pay/create`, `/api/pay/status`,
+    вебхуки `/api/liqpay/callback` и `/api/mono/chast/callback`; единый `fiscalize()`. **Ключевое правило:**
+    заказ `payments/{id}` хранит `fopId`; чек выбивается кредами Checkbox ИМЕННО этого ФОП («кто принял
+    оплату — тот выдал чек»). Идемпотентность по orderId, проверка подписей вебхуков, роутинг колбэка по
+    order_id→fopId. index.js: `express.urlencoded` (LiqPay form), регистрация. Firestore-правило `payments`
+    (чтение — админ; запись — только backend). Проверено локально с тестовыми ФОП: подпись round-trip,
+    роутинг по ФОП, отклонение неверной подписи, мульти-ФОП, статусы.
+  - НЕ сделано: боевые креды (FOPS_CONFIG), деплой (redeploy Cloud Run + PUBLIC_BASE_URL), UI-админка
+    оплат/чеков + кнопка «Оплатити частинами» из заявки/бота, крон-опрос «висящих» частин + закрытие смены.
+
 **Периодический адверсариальный аудит (последний прогон):** 4 измерения × верификация на опровержение,
 подтверждено 5 находок, исправлено:
 - [HIGH→MEDIUM, исправлено] `estimate-chat`/`knowledge-chat` слали Anthropic два подряд `assistant`
