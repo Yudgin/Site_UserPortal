@@ -627,9 +627,19 @@
     order_id→fopId. index.js: `express.urlencoded` (LiqPay form), регистрация. Firestore-правило `payments`
     (чтение — админ; запись — только backend). Проверено локально с тестовыми ФОП: подпись round-trip,
     роутинг по ФОП, отклонение неверной подписи, мульти-ФОП, статусы.
-  - Крон-реконсиляция (`reconcile`, setInterval + `POST /api/pay/reconcile` под токеном
-    `PAYMENTS_ADMIN_TOKEN`): добивает застрявшие monobank-заявки опросом `order/state` и повторяет
-    непробитые чеки (paid без receiptId). `GET /api/pay/unfiscalized` — список «гроші є, чек ні».
+  - Крон-реконсиляция (`reconcile`, setInterval + `POST /api/pay/reconcile`): добивает застрявшие
+    monobank-заявки опросом `order/state` и повторяет непробитые чеки (paid без receiptId).
+    `GET /api/pay/unfiscalized` — список «гроші є, чек ні».
+  - АДМИНКА ОПЛАТ/ЧЕКОВ + АЛЕРТИНГ (СДЕЛАНО):
+    - Админ-аутентификация backend: `isAdminReq` — общий `PAYMENTS_ADMIN_TOKEN` (крон) ИЛИ **Firebase
+      ID-токен админа** (`Authorization: Bearer`, сервер сверяет email+email_verified). На неё
+      переведены `/reconcile`, `/unfiscalized`; новый `POST /api/pay/:orderId/refiscalize`.
+    - Алерт владельцу в Telegram (`OWNER_TELEGRAM_CHAT_ID` + бот-токен): при no-checkbox/error —
+      «гроші є, чек ні», один раз на заказ (`ownerNotified`).
+    - Фронт: `PaymentsAdminPage` (`/payments-admin`, пункт меню «Оплати та чеки») — список оплат из
+      Firestore (правило `payments` read=админ), чипы статуса/чека, ссылки `taxUrl`, баннер «N без
+      чека», кнопки «Виписати чек» (refiscalize) и «Добити чеки» (reconcile). API: `paymentsAdminService`
+      (чтение), `paymentsApi.refiscalize/reconcile` (с Firebase ID-токеном).
   - НЕ сделано: боевые креды (FOPS_CONFIG), деплой (redeploy Cloud Run + PUBLIC_BASE_URL), UI-админка
     оплат/чеков + кнопка «Оплатити частинами» из заявки/бота, закрытие смены Checkbox, оповещение
     владельца о непробитых чеках (сейчас — авто-ретрай + `console.error` + endpoint), проверка единиц

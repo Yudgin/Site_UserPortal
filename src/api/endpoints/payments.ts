@@ -3,10 +3,17 @@
 // нужного ФОП, а после подтверждения выбивает чек Checkbox тем же ФОП.
 import axios from 'axios'
 import type { LocalizedText, EstimateLineType } from '@/types/pricing'
+import { auth } from '@/api/firebase'
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3002'
 
 const client = axios.create({ baseURL: BACKEND_URL, timeout: 30000 })
+
+// Заголовок админ-доступа: Firebase ID-токен текущего пользователя (сервер сверит email админа).
+const adminHeaders = async (): Promise<Record<string, string>> => {
+  const t = await auth?.currentUser?.getIdToken?.()
+  return t ? { Authorization: `Bearer ${t}` } : {}
+}
 
 // Публичный ФОП (без секретов) — какие методы оплаты доступны и может ли выдавать чек
 export interface FopPublic {
@@ -147,6 +154,20 @@ export const paymentsApi = {
   rejectEstimate: async (estimateId: string): Promise<void> => {
     const { data } = await client.post<ApiEnvelope<void>>(`/api/estimates/${estimateId}/reject`)
     if (!data.success) throw new Error(data.error?.message || 'Не вдалося відхилити')
+  },
+
+  // — Админ-действия (Firebase ID-токен) —
+  // Повторно выбить чек по конкретной оплате
+  refiscalize: async (orderId: string): Promise<{ receiptStatus: string | null; taxUrl: string | null; receiptId: string | null }> => {
+    const { data } = await client.post<ApiEnvelope<{ receiptStatus: string | null; taxUrl: string | null; receiptId: string | null }>>(
+      `/api/pay/${orderId}/refiscalize`, {}, { headers: await adminHeaders() })
+    return unwrap(data)
+  },
+
+  // Запустить реконсиляцию (добить застрявшие + повторить непробитые чеки)
+  reconcile: async (): Promise<{ checked: number }> => {
+    const { data } = await client.post<ApiEnvelope<{ checked: number }>>('/api/pay/reconcile', {}, { headers: await adminHeaders() })
+    return unwrap(data)
   },
 }
 

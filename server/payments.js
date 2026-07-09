@@ -15,12 +15,15 @@
 //  • Терминальный статус 'paid' не откатывается поздним/повторным колбэком.
 //  • Крон-реконсиляция добивает застрявшие monobank-заявки и повторяет непробитые чеки.
 import crypto from 'crypto'
+import axios from 'axios'
+import { getAuth } from 'firebase-admin/auth'
 import { getFop, fopHas, listFopsPublic, hasAnyFop } from './fops.js'
 import * as liqpay from './liqpay.js'
 import * as monoChast from './monoChast.js'
 import * as checkbox from './checkbox.js'
 
 const nowIso = () => new Date().toISOString()
+const ADMIN_EMAIL = 'admin@runferry.de'
 const newOrderId = () => 'pay-' + crypto.randomUUID().slice(0, 18)
 
 // Валидация позиций чека: без валидных price/qty фискальный чек уйдёт с NaN/отрицательной суммой.
@@ -66,6 +69,37 @@ export function registerPayments(app, deps) {
       return true
     })
 
+  const OWNER_CHAT = process.env.OWNER_TELEGRAM_CHAT_ID || ''
+  const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''
+
+  // Админ-запрос: общий токен (крон) ИЛИ Firebase ID-токен админа (админ-UI, Authorization: Bearer).
+  const isAdminReq = async (req) => {
+    if (ADMIN_TOKEN && req.get('x-admin-token') === ADMIN_TOKEN) return true
+    const m = (req.get('authorization') || '').match(/^Bearer (.+)$/)
+    if (!m) return false
+    try {
+      const dec = await getAuth().verifyIdToken(m[1])
+      return dec.email === ADMIN_EMAIL && dec.email_verified === true
+    } catch {
+      return false
+    }
+  }
+
+  // Уведомление владельцу в Telegram (для «гроші є, чек ні»). Один раз на заказ (ownerNotified).
+  const notifyOwner = async (text) => {
+    if (!OWNER_CHAT || !TG_TOKEN) return
+    try {
+      await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, { chat_id: OWNER_CHAT, text }, { timeout: 8000 })
+    } catch (e) {
+      console.error('notifyOwner:', e.message)
+    }
+  }
+  const notifyOwnerNoReceipt = async (order, reason) => {
+    if (!order || order.ownerNotified) return
+    await notifyOwner(`⚠️ RunFerry: оплата ${order.orderId} на ${order.amount} грн пройшла, але ЧЕК НЕ ВИБИТО (${reason}). ФОП ${order.fopId}. Перевірте в адмінці оплат.`)
+    await saveOrder({ orderId: order.orderId, ownerNotified: true })
+  }
+
   // Обратная запись в фактическую смету (priceEstimates), из которой создана оплата.
   // Деньги пришли → смета 'paid' + ссылки на платёж/чек. Пишем backend-ом (минуя правила).
   const markEstimatePaid = async (order, receipt) => {
@@ -92,6 +126,7 @@ export function registerPayments(app, deps) {
     if (!fopHas(fop, 'checkbox.licenseKey')) {
       await saveOrder({ orderId: order.orderId, receiptStatus: 'no-checkbox' })
       await markEstimatePaid(order, null) // деньги есть, чека не будет (ФОП без ПРРО)
+      await notifyOwnerNoReceipt(order, 'ФОП без Checkbox')
       console.warn(`payments: ⚠️ ФОП ${order.fopId} без Checkbox — ГРОШІ Є, ЧЕК НЕ ВИБИТО для ${order.orderId}`)
       return
     }
@@ -123,6 +158,7 @@ export function registerPayments(app, deps) {
         fiscalizeClaimedAt: null,
       })
       await markEstimatePaid(order, null) // деньги пришли; чек добьёт reconcile и допишет taxUrl
+      await notifyOwnerNoReceipt(order, 'помилка Checkbox')
       console.error(`payments: ⚠️ ОШИБКА ЧЕКА (гроші є, чек ні) ${order.orderId}:`, (e.response && e.response.data) || e.message)
     }
   }
@@ -534,21 +570,40 @@ export function registerPayments(app, deps) {
     return { checked }
   }
 
-  // Ручной триггер реконсиляции (для крон-джобы/админки). Защищён токеном PAYMENTS_ADMIN_TOKEN.
+  // Ручной триггер реконсиляции (для крон-джобы/админки). Доступ: токен ИЛИ Firebase ID-токен админа.
   app.post('/api/pay/reconcile', async (req, res) => {
-    if (!ADMIN_TOKEN || req.get('x-admin-token') !== ADMIN_TOKEN) return res.status(403).json({ success: false })
+    if (!(await isAdminReq(req))) return res.status(403).json({ success: false })
     const r = await reconcile()
     res.json({ success: true, data: r })
   })
 
-  // Список «гроші є, чек ні» (paid без receiptId) — для админки/мониторинга. Защищён токеном.
+  // Список «гроші є, чек ні» (paid без receiptId) — для админки/мониторинга.
   app.get('/api/pay/unfiscalized', async (req, res) => {
-    if (!ADMIN_TOKEN || req.get('x-admin-token') !== ADMIN_TOKEN) return res.status(403).json({ success: false })
+    if (!(await isAdminReq(req))) return res.status(403).json({ success: false })
     if (!adminDb) return res.status(503).json({ success: false })
     const q = await col().where('status', '==', 'paid').limit(200).get()
     const items = q.docs.map((d) => d.data()).filter((o) => !o.receiptId)
       .map((o) => ({ orderId: o.orderId, fopId: o.fopId, amount: o.amount, receiptStatus: o.receiptStatus || null, receiptError: o.receiptError || null, createdAt: o.createdAt }))
     res.json({ success: true, data: items })
+  })
+
+  // Повторно выбить чек по конкретному заказу (оплачен, но чека нет). Админ-доступ.
+  app.post('/api/pay/:orderId/refiscalize', async (req, res) => {
+    if (!(await isAdminReq(req))) return res.status(403).json({ success: false })
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const order = await loadOrder(String(req.params.orderId))
+      if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Оплату не знайдено' } })
+      if (order.receiptId) return res.status(409).json({ success: false, error: { code: 'ALREADY_FISCAL', message: 'Чек вже виписано' } })
+      if (order.status !== 'paid') return res.status(409).json({ success: false, error: { code: 'NOT_PAID', message: 'Оплата не завершена' } })
+      const label = order.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : 'Оплата частинами (monobank)'
+      await fiscalize(order, label)
+      const after = await loadOrder(String(req.params.orderId))
+      return res.json({ success: true, data: { receiptStatus: after?.receiptStatus || null, taxUrl: after?.taxUrl || null, receiptId: after?.receiptId || null } })
+    } catch (e) {
+      console.error('refiscalize:', e.message)
+      res.status(500).json({ success: false, error: { code: 'REFISCAL_FAILED', message: 'Не вдалося виписати чек' } })
+    }
   })
 
   // Периодическая реконсиляция (Cloud Run с --no-cpu-throttling держит инстанс живым).

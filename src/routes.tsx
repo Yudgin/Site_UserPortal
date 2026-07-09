@@ -37,6 +37,7 @@ import ActualEstimateEditorPage from '@/pages/ActualEstimateEditorPage'
 import EstimateSharePage from '@/pages/EstimateSharePage'
 import OfferEditorPage from '@/pages/OfferEditorPage'
 import OfferSharePage from '@/pages/OfferSharePage'
+import PaymentsAdminPage from '@/pages/PaymentsAdminPage'
 import Layout from '@/components/common/Layout'
 
 interface ProtectedRouteProps {
@@ -246,6 +247,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <ActualEstimateEditorPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Payments & receipts admin - requires auth (email-gated inside) */}
+      <Route
+        path="/payments-admin"
+        element={
+          <AuthenticatedRoute>
+            <PaymentsAdminPage />
           </AuthenticatedRoute>
         }
       />
