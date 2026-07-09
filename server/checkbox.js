@@ -9,6 +9,14 @@ const CLIENT_NAME = 'RunFerry-Backend'
 
 // грн (число/строка) → копейки (целое)
 export const toKop = (uah) => Math.round(Number(uah) * 100)
+// Сумма позиции в копейках: цена(коп) × количество(тысячные) / 1000, округление ПОСТРОЧНО.
+// Checkbox валидирует payments против ПОСТРОЧНО округлённых позиций — считаем так же,
+// иначе payments != goods и чек не выбьется.
+const lineTotalKop = (priceKop, qtyThousandths) => Math.round((priceKop * qtyThousandths) / 1000)
+// Итог по goods в копейках (целое) — единый источник истины: и для payments.value в чеке,
+// и для серверной сверки с order.amount перед созданием оплаты.
+export const goodsTotalKop = (goods) =>
+  (goods || []).reduce((s, g) => s + lineTotalKop(toKop(g.price), Math.round((g.qty || 1) * 1000)), 0)
 // uuid v4 (для идемпотентности чека)
 const uuid = () => crypto.randomUUID()
 
@@ -66,12 +74,13 @@ export const buildSellPayload = (fop, { goods, paymentLabel, receiptId }) => {
     good: { code: g.code || undefined, name: String(g.name), price: toKop(g.price) },
     quantity: Math.round((g.qty || 1) * 1000),
   }))
-  const total = items.reduce((s, it) => s + it.good.price * (it.quantity / 1000), 0)
+  // ПОСТРОЧНОЕ округление в копейках (как валидирует Checkbox) → payments точно равны goods.
+  const total = items.reduce((s, it) => s + lineTotalKop(it.good.price, it.quantity), 0)
   return {
     id: receiptId || uuid(),
     cashier_name: (fop.checkbox && fop.checkbox.cashierName) || fop.name || fop.id,
     goods: items,
-    payments: [{ type: 'CASHLESS', value: Math.round(total), label: paymentLabel || 'Безготівкова оплата' }],
+    payments: [{ type: 'CASHLESS', value: total, label: paymentLabel || 'Безготівкова оплата' }],
   }
 }
 
@@ -103,4 +112,4 @@ export const closeShift = async (fop) => {
   return r.data
 }
 
-export default { signin, ensureShift, sellReceipt, closeShift, buildSellPayload, toKop }
+export default { signin, ensureShift, sellReceipt, closeShift, buildSellPayload, toKop, goodsTotalKop }
