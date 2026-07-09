@@ -9,7 +9,7 @@
 // сообщения (core.captureContactPhone → normalizePhone), после чего привязывает clientProfile.
 import axios from 'axios'
 import crypto from 'crypto'
-import { createMessengerCore, nowIso, genMsgId, accumulateUsage } from './messengerCore.js'
+import { createMessengerCore, nowIso, genMsgId, accumulateUsage, serviceRequestLink } from './messengerCore.js'
 
 const SENDER_NAME = 'RunFerry'
 const WELCOME =
@@ -87,14 +87,17 @@ export function registerViberBot(app, deps) {
         await core.saveSession(session)
         return
       }
-      const { reply, needsManager, intent, usage } = await core.aiReply(session)
+      const { reply, needsManager, intent, usage, wantsServiceRequest } = await core.aiReply(session)
       session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
       if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)
       session.topic = intent
       if (needsManager) core.applyEscalation(session, intent)
       const ask = core.phoneAskLine(session) // если номера ещё нет — попросити (один раз)
       await core.saveSession(session)
-      await send(userId, ask ? `${reply}\n\n${ask}` : reply)
+      let out = reply
+      if (wantsServiceRequest) out += `\n\n📝 Оформити заявку на сервіс: ${serviceRequestLink(session)}`
+      if (ask) out += `\n\n${ask}`
+      await send(userId, out)
       if (needsManager) {
         await send(userId, 'Ваш запит передано менеджеру — ми зв’яжемося з вами найближчим часом. 🙌')
       }

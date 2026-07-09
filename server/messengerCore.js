@@ -35,6 +35,12 @@ export const extractPhone = (text) => {
 // Просьба прислать телефон (один раз на сессию), пока номера ещё нет.
 const PHONE_ASK = 'Підкажіть, будь ласка, ваш номер телефону для зв’язку (наприклад +380XX XXX XX XX) — щоб ми могли з вами зв’язатися.'
 
+// Ссылка на клиентскую форму оформления заявки на сервис (/repair/new). Для мессенджера —
+// прикрепляется к ответу, когда клиент хочет отдать кораблик в сервис (wantsServiceRequest).
+const SITE_URL = (process.env.SITE_URL || 'https://my.runferry.com').replace(/\/$/, '')
+export const serviceRequestLink = (session) =>
+  `${SITE_URL}/repair/new${session && session.id ? `?chat=${session.id}` : ''}`
+
 // Менеджер упомянул/позвал бота в своём сообщении → сигнал вернуть бота в диалог. Требуем
 // границу СЛЕВА (не-буква), чтобы «бот» не совпал с «работа»/«робота», но разрешаем окончания
 // СПРАВА (\p{L}*), чтобы ловить падежные формы: бота/боту/ботів, клода, помічника, асистенте.
@@ -267,8 +273,9 @@ export function createMessengerCore(deps) {
                 reply: { type: 'string' },
                 needsManager: { type: 'boolean' },
                 intent: { type: 'string', enum: ['service', 'sales', 'other'], description: 'Тема звернення: сервіс/ремонт, купівля/продаж, інше' },
+                wantsServiceRequest: { type: 'boolean', description: 'true, якщо клієнт хоче віддати кораблик у сервіс / оформити заявку на ремонт (тоді додамо посилання на оформлення)' },
               },
-              required: ['reply', 'needsManager', 'intent'],
+              required: ['reply', 'needsManager', 'intent', 'wantsServiceRequest'],
             },
           },
         },
@@ -284,6 +291,7 @@ export function createMessengerCore(deps) {
         reply: parsed.reply || 'Вибачте, не вдалося сформувати відповідь.',
         needsManager: !!parsed.needsManager,
         intent: ['service', 'sales', 'other'].includes(parsed.intent) ? parsed.intent : 'service',
+        wantsServiceRequest: !!parsed.wantsServiceRequest,
         usage: buildUsage(msg.usage),
       }
     } catch (e) {

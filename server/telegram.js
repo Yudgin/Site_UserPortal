@@ -2,7 +2,7 @@
 // проверка секрета, отправка) — здесь; бизнес-логика (сессии, ИИ, профиль, эскалация)
 // — в общем ядре messengerCore.js. Входящие -> chatSessions (channel='telegram').
 import axios from 'axios'
-import { createMessengerCore, nowIso, genMsgId, accumulateUsage, mentionsBot } from './messengerCore.js'
+import { createMessengerCore, nowIso, genMsgId, accumulateUsage, mentionsBot, serviceRequestLink } from './messengerCore.js'
 
 export function registerTelegramBot(app, deps) {
   const core = createMessengerCore(deps)
@@ -80,14 +80,17 @@ export function registerTelegramBot(app, deps) {
       await core.saveSession(session)
       return
     }
-    const { reply, needsManager, intent, usage } = await core.aiReply(session)
+    const { reply, needsManager, intent, usage, wantsServiceRequest } = await core.aiReply(session)
     session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
     if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)
     session.topic = intent
     if (needsManager) core.applyEscalation(session, intent)
     const ask = core.phoneAskLine(session) // просим номер (Business: кнопки контакта нет)
     await core.saveSession(session)
-    await send(chatId, ask ? `${reply}\n\n${ask}` : reply, { business_connection_id: connId })
+    let out = reply
+    if (wantsServiceRequest) out += `\n\n📝 Оформити заявку на сервіс: ${serviceRequestLink(session)}`
+    if (ask) out += `\n\n${ask}`
+    await send(chatId, out, { business_connection_id: connId })
     if (needsManager) {
       await send(chatId, 'Ваш запит передано менеджеру — ми зв’яжемося з вами найближчим часом. 🙌', { business_connection_id: connId })
     }
@@ -170,14 +173,17 @@ export function registerTelegramBot(app, deps) {
         await core.saveSession(session)
         return
       }
-      const { reply, needsManager, intent, usage } = await core.aiReply(session)
+      const { reply, needsManager, intent, usage, wantsServiceRequest } = await core.aiReply(session)
       session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
       if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)
       session.topic = intent
       if (needsManager) core.applyEscalation(session, intent)
       const ask = core.phoneAskLine(session) // если номера ещё нет — попросить (один раз)
       await core.saveSession(session)
-      await send(chatId, ask ? `${reply}\n\n${ask}` : reply)
+      let out = reply
+      if (wantsServiceRequest) out += `\n\n📝 Оформити заявку на сервіс: ${serviceRequestLink(session)}`
+      if (ask) out += `\n\n${ask}`
+      await send(chatId, out)
       if (needsManager) {
         await send(chatId, 'Ваш запит передано менеджеру — ми зв’яжемося з вами найближчим часом. 🙌')
       }
