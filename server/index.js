@@ -965,12 +965,18 @@ const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM: MESSENGER_SYS
 registerTelegramBot(app, messengerDeps)
 registerViberBot(app, messengerDeps)
 
-// JSON Server for mock API
-const router = jsonServer.router(path.join(__dirname, 'db.json'))
-const middlewares = jsonServer.defaults({ noCors: true })
-
-app.use(middlewares)
-app.use(router)
+// JSON Server for mock API (данные карты-портала: boats/reservoirs/…).
+// Изолируем: сбой mock-роутера (напр. отсутствует db.json) НЕ должен ронять сервер ботов/AI.
+// Прим.: на Cloud Run записи в db.json эфемерны (не переживают рестарт) — сервис-центр и боты
+// используют Firestore, поэтому на них это не влияет.
+try {
+  const router = jsonServer.router(path.join(__dirname, 'db.json'))
+  const middlewares = jsonServer.defaults({ noCors: true })
+  app.use(middlewares)
+  app.use(router)
+} catch (e) {
+  console.warn('⚠️  json-server mock API disabled:', e.message)
+}
 
 // Start server
 app.listen(PORT, () => {
