@@ -241,6 +241,7 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
       }
       const complaint = s.messages.filter((m) => m.role === 'client' && !m.internal).map((m) => m.text)[0] || ''
       const created = await serviceRequestService.save({
+        id: `sr-${s.id}`, // детерминированный id по обращению → без дублей при гонке/двойном клике
         sessionId: s.id,
         externalRequestId: s.requestId ?? null,
         clientName: s.contact?.name,

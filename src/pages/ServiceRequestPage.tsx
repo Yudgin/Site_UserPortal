@@ -52,11 +52,13 @@ export default function ServiceRequestPage() {
 
   useEffect(() => { load() }, [load])
 
+  // Оптимистично обновляем req локально (без полной перезагрузки, чтобы не терять несохранённый
+  // ввод в полях і не затирати статус, проставлений webhook). offer/actual не меняются при этом.
   const patch = async (fields: Partial<ServiceRequest>) => {
     setSaving(true)
     const ok = await serviceRequestService.save({ id, ...fields })
     setSaving(false)
-    if (ok) { await load(); return true }
+    if (ok) { setReq((r) => (r ? { ...r, ...fields } : r)); return true }
     notify('Не вдалося зберегти', 'error')
     return false
   }
@@ -92,7 +94,9 @@ export default function ServiceRequestPage() {
           <Typography variant="subtitle1" sx={{ flex: 1 }}>
             {req.clientName || 'Клієнт'} {req.clientPhone && <>· 📱 {req.clientPhone}</>}
           </Typography>
-          <TextField select size="small" label="Статус" value={req.status} onChange={(e) => patch({ status: e.target.value as ServiceRequestStatus })} sx={{ minWidth: 180 }}>
+          <TextField select size="small" label="Статус" value={req.status} disabled={!!req.paymentId || saving}
+            helperText={req.paymentId ? 'оплачено — статус зафіксовано' : undefined}
+            onChange={(e) => patch({ status: e.target.value as ServiceRequestStatus })} sx={{ minWidth: 180 }}>
             {STATUSES.map((st) => <MenuItem key={st} value={st}>{SERVICE_REQUEST_STATUS_LABELS[st]}</MenuItem>)}
           </TextField>
         </Stack>
@@ -130,7 +134,7 @@ export default function ServiceRequestPage() {
         {req.actualEstimateId ? (
           <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', alignItems: 'center' }}>
             <Chip color={actual?.status === 'paid' ? 'success' : 'primary'} label={actual?.status === 'paid' ? 'оплачено' : `сума ${actual ? formatMoney(actual.total) : ''}`} />
-            <Button size="small" startIcon={<ActualIcon />} onClick={() => navigate(`/actual-estimate?request=${id}&parent=${req.actualEstimateId}`)}>Редагувати</Button>
+            <Button size="small" startIcon={<ActualIcon />} disabled={actual?.status === 'paid'} onClick={() => navigate(`/actual-estimate?request=${id}&edit=${req.actualEstimateId}`)}>Редагувати</Button>
             {actualLink && <Button size="small" onClick={() => { navigator.clipboard.writeText(actualLink); notify('Посилання скопійовано') }}>Посилання на оплату</Button>}
           </Stack>
         ) : selectedVariantId ? (

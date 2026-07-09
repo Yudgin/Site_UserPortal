@@ -128,11 +128,15 @@ export function registerPayments(app, deps) {
         ...(receipt ? { taxUrl: receipt.taxUrl || null, fiscalCode: receipt.fiscalCode || null } : {}),
         updatedAt: nowIso(),
       }, { merge: true })
-      // Двигаем НАШУ заявку в «виконано» и привязываем оплату.
+      // Привязываем оплату к нашей заявке. Статус → 'done', но НЕ «воскрешаем» скасовану заявку.
       if (order.serviceRequestId) {
-        await adminDb.collection('serviceRequests').doc(String(order.serviceRequestId)).set({
-          paymentId: order.orderId, status: 'done', updatedAt: nowIso(),
-        }, { merge: true })
+        const srRef = adminDb.collection('serviceRequests').doc(String(order.serviceRequestId))
+        await adminDb.runTransaction(async (tx) => {
+          const s = await tx.get(srRef)
+          const p = { paymentId: order.orderId, updatedAt: nowIso() }
+          if (!s.exists || s.data().status !== 'cancelled') p.status = 'done'
+          tx.set(srRef, p, { merge: true })
+        })
       }
     } catch (e) {
       console.error('estimate writeback:', e.message)

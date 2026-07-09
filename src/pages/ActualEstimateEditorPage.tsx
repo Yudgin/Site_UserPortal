@@ -38,6 +38,7 @@ export default function ActualEstimateEditorPage() {
   const { catalog, indexed, loadFromServer, isLoading } = usePricingStore()
 
   const parentId = params.get('parent') || ''
+  const editId = params.get('edit') || '' // редактировать СУЩЕСТВУЮЩИЙ факт (а не создавать новый)
   const serviceRequestId = params.get('request') || '' // наша заявка на обслуживание
 
   const [prelim, setPrelim] = useState<Estimate | null>(null)
@@ -77,6 +78,22 @@ export default function ActualEstimateEditorPage() {
       setRows(seeded)
     })
   }, [parentId])
+
+  // Режим РЕДАКТИРОВАНИЯ существующего факта (?edit=<id>): грузим сам факт (savedId=id →
+  // пересохранение обновит его, а не создаст дубль), сеем работы, ФОП; для diff — его родителя.
+  useEffect(() => {
+    if (!editId) return
+    pricingService.loadEstimate(editId).then((act) => {
+      if (!act) { notify('Кошторис не знайдено', 'error'); return }
+      setSavedId(editId)
+      setTitle(act.title || '')
+      setComplaint(act.complaint || '')
+      setServiceKind((act.sections?.[0]?.serviceKind as ServiceKind) || 'repair')
+      if (act.fopId) setFopId(act.fopId)
+      setRows(act.lines.filter((l) => l.type === 'labor').map((l, i) => ({ key: `e${i}`, workId: l.refId, qty: l.qty })))
+      if (act.parentEstimateId) pricingService.loadEstimate(act.parentEstimateId).then((p) => p && setPrelim(p))
+    })
+  }, [editId])
 
   const activeWorks = useMemo(() => Object.values(indexed.works).filter((w) => w.active), [indexed])
   const activeKits = useMemo(() => Object.values(indexed.kits).filter((k) => k.active), [indexed])
