@@ -8,7 +8,8 @@ export const verifyFirebaseAdmin = async (req) => {
   const m = (req.get('authorization') || '').match(/^Bearer (.+)$/)
   if (!m) return false
   try {
-    const dec = await getAuth().verifyIdToken(m[1])
+    // checkRevoked=true — отозванный/после разлогина/смены пароля токен не проходит.
+    const dec = await getAuth().verifyIdToken(m[1], true)
     return dec.email === ADMIN_EMAIL && dec.email_verified === true
   } catch {
     return false

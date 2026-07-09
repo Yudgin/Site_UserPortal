@@ -165,6 +165,11 @@ export function registerTelegramBot(app, deps) {
 
       session.messages.push({ id: genMsgId(), role: 'client', text, at: nowIso() })
       await core.captureContactPhone(session, text) // клиент мог прислать номер текстом (не кнопкой)
+      if (session.botPaused) {
+        // Менеджер перехопив діалог (з веб-інбоксу) — зберігаємо повідомлення, ІІ не відповідає.
+        await core.saveSession(session)
+        return
+      }
       const { reply, needsManager, intent, usage } = await core.aiReply(session)
       session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
       if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)

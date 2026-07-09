@@ -101,6 +101,8 @@ export interface ChatSession {
   requestId: string | null // привязка к заявке 1С (если есть)
   channel?: ChatChannel // канал обращения (по умолчанию 'web')
   channelUserId?: string // идентификатор пользователя в мессенджере (chat_id/sender.id/wa_id)
+  botPaused?: boolean // менеджер перехватил диалог → ИИ не отвечает (снимается упоминанием бота)
+  businessConnectionId?: string // Telegram Business connection id (для отправки от имени владельца)
   topic?: ChatTopic // тема обращения (сервис/продажа/другое) — определяет бот-консьерж
   contact: { name?: string; phone?: string } | null
   messages: ChatMessage[]

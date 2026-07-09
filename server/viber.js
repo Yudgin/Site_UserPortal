@@ -82,6 +82,11 @@ export function registerViberBot(app, deps) {
 
       session.messages.push({ id: genMsgId(), role: 'client', text, at: nowIso() })
       await core.captureContactPhone(session, text) // клиент присылает номер текстом (Viber не даёт телефон)
+      if (session.botPaused) {
+        // Менеджер перехопив діалог (з веб-інбоксу) — зберігаємо повідомлення, ІІ не відповідає.
+        await core.saveSession(session)
+        return
+      }
       const { reply, needsManager, intent, usage } = await core.aiReply(session)
       session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
       if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)

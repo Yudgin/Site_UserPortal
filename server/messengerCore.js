@@ -35,9 +35,10 @@ export const extractPhone = (text) => {
 // Просьба прислать телефон (один раз на сессию), пока номера ещё нет.
 const PHONE_ASK = 'Підкажіть, будь ласка, ваш номер телефону для зв’язку (наприклад +380XX XXX XX XX) — щоб ми могли з вами зв’язатися.'
 
-// Менеджер (в Telegram Business) упомянул/позвал бота в своём сообщении → сигнал вернуть бота
-// в диалог. Границы по НЕ-буквам (Unicode), чтобы «бот» не совпадал с «работа»/«бота».
-const BOT_MENTION_RE = /(?<![\p{L}])(клод|claude|бот|помічник|асистент|ассистент)(?![\p{L}])/iu
+// Менеджер упомянул/позвал бота в своём сообщении → сигнал вернуть бота в диалог. Требуем
+// границу СЛЕВА (не-буква), чтобы «бот» не совпал с «работа»/«робота», но разрешаем окончания
+// СПРАВА (\p{L}*), чтобы ловить падежные формы: бота/боту/ботів, клода, помічника, асистенте.
+const BOT_MENTION_RE = /(?<![\p{L}])(клод|claude|бот|помічник|асистент|ассистент)\p{L}*/iu
 export const mentionsBot = (text) => BOT_MENTION_RE.test(String(text || ''))
 
 // Ставка нормо-часа из расшифровки (зеркало computeLaborRate в src/utils/pricing.ts)
@@ -156,6 +157,20 @@ export function createMessengerCore(deps) {
   const saveSession = async (session) => {
     await adminDb.collection('chatSessions').doc(session.id).set({ ...session, updatedAt: nowIso() })
   }
+
+  // Транзакционная ДОЗАПИСЬ сообщений: перечитывает актуальный документ и добавляет newMsgs к
+  // ТЕКУЩЕМУ messages (а не к устаревшему снимку), + патч полей. Так параллельное сообщение
+  // клиента, пришедшее во время медленного вызова ИИ, не теряется (не last-writer-wins).
+  const appendMessages = async (sessionId, newMsgs, patch = {}) =>
+    adminDb.runTransaction(async (tx) => {
+      const ref = adminDb.collection('chatSessions').doc(String(sessionId))
+      const snap = await tx.get(ref)
+      if (!snap.exists) return null
+      const cur = snap.data()
+      const merged = { ...cur, ...patch, messages: [...(cur.messages || []), ...(newMsgs || [])], updatedAt: nowIso() }
+      tx.set(ref, merged, { merge: true })
+      return merged
+    })
 
   const upsertProfile = async (phone, { name, sessionId } = {}) => {
     const id = normalizePhone(phone)
@@ -277,7 +292,7 @@ export function createMessengerCore(deps) {
     }
   }
 
-  return { buildPriceContext, newSession, findSession, saveSession, upsertProfile, applyEscalation, aiReply, captureContactPhone, phoneAskLine }
+  return { buildPriceContext, newSession, findSession, saveSession, appendMessages, upsertProfile, applyEscalation, aiReply, captureContactPhone, phoneAskLine }
 }
 
 export default createMessengerCore

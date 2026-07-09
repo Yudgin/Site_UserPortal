@@ -78,7 +78,7 @@ export function registerPayments(app, deps) {
     const m = (req.get('authorization') || '').match(/^Bearer (.+)$/)
     if (!m) return false
     try {
-      const dec = await getAuth().verifyIdToken(m[1])
+      const dec = await getAuth().verifyIdToken(m[1], true) // checkRevoked
       return dec.email === ADMIN_EMAIL && dec.email_verified === true
     } catch {
       return false

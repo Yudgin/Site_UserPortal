@@ -159,6 +159,13 @@ export default function ClientChatPage() {
   // клиента, которое ещё не сохранено (ручной ввод).
   const appendAiResponse = async (extraClientMsg?: ChatMessage) => {
     const preload = (await chatSessionService.load(session.id)) || session
+    // Менеджер перехопив діалог (botPaused) — ІІ не відповідає, лише зберігаємо повідомлення клієнта.
+    if (preload.botPaused) {
+      const merged: ChatSession = extraClientMsg ? { ...preload, messages: [...preload.messages, extraClientMsg] } : preload
+      if (extraClientMsg) await chatSessionService.save(merged)
+      setSession(merged)
+      return
+    }
     const baseMessages = extraClientMsg ? [...preload.messages, extraClientMsg] : preload.messages
     const history: ChatMsgInput[] = baseMessages.filter((m) => !m.internal).map((m) => ({ role: m.role, text: m.text }))
 
