@@ -2,7 +2,7 @@
 // проверка секрета, отправка) — здесь; бизнес-логика (сессии, ИИ, профиль, эскалация)
 // — в общем ядре messengerCore.js. Входящие -> chatSessions (channel='telegram').
 import axios from 'axios'
-import { createMessengerCore, nowIso, genMsgId, accumulateUsage } from './messengerCore.js'
+import { createMessengerCore, nowIso, genMsgId, accumulateUsage, mentionsBot } from './messengerCore.js'
 
 export function registerTelegramBot(app, deps) {
   const core = createMessengerCore(deps)
@@ -45,11 +45,24 @@ export function registerTelegramBot(app, deps) {
       core.newSession('telegram', channelUserId, [chat.first_name, chat.last_name].filter(Boolean).join(' ') || null)
     session.businessConnectionId = connId
 
-    // Ручное сообщение владельца/менеджера → фиксируем и ставим бота на паузу в этом чате.
+    // Сообщение владельца/менеджера. Если он УПОМЯНУЛ/ПОЗВАЛ бота («…зараз Клод підкаже…»)
+    // — возвращаем бота в диалог (снимаем паузу) и он продолжает с клиентом по указанию.
+    // Иначе — менеджер ведёт диалог сам, ставим бота на паузу в этом чате.
     if (!isFromClient) {
       session.messages.push({ id: genMsgId(), role: 'manager', text, at: nowIso() })
-      session.botPaused = true
-      await core.saveSession(session)
+      if (mentionsBot(text)) {
+        session.botPaused = false
+        const { reply, needsManager, intent, usage } = await core.aiReply(session, { managerDirective: text })
+        session.messages.push({ id: genMsgId(), role: 'ai', text: reply, at: nowIso() })
+        if (usage) session.aiUsage = accumulateUsage(session.aiUsage, usage)
+        session.topic = intent
+        if (needsManager) core.applyEscalation(session, intent)
+        await core.saveSession(session)
+        await send(chatId, reply, { business_connection_id: connId })
+      } else {
+        session.botPaused = true
+        await core.saveSession(session)
+      }
       return
     }
 

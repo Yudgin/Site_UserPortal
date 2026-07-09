@@ -35,6 +35,11 @@ export const extractPhone = (text) => {
 // Просьба прислать телефон (один раз на сессию), пока номера ещё нет.
 const PHONE_ASK = 'Підкажіть, будь ласка, ваш номер телефону для зв’язку (наприклад +380XX XXX XX XX) — щоб ми могли з вами зв’язатися.'
 
+// Менеджер (в Telegram Business) упомянул/позвал бота в своём сообщении → сигнал вернуть бота
+// в диалог. Границы по НЕ-буквам (Unicode), чтобы «бот» не совпадал с «работа»/«бота».
+const BOT_MENTION_RE = /(?<![\p{L}])(клод|claude|бот|помічник|асистент|ассистент)(?![\p{L}])/iu
+export const mentionsBot = (text) => BOT_MENTION_RE.test(String(text || ''))
+
 // Ставка нормо-часа из расшифровки (зеркало computeLaborRate в src/utils/pricing.ts)
 const computeRate = (breakdown) => {
   const comps = (breakdown && breakdown.components) || []
@@ -205,24 +210,32 @@ export function createMessengerCore(deps) {
     }
   }
 
-  // Ответ ИИ по истории сессии (тот же CHAT_SYSTEM, что и в веб-чате)
-  const aiReply = async (session) => {
+  // Ответ ИИ по истории сессии (тот же CHAT_SYSTEM, что и в веб-чате).
+  // opts.managerDirective — указание менеджера боту (Telegram Business: менеджер позвал бота).
+  const aiReply = async (session, opts = {}) => {
     const history = mergeConsecutiveMessages(
       session.messages
         .filter((m) => !m.internal && m.text)
         .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text) }))
     )
+    // Модель должна отвечать на последнее сообщение КЛИЕНТА → убираем хвостовые assistant-реплики
+    // (в т.ч. ручную реплику менеджера, которой он позвал бота — её смысл идёт через директиву).
+    while (history.length && history[history.length - 1].role === 'assistant') history.pop()
     if (!history.length || history[0].role !== 'user') {
-      return { reply: 'Опишіть, будь ласка, вашу проблему з корабликом.', needsManager: false }
+      return { reply: 'Опишіть, будь ласка, вашу проблему з корабликом.', needsManager: false, intent: 'service' }
     }
     const [priceContext, knowledgeContext] = await Promise.all([buildPriceContext(), buildKnowledgeContext()])
     const selfHelp = knowledgeContext
       ? `\n\nСАМОДОПОМОГА (безкоштовні рішення з бази знань). ЯКЩО проблема клієнта збігається з якимось матеріалом — СПЕРШУ доброзичливо запропонуй це безкоштовне рішення (стисло, по кроках), і лише потім платний ремонт:\n${knowledgeContext}`
       : ''
+    const directive = opts.managerDirective
+      ? `\n\nМЕНЕДЖЕР попросив тебе підключитися до діалогу і допомогти клієнту. Вказівка менеджера: «${String(opts.managerDirective).trim()}». Продовж діалог з клієнтом українською, виконуючи цю вказівку (звертайся до клієнта, не до менеджера).`
+      : ''
     const system =
       CHAT_SYSTEM +
       (priceContext ? `\n\nПРАЙС (лише ці позиції можна використовувати для оцінки):\n${priceContext}` : '') +
-      selfHelp
+      selfHelp +
+      directive
     try {
       const msg = await anthropic.messages.create({
         model: AI_MODEL,
