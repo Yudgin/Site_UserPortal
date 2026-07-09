@@ -2,6 +2,7 @@
 // backend: он берёт позиции и сумму из persisted-сметы (priceEstimates) и создаёт оплату у
 // нужного ФОП, а после подтверждения выбивает чек Checkbox тем же ФОП.
 import axios from 'axios'
+import type { LocalizedText, EstimateLineType } from '@/types/pricing'
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3002'
 
@@ -49,6 +50,35 @@ export interface PayStatus {
   taxUrl: string | null
 }
 
+// Безопасный вид сметы для клиента (без внутренней экономики/PII — приходит с backend)
+export interface SafeEstimateLine {
+  type: EstimateLineType
+  refId: string
+  name: LocalizedText
+  qty: number
+  unitPrice: number
+  lineTotal: number
+}
+export interface SafeEstimate {
+  id: string
+  title: string
+  complaint: string
+  kind: 'preliminary' | 'actual'
+  status: string
+  total: number
+  currency: string
+  lines: SafeEstimateLine[]
+  fopId: string | null
+  parentEstimateId: string | null
+  paid: boolean
+  paidAt: string | null
+  taxUrl: string | null
+}
+export interface EstimatePublic {
+  estimate: SafeEstimate
+  parent: SafeEstimate | null
+}
+
 interface ApiEnvelope<T> {
   success: boolean
   data?: T
@@ -66,6 +96,12 @@ export const paymentsApi = {
   // Список ФОП с доступными методами (для выбора в UI)
   listFops: async (): Promise<FopPublic[]> => {
     const { data } = await client.get<ApiEnvelope<FopPublic[]>>('/api/fops')
+    return unwrap(data)
+  },
+
+  // Безопасный вид сметы для клиента (+ родительская для diff), минуя прямой доступ к Firestore
+  getEstimatePublic: async (id: string): Promise<EstimatePublic> => {
+    const { data } = await client.get<ApiEnvelope<EstimatePublic>>(`/api/estimates/${id}/public`)
     return unwrap(data)
   },
 

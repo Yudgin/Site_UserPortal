@@ -124,6 +124,15 @@ export default function ActualEstimateEditorPage() {
     if (!fopId) { notify('Оберіть ФОП, який прийме оплату та видасть чек', 'error'); return null }
     setSaving(true)
     try {
+      // Защита от затирания оплаченной сметы: если её уже оплатили, редактировать нельзя
+      // (иначе можно сбросить status=paid/paymentId и открыть двойное списание).
+      if (savedId) {
+        const fresh = await pricingService.loadEstimate(savedId)
+        if (fresh && (fresh.status === 'paid' || fresh.paymentId)) {
+          notify('Кошторис уже оплачено — редагування заблоковано', 'error')
+          return null
+        }
+      }
       const required = reapproval?.required ?? false
       const toSave: Estimate = {
         ...actual,

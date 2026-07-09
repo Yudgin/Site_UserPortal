@@ -54,12 +54,16 @@ service cloud.firestore {
       allow read, list: if isPriceAdmin();
     }
 
-    // Сметы — открываются клиентом по прямой ссылке (get по id), листинг и запись —
-    // только администратор. get вместо read закрывает утечку всех смет через collection-запрос.
+    // Сметы. Прямое чтение — ТОЛЬКО администратор (внутренняя экономика: ставка, подытоги,
+    // сезонный коэф., createdBy, requestId/PII). Клиент видит смету через backend
+    // /api/estimates/:id/public — безопасный вид без внутренних полей.
+    // Запись/удаление — только админ И только пока смета НЕ оплачена (чтобы пересохранение из
+    // редактора мастера не затёрло backend-поля оплаты: status=paid, paymentId, taxUrl → защита
+    // от двойного списания). Сам backend (Admin SDK) правила обходит и статусы пишет свободно.
     match /priceEstimates/{estId} {
-      allow get: if true;
-      allow list: if isPriceAdmin();
-      allow create, update, delete: if isPriceAdmin();
+      allow get, list: if isPriceAdmin();
+      allow create: if isPriceAdmin();
+      allow update, delete: if isPriceAdmin() && resource.data.status != 'paid';
     }
 
     // Редактируемые тексты сервиса (соглашение и т.п.) — публичное чтение,

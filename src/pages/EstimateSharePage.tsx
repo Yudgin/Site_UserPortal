@@ -12,8 +12,7 @@ import {
 import {
   Payment as PaymentIcon, Receipt as ReceiptIcon, CheckCircle as CheckIcon, Refresh as RefreshIcon,
 } from '@mui/icons-material'
-import { pricingService } from '@/api/pricingService'
-import { paymentsApi, submitLiqpayCheckout, FopPublic, PayMethod } from '@/api/endpoints/payments'
+import { paymentsApi, submitLiqpayCheckout, FopPublic, PayMethod, SafeEstimate } from '@/api/endpoints/payments'
 import { compareEstimates, tName, formatMoney } from '@/utils/pricing'
 import type { Estimate } from '@/types/pricing'
 
@@ -21,8 +20,8 @@ const ORDER_KEY = (id: string) => `rf_pay_order_${id}`
 
 export default function EstimateSharePage() {
   const { id = '' } = useParams<{ id: string }>()
-  const [est, setEst] = useState<Estimate | null>(null)
-  const [prelim, setPrelim] = useState<Estimate | null>(null)
+  const [est, setEst] = useState<SafeEstimate | null>(null)
+  const [prelim, setPrelim] = useState<SafeEstimate | null>(null)
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
   const [fop, setFop] = useState<FopPublic | null>(null)
@@ -33,13 +32,15 @@ export default function EstimateSharePage() {
 
   const load = useCallback(async () => {
     if (!id) return
-    const e = await pricingService.loadEstimate(id)
-    if (!e) { setNotFound(true); setLoading(false); return }
-    setEst(e)
-    if (e.parentEstimateId) {
-      pricingService.loadEstimate(e.parentEstimateId).then((p) => p && setPrelim(p))
+    try {
+      const { estimate, parent } = await paymentsApi.getEstimatePublic(id)
+      setEst(estimate)
+      setPrelim(parent)
+    } catch {
+      setNotFound(true)
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }, [id])
 
   useEffect(() => { load() }, [load])
@@ -58,20 +59,25 @@ export default function EstimateSharePage() {
 
   // После инициации оплаты — опрашиваем статус (webhook проставит paid + чек), пока не оплачено
   useEffect(() => {
-    if (!est || est.status === 'paid' || est.status === 'rejected') return
+    if (!est || est.paid || est.status === 'rejected') return
     const initiated = localStorage.getItem(ORDER_KEY(id))
     if (!initiated) return
     let n = 0
     const t = setInterval(async () => {
       n += 1
-      const e = await pricingService.loadEstimate(id)
-      if (e && (e.status === 'paid' || e.paidAt)) { setEst(e); localStorage.removeItem(ORDER_KEY(id)); clearInterval(t) }
+      try {
+        const { estimate } = await paymentsApi.getEstimatePublic(id)
+        if (estimate && estimate.paid) { setEst(estimate); localStorage.removeItem(ORDER_KEY(id)); clearInterval(t) }
+      } catch { /* временная ошибка сети — продолжаем опрос */ }
       if (n > 20) clearInterval(t) // ~2 хв
     }, 6000)
     return () => clearInterval(t)
   }, [est, id])
 
-  const comparison = useMemo(() => (prelim && est ? compareEstimates(prelim, est) : null), [prelim, est])
+  const comparison = useMemo(
+    () => (prelim && est ? compareEstimates(prelim as unknown as Estimate, est as unknown as Estimate) : null),
+    [prelim, est]
+  )
 
   const methodOptions = useMemo(() => {
     if (!fop) return [] as { value: PayMethod; label: string }[]
@@ -125,10 +131,10 @@ export default function EstimateSharePage() {
     return <Container maxWidth="sm" sx={{ py: 8 }}><Alert severity="error">Кошторис не знайдено.</Alert></Container>
   }
 
-  const paid = est.status === 'paid' || !!est.paidAt
+  const paid = est.paid
   const rejected = est.status === 'rejected'
   const needsApproval = est.status === 'pending_approval'
-  const canPay = !paid && !rejected && !needsApproval && (est.status === 'approved' || est.status === 'draft')
+  const canPay = !paid && !rejected && !needsApproval && est.status === 'approved'
 
   return (
     <Container maxWidth="md" sx={{ py: 4 }}>

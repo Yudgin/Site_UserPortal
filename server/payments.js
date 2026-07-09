@@ -208,27 +208,49 @@ export function registerPayments(app, deps) {
     if (!adminDb) return res.status(503).json({ success: false, error: { code: 'NO_DB', message: 'Firestore не настроен' } })
     if (!hasAnyFop()) return res.status(503).json({ success: false, error: { code: 'NO_FOPS', message: 'ФОП не настроены (FOPS_CONFIG)' } })
     try {
-      const { estimateId, fopId, method, clientPhone, resultUrl, deliveryEmail, description } = req.body || {}
+      // fopId из тела ИГНОРИРУЕМ — ФОП жёстко берётся со сметы (назначил мастер): «кто принял — тот и чек».
+      const { estimateId, method, clientPhone, resultUrl, deliveryEmail, description } = req.body || {}
       if (!estimateId) return res.status(400).json({ success: false, error: { code: 'NO_ESTIMATE', message: 'Потрібен estimateId' } })
-      const snap = await adminDb.collection('priceEstimates').doc(String(estimateId)).get()
-      if (!snap.exists) return res.status(404).json({ success: false, error: { code: 'ESTIMATE_NOT_FOUND', message: 'Кошторис не знайдено' } })
-      const est = snap.data()
-      if (est.kind !== 'actual') return res.status(400).json({ success: false, error: { code: 'NOT_ACTUAL', message: 'Оплата лише з фактичного кошторису' } })
-      if (est.paymentId || est.status === 'paid') return res.status(409).json({ success: false, error: { code: 'ALREADY_PAID', message: 'Кошторис уже оплачено' } })
-      if (est.status === 'pending_approval') return res.status(409).json({ success: false, error: { code: 'NEEDS_APPROVAL', message: 'Кошторис очікує погодження клієнта' } })
-      const goods = est.receiptGoods
-      if (!Array.isArray(goods) || !goods.length) return res.status(400).json({ success: false, error: { code: 'NO_GOODS', message: 'У кошторисі немає позицій для чека' } })
+      const ref = adminDb.collection('priceEstimates').doc(String(estimateId))
 
-      const useFopId = fopId || est.fopId
-      const r = await createPayment({
-        fopId: useFopId, amount: est.total, goods, method: method || 'liqpay-card',
-        description: description || `Оплата RunFerry (кошторис ${estimateId})`,
-        clientPhone, resultUrl, deliveryEmail: deliveryEmail || undefined, estimateId,
+      // Транзакционно проверяем статус и «застолбляем» инициацию оплаты (защита от двойного заказа).
+      const claim = await adminDb.runTransaction(async (tx) => {
+        const s = await tx.get(ref)
+        if (!s.exists) return { ok: false, status: 404, code: 'ESTIMATE_NOT_FOUND', message: 'Кошторис не знайдено' }
+        const e = s.data()
+        if (e.kind !== 'actual') return { ok: false, status: 400, code: 'NOT_ACTUAL', message: 'Оплата лише з фактичного кошторису' }
+        if (e.paymentId || e.status === 'paid') return { ok: false, status: 409, code: 'ALREADY_PAID', message: 'Кошторис уже оплачено' }
+        if (e.status === 'rejected') return { ok: false, status: 409, code: 'REJECTED', message: 'Кошторис відхилено' }
+        if (e.status === 'pending_approval') return { ok: false, status: 409, code: 'NEEDS_APPROVAL', message: 'Кошторис очікує погодження клієнта' }
+        if (e.status !== 'approved') return { ok: false, status: 409, code: 'NOT_APPROVED', message: 'Кошторис не погоджено' }
+        if (!Array.isArray(e.receiptGoods) || !e.receiptGoods.length) return { ok: false, status: 400, code: 'NO_GOODS', message: 'У кошторисі немає позицій для чека' }
+        if (!e.fopId) return { ok: false, status: 400, code: 'NO_FOP', message: 'ФОП для кошторису не призначено' }
+        const recent = e.payInitiatedAt && Date.now() - Date.parse(e.payInitiatedAt) < 15 * 60 * 1000
+        if (recent) return { ok: false, status: 409, code: 'PAY_IN_PROGRESS', message: 'Оплата вже створюється — оновіть сторінку за хвилину' }
+        tx.set(ref, { payInitiatedAt: nowIso() }, { merge: true })
+        return { ok: true, est: e }
       })
-      if (!r.ok) return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
-      // Зафиксируем выбранный ФОП на смете (провайдер оплаты определён)
-      await adminDb.collection('priceEstimates').doc(String(estimateId)).set({ fopId: useFopId, updatedAt: nowIso() }, { merge: true }).catch(() => {})
-      return res.json({ success: true, data: r.data })
+      if (!claim.ok) return res.status(claim.status).json({ success: false, error: { code: claim.code, message: claim.message } })
+
+      const est = claim.est
+      const goods = est.receiptGoods
+      // Сумма — из позиций чека (server-authoritative), а не из est.total → AMOUNT_MISMATCH невозможен.
+      const amount = checkbox.goodsTotalKop(goods) / 100
+      try {
+        const r = await createPayment({
+          fopId: est.fopId, amount, goods, method: method || 'liqpay-card',
+          description: description || `Оплата RunFerry (кошторис ${estimateId})`,
+          clientPhone, resultUrl, deliveryEmail: deliveryEmail || undefined, estimateId,
+        })
+        if (!r.ok) {
+          await ref.set({ payInitiatedAt: null }, { merge: true }).catch(() => {}) // снять claim → можно повторить
+          return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
+        }
+        return res.json({ success: true, data: r.data })
+      } catch (err) {
+        await ref.set({ payInitiatedAt: null }, { merge: true }).catch(() => {})
+        throw err
+      }
     } catch (e) {
       console.error('estimates/pay error:', (e.response && e.response.data) || e.message)
       res.status(500).json({ success: false, error: { code: 'PAY_FAILED', message: 'Не вдалося створити оплату' } })
@@ -236,13 +258,18 @@ export function registerPayments(app, deps) {
   })
 
   // Согласование/отклонение роста фактической сметы клиентом. Доступ по знанию id сметы
-  // (криптостойкий capability-token, как chatSessions). Пишем backend-ом (клиент правила не проходит).
-  const setEstimateStatus = async (id, status, extra = {}) => {
+  // (криптостойкий capability-token). Пишем backend-ом (клиент правила не проходит). Переходы
+  // валидируются: approve только из pending_approval; reject терминален; paid неизменяем.
+  const setEstimateStatus = async (id, status, allowedFrom, extra = {}) => {
     const ref = adminDb.collection('priceEstimates').doc(String(id))
     const snap = await ref.get()
     if (!snap.exists) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Кошторис не знайдено' }
     const est = snap.data()
     if (est.paymentId || est.status === 'paid') return { ok: false, status: 409, code: 'ALREADY_PAID', message: 'Кошторис уже оплачено' }
+    if (est.status === 'rejected') return { ok: false, status: 409, code: 'REJECTED', message: 'Кошторис відхилено остаточно' }
+    if (allowedFrom && !allowedFrom.includes(est.status || 'approved')) {
+      return { ok: false, status: 409, code: 'BAD_STATE', message: 'Недопустимий перехід статусу' }
+    }
     await ref.set({ status, updatedAt: nowIso(), ...extra }, { merge: true })
     return { ok: true }
   }
@@ -250,7 +277,7 @@ export function registerPayments(app, deps) {
   app.post('/api/estimates/:id/approve', async (req, res) => {
     if (!adminDb) return res.status(503).json({ success: false })
     try {
-      const r = await setEstimateStatus(req.params.id, 'approved', { approvedAt: nowIso() })
+      const r = await setEstimateStatus(req.params.id, 'approved', ['pending_approval'], { approvedAt: nowIso() })
       if (!r.ok) return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
       return res.json({ success: true })
     } catch (e) {
@@ -262,11 +289,48 @@ export function registerPayments(app, deps) {
   app.post('/api/estimates/:id/reject', async (req, res) => {
     if (!adminDb) return res.status(503).json({ success: false })
     try {
-      const r = await setEstimateStatus(req.params.id, 'rejected', { rejectedAt: nowIso() })
+      const r = await setEstimateStatus(req.params.id, 'rejected', ['pending_approval', 'approved'], { rejectedAt: nowIso() })
       if (!r.ok) return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
       return res.json({ success: true })
     } catch (e) {
       console.error('estimate reject:', e.message)
+      res.status(500).json({ success: false })
+    }
+  })
+
+  // Публичный БЕЗОПАСНЫЙ вид сметы для клиента (без внутренней экономики/PII: ставка, подытоги,
+  // сезонный коэффициент, createdBy, requestId, receiptGoods — не отдаются). Клиент грузит смету
+  // через этот эндпоинт, а не напрямую из Firestore (правило get закрыто до админа).
+  const safeEstimate = (e) => e && ({
+    id: e.id,
+    title: e.title || '',
+    complaint: e.complaint || '',
+    kind: e.kind || 'preliminary',
+    status: e.status || 'approved',
+    total: e.total,
+    currency: e.currency || 'UAH',
+    lines: (e.lines || []).map((l) => ({ type: l.type, refId: l.refId, name: l.name, qty: l.qty, unitPrice: l.unitPrice, lineTotal: l.lineTotal })),
+    fopId: e.fopId || null,
+    parentEstimateId: e.parentEstimateId || null,
+    paid: e.status === 'paid' || !!e.paidAt,
+    paidAt: e.paidAt || null,
+    taxUrl: e.taxUrl || null,
+  })
+
+  app.get('/api/estimates/:id/public', async (req, res) => {
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const snap = await adminDb.collection('priceEstimates').doc(String(req.params.id)).get()
+      if (!snap.exists) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Кошторис не знайдено' } })
+      const e = snap.data()
+      let parent = null
+      if (e.parentEstimateId) {
+        const p = await adminDb.collection('priceEstimates').doc(String(e.parentEstimateId)).get()
+        parent = p.exists ? p.data() : null
+      }
+      return res.json({ success: true, data: { estimate: safeEstimate(e), parent: safeEstimate(parent) } })
+    } catch (err) {
+      console.error('estimate public:', err.message)
       res.status(500).json({ success: false })
     }
   })

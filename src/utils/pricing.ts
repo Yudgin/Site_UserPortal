@@ -785,12 +785,16 @@ export const needsReapproval = (
   actual: Estimate,
   auth?: ServiceAuthorization | null
 ): ReapprovalDecision => {
-  const { diffPercent } = compareEstimates(prelim, actual)
-  if (diffPercent <= 0) return { required: false, reason: 'decrease', diffPercent, thresholdPct: 0 }
-  if (diffPercent <= NO_REAPPROVAL_DEVIATION_PCT) {
+  // Сравниваем на НЕокруглённом проценте (иначе рост 10.004% округлился бы до 10.0 и прошёл
+  // как «в пределах»); в решение возвращаем округлённое значение для отображения.
+  const prelimTotal = round2(prelim.total)
+  const rawPercent = prelimTotal > 0 ? ((round2(actual.total) - prelimTotal) / prelimTotal) * 100 : 0
+  const diffPercent = round2(rawPercent)
+  if (rawPercent <= 0) return { required: false, reason: 'decrease', diffPercent, thresholdPct: 0 }
+  if (rawPercent <= NO_REAPPROVAL_DEVIATION_PCT) {
     return { required: false, reason: 'within-tolerance', diffPercent, thresholdPct: NO_REAPPROVAL_DEVIATION_PCT }
   }
-  if (auth?.autoApproveEstimateIncrease && diffPercent <= auth.estimateIncreasePctThreshold) {
+  if (auth?.autoApproveEstimateIncrease && rawPercent <= auth.estimateIncreasePctThreshold) {
     return { required: false, reason: 'pre-authorized', diffPercent, thresholdPct: auth.estimateIncreasePctThreshold }
   }
   const thresholdPct = auth?.autoApproveEstimateIncrease ? auth.estimateIncreasePctThreshold : NO_REAPPROVAL_DEVIATION_PCT
@@ -807,36 +811,32 @@ export const needsReapproval = (
 // ПДВ/УКТ ЗЕД на позициях НЕ указываем — продавец ФОП-спрощенець без ПДВ, услуги ремонта
 // не подакцизные (ставка налога настраивается на кассе Checkbox, не в позиции).
 //
-// Инвариант: сумма позиций (в копейках, с построчным округлением — как считает Checkbox и
-// серверная сверка checkbox.goodsTotalKop) ТОЧНО равна total сметы. Иначе оплата будет
-// отклонена валидацией amount==Σ(goods). Возможный копеечный дрейф гасим корректировкой
-// самой дорогой позиции.
+// Инвариант (ТОЧНЫЙ ПО ПОСТРОЕНИЮ): построчная сумма в копейках каждой позиции == копейкам
+// line total этой строки, поэтому Σ(goods, построчно) == Σ toKop(lineTotal) == toKop(est.total).
+// Это зеркалит серверную checkbox.goodsTotalKop (round(priceKop*qtyThousandths/1000)), поэтому
+// сверка amount==Σ(goods) всегда проходит — без пост-коррекции (которая ломалась на qty≠1).
 export const estimate2goods = (est: Estimate, lang = 'uk'): ReceiptGood[] => {
   const goods: ReceiptGood[] = []
+  // построчная копейка так же, как считает сервер/Checkbox
+  const serverKop = (price: number, qty: number) => Math.round((Math.round(price * 100) * Math.round((qty || 1) * 1000)) / 1000)
   for (const l of est.lines) {
-    if (l.lineTotal <= 0) continue
-    if (l.type === 'labor') {
-      // сезонный коэффициент уже «зашит» в lineTotal → позиция как единица (qty=1),
-      // фактическое количество (если >1) выносим в название
-      const suffix = l.qty && l.qty !== 1 ? ` ×${l.qty}` : ''
-      goods.push({ name: tName(l.name, lang) + suffix, price: round2(l.lineTotal), qty: 1 })
-    } else {
-      // материалы/доп. — фиксированная цена за единицу × количество (кількість печатается, т.к. ≠1)
-      goods.push({ name: tName(l.name, lang), price: round2(l.unitPrice), qty: l.qty })
+    if (l.lineTotal <= 0) continue // нулевые/скидочные строки в чек не идут
+    const lineKop = Math.round(l.lineTotal * 100)
+    const name = tName(l.name, lang)
+    // Материал/доп. с количеством ≠ 1: показываем кількість + ціну за одиницю, НО только если
+    // построчная копейка (ціна×кількість) ТОЧНО совпадает с line total (цена — целые копейки).
+    // Иначе (напр. дробная цена за единицу) — одной позицией qty=1, чтобы не разошлась сумма.
+    if (l.type !== 'labor' && l.qty !== 1) {
+      const unit = round2(l.unitPrice)
+      if (serverKop(unit, l.qty) === lineKop) {
+        goods.push({ name, price: unit, qty: l.qty })
+        continue
+      }
     }
-  }
-  // Гарантируем Σ(построчно, копейки) == total сметы (зеркалит checkbox.goodsTotalKop на сервере)
-  const kop = (g: ReceiptGood) => Math.round((Math.round(g.price * 100) * Math.round((g.qty || 1) * 1000)) / 1000)
-  const sumKop = goods.reduce((s, g) => s + kop(g), 0)
-  const diffKop = Math.round(est.total * 100) - sumKop
-  if (diffKop !== 0 && goods.length) {
-    // корректируем позицию с qty=1 и наибольшей ценой (обычно работа) на копеечную разницу
-    let idx = -1
-    for (let i = 0; i < goods.length; i++) {
-      if (goods[i].qty === 1 && (idx === -1 || goods[i].price > goods[idx].price)) idx = i
-    }
-    if (idx === -1) idx = 0 // на крайний случай — первая позиция
-    goods[idx] = { ...goods[idx], price: round2(goods[idx].price + diffKop / 100) }
+    // Одна позиция: цена = сумма строки, qty=1 (сезон/дробность «зашиты»); количество — в названии.
+    // serverKop(lineTotal, 1) == toKop(lineTotal) → точное совпадение.
+    const suffix = l.qty && l.qty !== 1 ? (l.type === 'labor' ? ` ×${l.qty}` : ` (${l.qty} шт)`) : ''
+    goods.push({ name: name + suffix, price: round2(l.lineTotal), qty: 1 })
   }
   return goods
 }
