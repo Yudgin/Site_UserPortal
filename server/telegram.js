@@ -24,6 +24,12 @@ export function registerTelegramBot(app, deps) {
     }
   }
 
+  // Отправитель по сессии (для доставки ответа менеджера из веб-инбокса): в бизнес-чате нужен
+  // business_connection_id, в обычном боте — просто chat_id (= channelUserId).
+  const sendToSession = (session, text) =>
+    send(session.channelUserId, text, session.businessConnectionId ? { business_connection_id: session.businessConnectionId } : {})
+  if (deps.senders) deps.senders.telegram = sendToSession
+
   // Обработка сообщения из БИЗНЕС-аккаунта (Telegram Business / Secretary Mode):
   // клиент пишет на личный аккаунт владельца, бот читает и отвечає від його імені.
   // Ключевой нюанс: business_message приходит и на сообщения САМОГО владельца — их не

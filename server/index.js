@@ -10,6 +10,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { registerTelegramBot } from './telegram.js'
 import { registerViberBot } from './viber.js'
+import { registerManagerReply } from './managerReply.js'
 import { registerPayments } from './payments.js'
 
 dotenv.config()
@@ -967,9 +968,13 @@ const MESSENGER_PREAMBLE = [
 ].join('\n')
 const MESSENGER_SYSTEM = MESSENGER_PREAMBLE + '\n' + CHAT_SYSTEM
 
-const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM: MESSENGER_SYSTEM, mergeConsecutiveMessages, buildUsage }
+// Канальные отправители (заполняются транспортами) — для доставки ответа менеджера клиенту.
+const messengerSenders = {}
+const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM: MESSENGER_SYSTEM, mergeConsecutiveMessages, buildUsage, senders: messengerSenders }
 registerTelegramBot(app, messengerDeps)
 registerViberBot(app, messengerDeps)
+// Ответ менеджера из веб-инбокса → доставка в канал + возврат бота при упоминании.
+registerManagerReply(app, messengerDeps)
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 registerPayments(app, { adminDb })

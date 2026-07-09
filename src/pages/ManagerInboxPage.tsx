@@ -14,6 +14,7 @@ import { useAuthStore } from '@/store/authStore'
 import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { chatSessionService } from '@/api/chatSessionService'
+import { messengerApi } from '@/api/endpoints/messenger'
 import { pricingService } from '@/api/pricingService'
 import { buildEstimate, aiEstimateToWorkInputs } from '@/utils/pricing'
 import { NO_REAPPROVAL_DEVIATION_PCT, OUTCOME_LABELS, CHANNEL_LABELS, TOPIC_LABELS } from '@/types/chat'
@@ -244,12 +245,21 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
     }
   }
 
+  // Ответ клиенту идёт через backend: доставка в канал (Telegram/Viber) + возврат бота при
+  // упоминании («…зараз Клод підкаже…»). Web-клиент видит ответ по поллингу сессии.
   const sendReply = async () => {
     const text = reply.trim()
     if (!text) return
-    const msg: ChatMessage = { id: genId(), role: 'manager', text, at: new Date().toISOString() }
-    const next: ChatSession = { ...s, messages: [...s.messages, msg] }
-    if (await persist(next)) { setReply(''); onNotify('Ответ отправлен клиенту') }
+    setSaving(true)
+    try {
+      const { session, botReply } = await messengerApi.managerReply(s.id, text)
+      setS(session); onSaved(session); setReply('')
+      onNotify(botReply ? 'Надіслано, бот підключився до діалогу' : 'Ответ отправлен клиенту')
+    } catch (e) {
+      onNotify(e instanceof Error ? e.message : 'Не удалось отправить')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const addNote = async () => {

@@ -50,6 +50,10 @@ export function registerViberBot(app, deps) {
     }
   }
 
+  // Отправитель по сессии (для доставки ответа менеджера из веб-инбокса).
+  const sendToSession = (session, text) => send(session.channelUserId, text)
+  if (deps.senders) deps.senders.viber = sendToSession
+
   app.post('/api/viber/webhook', async (req, res) => {
     if (!verifySig(req)) {
       console.warn('viber webhook: bad signature')
