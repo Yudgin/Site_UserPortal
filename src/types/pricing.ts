@@ -209,6 +209,32 @@ export interface EstimateComplaintRef {
   serviceKind?: ServiceKind // поломка или апгрейд (влияет на сезонную наценку)
 }
 
+// ==== Предварительная / фактическая калькуляция ====
+//
+//  • 'preliminary' — ПРЕДВАРИТЕЛЬНАЯ калькуляция (оценка до работ; из AI-оценки или ручной
+//                    сборки). Показывается клиенту как ориентир.
+//  • 'actual'      — ФАКТИЧЕСКАЯ калькуляция (реально выполненные работы+материалы после
+//                    диагностики/ремонта). Из неё выбивается фискальный чек и берётся сумма
+//                    к оплате. Ссылается на предварительную через parentEstimateId.
+// Отсутствие поля kind у старых смет трактуется как 'preliminary' (обратная совместимость).
+export type EstimateKind = 'preliminary' | 'actual'
+
+// Статус жизненного цикла (в основном для фактической сметы):
+//  • 'draft'            — черновик мастера (ещё правится);
+//  • 'pending_approval' — рост сметы > порога, ждёт согласия клиента;
+//  • 'approved'         — согласована (в т.ч. авто ≤ порога) → можно выставлять оплату;
+//  • 'paid'             — оплачена, чек выбит (paymentId/fopId/paidAt проставлены);
+//  • 'rejected'         — клиент отклонил рост сметы.
+export type EstimateStatus = 'draft' | 'pending_approval' | 'approved' | 'paid' | 'rejected'
+
+// Позиция для фискального чека (снимок, из estimate2goods). Сумма позиций == total.
+export interface ReceiptGood {
+  name: string // готовая строка для чека (уже локализованная)
+  price: number // цена за единицу, грн
+  qty: number // количество
+  code?: string // артикул (если нужен по требованиям чека)
+}
+
 // Смета целиком. Сохраняется в Firestore и служит обучающим примером для AI-оценки.
 export interface Estimate {
   id: string
@@ -229,6 +255,17 @@ export interface Estimate {
   source: 'manual' | 'kit' | 'ai' // как собрана смета
   createdAt: string
   createdBy: string | null
+  // — Предварительная/фактическая калькуляция и связь с оплатой —
+  kind?: EstimateKind // роль сметы (по умолчанию 'preliminary')
+  status?: EstimateStatus // статус жизненного цикла (для фактической)
+  parentEstimateId?: string | null // предварительная, из которой выросла фактическая
+  receiptGoods?: ReceiptGood[] // снимок позиций для чека (для фактической, на момент согласования)
+  // Проставляются backend-ом после оплаты и фискализации (минуя клиентские правила):
+  paymentId?: string | null // orderId в коллекции payments
+  fopId?: string | null // ФОП, принявший оплату и выбивший чек
+  paidAt?: string | null
+  taxUrl?: string | null // ссылка на фискальный чек Checkbox
+  fiscalCode?: string | null // фискальный код чека
 }
 
 // ==== База знаний для AI-оценки ====

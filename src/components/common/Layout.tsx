@@ -41,6 +41,7 @@ import {
   ReportProblem as ComplaintIcon,
   Assignment as TaskIcon,
   Person as ProfileIcon,
+  ReceiptLong as EstimateIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { useBoatStore } from '@/store/boatStore'
@@ -97,6 +98,7 @@ export default function Layout() {
   // Add admin menu for developers only
   if (user?.role === 'developer') {
     menuItems.push({ text: 'Прайс-лист', icon: <PriceListIcon />, path: '/pricelist-admin' })
+    menuItems.push({ text: 'Фактична калькуляція', icon: <EstimateIcon />, path: '/actual-estimate' })
     menuItems.push({ text: 'Жалобы→работы', icon: <ComplaintIcon />, path: '/complaints-admin' })
     menuItems.push({ text: 'Соглашение', icon: <TermsIcon />, path: '/service-content-admin' })
     menuItems.push({ text: 'База знаний', icon: <KnowledgeIcon />, path: '/knowledge-admin' })

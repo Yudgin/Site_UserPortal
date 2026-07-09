@@ -22,11 +22,14 @@ import type {
   PricingSettings,
   RateBreakdown,
   RateComponentBase,
+  ReceiptGood,
   SeasonRule,
   ServiceKind,
   Work,
   WorkCategory,
 } from '@/types/pricing'
+import type { ServiceAuthorization } from '@/types/chat'
+import { NO_REAPPROVAL_DEVIATION_PCT } from '@/types/chat'
 
 // ==== Вспомогательные функции ====
 
@@ -688,6 +691,159 @@ export const analyzeSeasonalWaiver = (estimate: Estimate, catalog: PriceCatalog)
 
   return { waived, hasSurcharge, seasonCoefficient: coef, surchargePercent, discountPercent, messageUk, avoidLabelUk }
 }
+
+// ==== Предварительная → фактическая калькуляция ====
+//
+// Сравнение план/факт и логика необходимости повторного согласования с клиентом.
+
+// Итоговая разница по одной агрегированной позиции (по ключу type:refId)
+export interface EstimateLineDiff {
+  type: EstimateLineType
+  refId: string
+  name: LocalizedText
+  before?: { qty: number; lineTotal: number } // в предварительной смете
+  after?: { qty: number; lineTotal: number } // в фактической смете
+  delta: number // изменение суммы, грн (actual − prelim; для added = +, для removed = −)
+}
+
+export interface EstimateComparison {
+  added: EstimateLineDiff[] // позиции появились в фактической
+  removed: EstimateLineDiff[] // позиции убраны из предварительной
+  changed: EstimateLineDiff[] // изменились количество/сумма
+  unchangedCount: number // сколько позиций без изменений
+  prelimTotal: number
+  actualTotal: number
+  diffTotal: number // actual − prelim, грн
+  diffPercent: number // diffTotal / prelim × 100 (0, если предварительная = 0)
+}
+
+// Агрегировать строки сметы по ключу type:refId (объединяет мульти-жалобы/дубликаты)
+interface AggLine { type: EstimateLineType; refId: string; name: LocalizedText; qty: number; lineTotal: number }
+const aggregateEstimateLines = (lines: EstimateLine[]): Map<string, AggLine> => {
+  const map = new Map<string, AggLine>()
+  for (const l of lines) {
+    const key = `${l.type}:${l.refId}`
+    const cur = map.get(key)
+    if (cur) {
+      cur.qty = round2(cur.qty + l.qty)
+      cur.lineTotal = round2(cur.lineTotal + l.lineTotal)
+    } else {
+      map.set(key, { type: l.type, refId: l.refId, name: l.name, qty: l.qty, lineTotal: l.lineTotal })
+    }
+  }
+  return map
+}
+
+// Сравнить предварительную и фактическую сметы: что добавлено/убрано/изменено и на сколько.
+export const compareEstimates = (prelim: Estimate, actual: Estimate): EstimateComparison => {
+  const a = aggregateEstimateLines(prelim.lines)
+  const b = aggregateEstimateLines(actual.lines)
+  const added: EstimateLineDiff[] = []
+  const removed: EstimateLineDiff[] = []
+  const changed: EstimateLineDiff[] = []
+  let unchangedCount = 0
+
+  for (const key of new Set([...a.keys(), ...b.keys()])) {
+    const before = a.get(key)
+    const after = b.get(key)
+    if (before && !after) {
+      removed.push({ type: before.type, refId: before.refId, name: before.name, before: { qty: before.qty, lineTotal: before.lineTotal }, delta: round2(-before.lineTotal) })
+    } else if (!before && after) {
+      added.push({ type: after.type, refId: after.refId, name: after.name, after: { qty: after.qty, lineTotal: after.lineTotal }, delta: round2(after.lineTotal) })
+    } else if (before && after) {
+      const delta = round2(after.lineTotal - before.lineTotal)
+      if (Math.abs(delta) >= 0.01 || before.qty !== after.qty) {
+        changed.push({ type: after.type, refId: after.refId, name: after.name, before: { qty: before.qty, lineTotal: before.lineTotal }, after: { qty: after.qty, lineTotal: after.lineTotal }, delta })
+      } else {
+        unchangedCount++
+      }
+    }
+  }
+
+  const prelimTotal = round2(prelim.total)
+  const actualTotal = round2(actual.total)
+  const diffTotal = round2(actualTotal - prelimTotal)
+  const diffPercent = prelimTotal > 0 ? round2((diffTotal / prelimTotal) * 100) : 0
+  return { added, removed, changed, unchangedCount, prelimTotal, actualTotal, diffTotal, diffPercent }
+}
+
+// Решение о повторном согласовании роста фактической сметы относительно предварительной.
+export interface ReapprovalDecision {
+  required: boolean
+  reason: 'decrease' | 'within-tolerance' | 'pre-authorized' | 'exceeds-threshold'
+  diffPercent: number
+  thresholdPct: number // порог, по которому принято решение
+}
+
+// Нужно ли повторно согласовывать смету с клиентом:
+//  • снижение/без роста → нет;
+//  • рост ≤ NO_REAPPROVAL_DEVIATION_PCT (10%) → нет (только информируем);
+//  • рост ≤ estimateIncreasePctThreshold и клиент заранее разрешил → нет (предсогласовано);
+//  • иначе → да.
+export const needsReapproval = (
+  prelim: Estimate,
+  actual: Estimate,
+  auth?: ServiceAuthorization | null
+): ReapprovalDecision => {
+  const { diffPercent } = compareEstimates(prelim, actual)
+  if (diffPercent <= 0) return { required: false, reason: 'decrease', diffPercent, thresholdPct: 0 }
+  if (diffPercent <= NO_REAPPROVAL_DEVIATION_PCT) {
+    return { required: false, reason: 'within-tolerance', diffPercent, thresholdPct: NO_REAPPROVAL_DEVIATION_PCT }
+  }
+  if (auth?.autoApproveEstimateIncrease && diffPercent <= auth.estimateIncreasePctThreshold) {
+    return { required: false, reason: 'pre-authorized', diffPercent, thresholdPct: auth.estimateIncreasePctThreshold }
+  }
+  const thresholdPct = auth?.autoApproveEstimateIncrease ? auth.estimateIncreasePctThreshold : NO_REAPPROVAL_DEVIATION_PCT
+  return { required: true, reason: 'exceeds-threshold', diffPercent, thresholdPct }
+}
+
+// ==== Смета → позиции фискального чека ====
+//
+// Украинский фіскальний чек ПРРО: по каждой позиции обязательны НАЗВА и ВАРТІСТЬ; кількість
+// и ціна за одиницю — только когда количество ≠ 1 (Наказ Мінфіну №13, розд. II, ряд.6, 11).
+// Позиции ряд.6–11 повторяются по каждому отдельному найменуванню — поэтому смету разворачиваем
+// ПОСТРОЧНО (самый прозрачный и безопасный вариант; для ФОП-єдинника без ПДВ допускается и
+// групповая «спрощена назва», но построчно совпадает с согласованной клиентом сметой).
+// ПДВ/УКТ ЗЕД на позициях НЕ указываем — продавец ФОП-спрощенець без ПДВ, услуги ремонта
+// не подакцизные (ставка налога настраивается на кассе Checkbox, не в позиции).
+//
+// Инвариант: сумма позиций (в копейках, с построчным округлением — как считает Checkbox и
+// серверная сверка checkbox.goodsTotalKop) ТОЧНО равна total сметы. Иначе оплата будет
+// отклонена валидацией amount==Σ(goods). Возможный копеечный дрейф гасим корректировкой
+// самой дорогой позиции.
+export const estimate2goods = (est: Estimate, lang = 'uk'): ReceiptGood[] => {
+  const goods: ReceiptGood[] = []
+  for (const l of est.lines) {
+    if (l.lineTotal <= 0) continue
+    if (l.type === 'labor') {
+      // сезонный коэффициент уже «зашит» в lineTotal → позиция как единица (qty=1),
+      // фактическое количество (если >1) выносим в название
+      const suffix = l.qty && l.qty !== 1 ? ` ×${l.qty}` : ''
+      goods.push({ name: tName(l.name, lang) + suffix, price: round2(l.lineTotal), qty: 1 })
+    } else {
+      // материалы/доп. — фиксированная цена за единицу × количество (кількість печатается, т.к. ≠1)
+      goods.push({ name: tName(l.name, lang), price: round2(l.unitPrice), qty: l.qty })
+    }
+  }
+  // Гарантируем Σ(построчно, копейки) == total сметы (зеркалит checkbox.goodsTotalKop на сервере)
+  const kop = (g: ReceiptGood) => Math.round((Math.round(g.price * 100) * Math.round((g.qty || 1) * 1000)) / 1000)
+  const sumKop = goods.reduce((s, g) => s + kop(g), 0)
+  const diffKop = Math.round(est.total * 100) - sumKop
+  if (diffKop !== 0 && goods.length) {
+    // корректируем позицию с qty=1 и наибольшей ценой (обычно работа) на копеечную разницу
+    let idx = -1
+    for (let i = 0; i < goods.length; i++) {
+      if (goods[i].qty === 1 && (idx === -1 || goods[i].price > goods[idx].price)) idx = i
+    }
+    if (idx === -1) idx = 0 // на крайний случай — первая позиция
+    goods[idx] = { ...goods[idx], price: round2(goods[idx].price + diffKop / 100) }
+  }
+  return goods
+}
+
+// Итог по позициям чека (грн) — для сверки/отображения
+export const receiptGoodsTotal = (goods: ReceiptGood[]): number =>
+  round2(goods.reduce((s, g) => s + Math.round((Math.round(g.price * 100) * Math.round((g.qty || 1) * 1000)) / 1000) / 100, 0))
 
 // Льготные наборы (содержат позицию «без сезонной наценки») — для раскрывающегося блока
 // «Як можна уникнути сезонної націнки?», пункт 2. Каждый набор — с общей стоимостью и составом;

@@ -33,6 +33,8 @@ import ClientsAdminPage from '@/pages/ClientsAdminPage'
 import ClientProfilesAdminPage from '@/pages/ClientProfilesAdminPage'
 import ComplaintsAdminPage from '@/pages/ComplaintsAdminPage'
 import TasksAdminPage from '@/pages/TasksAdminPage'
+import ActualEstimateEditorPage from '@/pages/ActualEstimateEditorPage'
+import EstimateSharePage from '@/pages/EstimateSharePage'
 import Layout from '@/components/common/Layout'
 
 interface ProtectedRouteProps {
@@ -143,6 +145,9 @@ export const AppRoutes = () => {
       {/* Public price list - public */}
       <Route path="/price" element={<PublicPriceListPage />} />
 
+      {/* Actual estimate share — public (opened by client via unguessable estimate id) */}
+      <Route path="/estimate/:id" element={<EstimateSharePage />} />
+
       {/* Public knowledge article view - public */}
       <Route path="/help/:id" element={<KnowledgeArticlePage />} />
 
@@ -216,6 +221,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <PriceListAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Actual estimate editor (master) - requires auth (email-gated inside) */}
+      <Route
+        path="/actual-estimate"
+        element={
+          <AuthenticatedRoute>
+            <ActualEstimateEditorPage />
           </AuthenticatedRoute>
         }
       />

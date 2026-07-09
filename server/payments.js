@@ -66,6 +66,24 @@ export function registerPayments(app, deps) {
       return true
     })
 
+  // Обратная запись в фактическую смету (priceEstimates), из которой создана оплата.
+  // Деньги пришли → смета 'paid' + ссылки на платёж/чек. Пишем backend-ом (минуя правила).
+  const markEstimatePaid = async (order, receipt) => {
+    if (!order || !order.estimateId) return
+    try {
+      await adminDb.collection('priceEstimates').doc(String(order.estimateId)).set({
+        status: 'paid',
+        paymentId: order.orderId,
+        fopId: order.fopId,
+        paidAt: nowIso(),
+        ...(receipt ? { taxUrl: receipt.taxUrl || null, fiscalCode: receipt.fiscalCode || null } : {}),
+        updatedAt: nowIso(),
+      }, { merge: true })
+    } catch (e) {
+      console.error('estimate writeback:', e.message)
+    }
+  }
+
   // ЕДИНЫЙ модуль фискализации: чек выбивает ФОП из order.fopId (идемпотентно + атомарный claim).
   const fiscalize = async (order, paymentLabel) => {
     if (!order || order.receiptId) return // уже выбит
@@ -73,6 +91,7 @@ export function registerPayments(app, deps) {
     if (!fop) return
     if (!fopHas(fop, 'checkbox.licenseKey')) {
       await saveOrder({ orderId: order.orderId, receiptStatus: 'no-checkbox' })
+      await markEstimatePaid(order, null) // деньги есть, чека не будет (ФОП без ПРРО)
       console.warn(`payments: ⚠️ ФОП ${order.fopId} без Checkbox — ГРОШІ Є, ЧЕК НЕ ВИБИТО для ${order.orderId}`)
       return
     }
@@ -93,6 +112,7 @@ export function registerPayments(app, deps) {
         receiptStatus: res.status || 'done',
         receiptAt: nowIso(),
       })
+      await markEstimatePaid(order, res)
       console.log(`payments: чек выписан ${order.orderId} (ФОП ${order.fopId}) fiscal=${res.fiscalCode}`)
     } catch (e) {
       // снимаем claim (fiscalizeClaimedAt=null), чтобы reconcile/повторный колбэк попробовали снова
@@ -102,6 +122,7 @@ export function registerPayments(app, deps) {
         receiptError: (e.response && JSON.stringify(e.response.data)) || e.message,
         fiscalizeClaimedAt: null,
       })
+      await markEstimatePaid(order, null) // деньги пришли; чек добьёт reconcile и допишет taxUrl
       console.error(`payments: ⚠️ ОШИБКА ЧЕКА (гроші є, чек ні) ${order.orderId}:`, (e.response && e.response.data) || e.message)
     }
   }
@@ -109,71 +130,144 @@ export function registerPayments(app, deps) {
   // Публичный список ФОП + доступные методы (для UI выбора, без секретов)
   app.get('/api/fops', (req, res) => res.json({ success: true, data: listFopsPublic() }))
 
-  // Создать оплату. body: { fopId, amount, goods:[{name,price,qty}], method, description, clientPhone?, resultUrl?, deliveryEmail? }
+  // Ядро создания оплаты (переиспользуется HTTP-роутом и оплатой из сметы).
+  // Возвращает { ok:true, data } или { ok:false, status, code, message }. Деньги — server-authoritative:
+  // amount обязан точно совпадать с суммой позиций (в копейках), иначе чек и списание разойдутся.
+  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId }) => {
+    const fop = getFop(fopId)
+    if (!fop) return { ok: false, status: 400, code: 'BAD_FOP', message: 'Невідомий ФОП' }
+
+    const gErr = validateGoods(goods)
+    if (gErr) return { ok: false, status: 400, code: 'BAD_GOODS', message: gErr }
+
+    const amountKop = checkbox.toKop(amount)
+    const goodsKop = checkbox.goodsTotalKop(goods)
+    if (!Number.isFinite(amountKop) || amountKop <= 0) return { ok: false, status: 400, code: 'BAD_AMOUNT', message: 'Невірна сума' }
+    if (amountKop !== goodsKop) {
+      return { ok: false, status: 400, code: 'AMOUNT_MISMATCH', message: `Сума (${(amountKop / 100).toFixed(2)}) не збігається з позиціями (${(goodsKop / 100).toFixed(2)})` }
+    }
+
+    const orderId = newOrderId()
+    const order = {
+      orderId, fopId, amount: amountKop / 100, goods, method, status: 'pending', createdAt: nowIso(),
+      ...(deliveryEmail ? { deliveryEmail } : {}), ...(estimateId ? { estimateId: String(estimateId) } : {}),
+    }
+
+    if (method.startsWith('liqpay')) {
+      if (!fopHas(fop, 'liqpay.privateKey')) return { ok: false, status: 400, code: 'NO_LIQPAY', message: 'У ФОП немає LiqPay' }
+      const lpMethod = method === 'liqpay-paypart' ? 'paypart' : method === 'liqpay-moment' ? 'moment_part' : 'card'
+      const co = liqpay.buildCheckout(fop, {
+        orderId, amountUah: order.amount, description: description || `Оплата RunFerry #${orderId}`,
+        method: lpMethod, serverUrl: PUBLIC ? `${PUBLIC}/api/liqpay/callback` : undefined, resultUrl, sandbox: SANDBOX,
+      })
+      order.provider = 'liqpay'
+      await saveOrder(order)
+      return { ok: true, data: { orderId, provider: 'liqpay', checkoutUrl: co.checkoutUrl, data: co.data, signature: co.signature } }
+    }
+
+    if (method === 'mono-chast') {
+      if (!fopHas(fop, 'monoChast.storeSecret')) return { ok: false, status: 400, code: 'NO_MONO_CHAST', message: 'У ФОП немає monobank Частини' }
+      if (!clientPhone) return { ok: false, status: 400, code: 'NO_PHONE', message: 'Потрібен clientPhone' }
+      // products и total_sum считаем из одного источника (Σ построчно), чтобы банк не отклонил заявку
+      // из-за расхождения total_sum и суммы products (см. аудит).
+      const products = goods.map((g) => ({ name: String(g.name), count: Number(g.qty) || 1, sum: Math.round(Number(g.price) * (Number(g.qty) || 1) * 100) / 100 }))
+      const monoTotal = Math.round(products.reduce((s, p) => s + p.sum, 0) * 100) / 100
+      const bank = await monoChast.createOrder(fop, {
+        storeOrderId: orderId, clientPhone, totalSum: monoTotal, goods: products,
+        resultCallback: PUBLIC ? `${PUBLIC}/api/mono/chast/callback` : undefined,
+      })
+      order.provider = 'mono-chast'
+      order.providerOrderId = String(bank.order_id || orderId)
+      order.status = 'WAITING_FOR_CLIENT'
+      await saveOrder(order)
+      return { ok: true, data: { orderId, provider: 'mono-chast', bank } }
+    }
+
+    return { ok: false, status: 400, code: 'BAD_METHOD', message: 'Невідомий метод' }
+  }
+
+  // Создать оплату. body: { fopId, amount, goods:[{name,price,qty}], method, description, clientPhone?, resultUrl?, deliveryEmail?, estimateId? }
   // method: 'liqpay-card' | 'liqpay-paypart' | 'liqpay-moment' | 'mono-chast'
   app.post('/api/pay/create', async (req, res) => {
     if (!adminDb) return res.status(503).json({ success: false, error: { code: 'NO_DB', message: 'Firestore не настроен' } })
     if (!hasAnyFop()) return res.status(503).json({ success: false, error: { code: 'NO_FOPS', message: 'ФОП не настроены (FOPS_CONFIG)' } })
     try {
-      const { fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail } = req.body || {}
-      const fop = getFop(fopId)
-      if (!fop) return res.status(400).json({ success: false, error: { code: 'BAD_FOP', message: 'Невідомий ФОП' } })
-
-      // Позиции валидны?
-      const gErr = validateGoods(goods)
-      if (gErr) return res.status(400).json({ success: false, error: { code: 'BAD_GOODS', message: gErr } })
-
-      // Сумма положительна И ТОЧНО совпадает с суммой позиций (в копейках) — единый источник истины.
-      // Так гарантируем: сколько списали, на столько и фискальный чек.
-      const amountKop = checkbox.toKop(amount)
-      const goodsKop = checkbox.goodsTotalKop(goods)
-      if (!Number.isFinite(amountKop) || amountKop <= 0) {
-        return res.status(400).json({ success: false, error: { code: 'BAD_AMOUNT', message: 'Невірна сума' } })
-      }
-      if (amountKop !== goodsKop) {
-        return res.status(400).json({
-          success: false,
-          error: { code: 'AMOUNT_MISMATCH', message: `Сума (${(amountKop / 100).toFixed(2)}) не збігається з позиціями (${(goodsKop / 100).toFixed(2)})` },
-        })
-      }
-
-      const orderId = newOrderId()
-      const order = { orderId, fopId, amount: amountKop / 100, goods, method, status: 'pending', createdAt: nowIso(), ...(deliveryEmail ? { deliveryEmail } : {}) }
-
-      if (method.startsWith('liqpay')) {
-        if (!fopHas(fop, 'liqpay.privateKey')) return res.status(400).json({ success: false, error: { code: 'NO_LIQPAY', message: 'У ФОП немає LiqPay' } })
-        const lpMethod = method === 'liqpay-paypart' ? 'paypart' : method === 'liqpay-moment' ? 'moment_part' : 'card'
-        const co = liqpay.buildCheckout(fop, {
-          orderId, amountUah: order.amount, description: description || `Оплата RunFerry #${orderId}`,
-          method: lpMethod, serverUrl: PUBLIC ? `${PUBLIC}/api/liqpay/callback` : undefined, resultUrl, sandbox: SANDBOX,
-        })
-        order.provider = 'liqpay'
-        await saveOrder(order)
-        return res.json({ success: true, data: { orderId, provider: 'liqpay', checkoutUrl: co.checkoutUrl, data: co.data, signature: co.signature } })
-      }
-
-      if (method === 'mono-chast') {
-        if (!fopHas(fop, 'monoChast.storeSecret')) return res.status(400).json({ success: false, error: { code: 'NO_MONO_CHAST', message: 'У ФОП немає monobank Частини' } })
-        if (!clientPhone) return res.status(400).json({ success: false, error: { code: 'NO_PHONE', message: 'Потрібен clientPhone' } })
-        // products и total_sum считаем из одного источника (Σ построчно), чтобы банк не отклонил заявку
-        // из-за расхождения total_sum и суммы products (см. аудит).
-        const products = goods.map((g) => ({ name: String(g.name), count: Number(g.qty) || 1, sum: Math.round(Number(g.price) * (Number(g.qty) || 1) * 100) / 100 }))
-        const monoTotal = Math.round(products.reduce((s, p) => s + p.sum, 0) * 100) / 100
-        const bank = await monoChast.createOrder(fop, {
-          storeOrderId: orderId, clientPhone, totalSum: monoTotal, goods: products,
-          resultCallback: PUBLIC ? `${PUBLIC}/api/mono/chast/callback` : undefined,
-        })
-        order.provider = 'mono-chast'
-        order.providerOrderId = String(bank.order_id || orderId)
-        order.status = 'WAITING_FOR_CLIENT'
-        await saveOrder(order)
-        return res.json({ success: true, data: { orderId, provider: 'mono-chast', bank } })
-      }
-
-      return res.status(400).json({ success: false, error: { code: 'BAD_METHOD', message: 'Невідомий метод' } })
+      const r = await createPayment(req.body || {})
+      if (!r.ok) return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
+      return res.json({ success: true, data: r.data })
     } catch (e) {
       console.error('pay/create error:', (e.response && e.response.data) || e.message)
       res.status(500).json({ success: false, error: { code: 'PAY_FAILED', message: 'Не вдалося створити оплату' } })
+    }
+  })
+
+  // Оплатить ФАКТИЧЕСКУЮ смету: деньги и позиции берём из persisted-сметы (priceEstimates),
+  // а не из тела запроса — smету собирает мастер в админке, оплату инициирует по её id.
+  // body: { estimateId, fopId?, method?, clientPhone?, resultUrl?, deliveryEmail?, description? }
+  app.post('/api/estimates/pay', async (req, res) => {
+    if (!adminDb) return res.status(503).json({ success: false, error: { code: 'NO_DB', message: 'Firestore не настроен' } })
+    if (!hasAnyFop()) return res.status(503).json({ success: false, error: { code: 'NO_FOPS', message: 'ФОП не настроены (FOPS_CONFIG)' } })
+    try {
+      const { estimateId, fopId, method, clientPhone, resultUrl, deliveryEmail, description } = req.body || {}
+      if (!estimateId) return res.status(400).json({ success: false, error: { code: 'NO_ESTIMATE', message: 'Потрібен estimateId' } })
+      const snap = await adminDb.collection('priceEstimates').doc(String(estimateId)).get()
+      if (!snap.exists) return res.status(404).json({ success: false, error: { code: 'ESTIMATE_NOT_FOUND', message: 'Кошторис не знайдено' } })
+      const est = snap.data()
+      if (est.kind !== 'actual') return res.status(400).json({ success: false, error: { code: 'NOT_ACTUAL', message: 'Оплата лише з фактичного кошторису' } })
+      if (est.paymentId || est.status === 'paid') return res.status(409).json({ success: false, error: { code: 'ALREADY_PAID', message: 'Кошторис уже оплачено' } })
+      if (est.status === 'pending_approval') return res.status(409).json({ success: false, error: { code: 'NEEDS_APPROVAL', message: 'Кошторис очікує погодження клієнта' } })
+      const goods = est.receiptGoods
+      if (!Array.isArray(goods) || !goods.length) return res.status(400).json({ success: false, error: { code: 'NO_GOODS', message: 'У кошторисі немає позицій для чека' } })
+
+      const useFopId = fopId || est.fopId
+      const r = await createPayment({
+        fopId: useFopId, amount: est.total, goods, method: method || 'liqpay-card',
+        description: description || `Оплата RunFerry (кошторис ${estimateId})`,
+        clientPhone, resultUrl, deliveryEmail: deliveryEmail || undefined, estimateId,
+      })
+      if (!r.ok) return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
+      // Зафиксируем выбранный ФОП на смете (провайдер оплаты определён)
+      await adminDb.collection('priceEstimates').doc(String(estimateId)).set({ fopId: useFopId, updatedAt: nowIso() }, { merge: true }).catch(() => {})
+      return res.json({ success: true, data: r.data })
+    } catch (e) {
+      console.error('estimates/pay error:', (e.response && e.response.data) || e.message)
+      res.status(500).json({ success: false, error: { code: 'PAY_FAILED', message: 'Не вдалося створити оплату' } })
+    }
+  })
+
+  // Согласование/отклонение роста фактической сметы клиентом. Доступ по знанию id сметы
+  // (криптостойкий capability-token, как chatSessions). Пишем backend-ом (клиент правила не проходит).
+  const setEstimateStatus = async (id, status, extra = {}) => {
+    const ref = adminDb.collection('priceEstimates').doc(String(id))
+    const snap = await ref.get()
+    if (!snap.exists) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Кошторис не знайдено' }
+    const est = snap.data()
+    if (est.paymentId || est.status === 'paid') return { ok: false, status: 409, code: 'ALREADY_PAID', message: 'Кошторис уже оплачено' }
+    await ref.set({ status, updatedAt: nowIso(), ...extra }, { merge: true })
+    return { ok: true }
+  }
+
+  app.post('/api/estimates/:id/approve', async (req, res) => {
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const r = await setEstimateStatus(req.params.id, 'approved', { approvedAt: nowIso() })
+      if (!r.ok) return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
+      return res.json({ success: true })
+    } catch (e) {
+      console.error('estimate approve:', e.message)
+      res.status(500).json({ success: false })
+    }
+  })
+
+  app.post('/api/estimates/:id/reject', async (req, res) => {
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const r = await setEstimateStatus(req.params.id, 'rejected', { rejectedAt: nowIso() })
+      if (!r.ok) return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
+      return res.json({ success: true })
+    } catch (e) {
+      console.error('estimate reject:', e.message)
+      res.status(500).json({ success: false })
     }
   })
 

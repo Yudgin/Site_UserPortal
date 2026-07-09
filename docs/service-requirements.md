@@ -532,6 +532,34 @@
     --no-cpu-throttling --env-vars-file <env> --allow-unauthenticated`; фронт `npm run build` +
     `firebase deploy --only hosting`. Redeploy бэкенда — та же команда (env берётся из server/.env обоих репо).
 
+- Блок ПРЕДВАРИТЕЛЬНОЙ → ФАКТИЧЕСКОЙ калькуляции (решения владельца от 2026-07-09):
+  - **Факт формируется на сайте** (мастер собирает по реально выполненным работам/материалам) —
+    сайт стал контуром калькуляции. **Оплата+чек — наш движок** (source of truth), выгрузка в 1С — позже.
+    **Только цена клиенту** (без себестоимости/нормо-часов пока). **Детализация чека — построчно.**
+  - Модель (`src/types/pricing.ts`): `Estimate` расширён — `kind:'preliminary'|'actual'`,
+    `status:'draft'|'pending_approval'|'approved'|'paid'|'rejected'`, `parentEstimateId`,
+    `receiptGoods` (снимок позиций чека), `paymentId/fopId/paidAt/taxUrl/fiscalCode`. Обратная
+    совместимость: отсутствие `kind` = 'preliminary'.
+  - Движок (`src/utils/pricing.ts`): `estimate2goods` (смета→позиции чека ПОСТРОЧНО, инвариант
+    Σ(goods)==total, зеркалит серверную `goodsTotalKop`), `compareEstimates` (diff план/факт:
+    added/removed/changed/diffPercent), `needsReapproval` (пороги 10% / согласованные 25%).
+    Юр-основание построчности — Наказ Мінфіну №13 (см. память fiscal-receipt-content-law): по
+    позиции обязательны назва+вартість; кількість/ціна — при qty≠1; ПДВ/УКТ ЗЕД у ФОП-спрощенця нет.
+  - Сервер (`server/payments.js`): `createPayment` вынесен в функцию; `/api/estimates/pay`
+    (деньги/позиции — из persisted-сметы, не из запроса), `estimateId` в заказе, writeback
+    `markEstimatePaid` в `priceEstimates` после чека (status=paid, paymentId, fopId, taxUrl).
+    `/api/estimates/:id/approve|reject` — согласование клиентом по знанию id (capability-token).
+  - UI: `ActualEstimateEditorPage` (`/actual-estimate`, админ; сборка факта из прайса/наборов,
+    diff, выбор ФОП, сохранение, ссылка клиенту) + пункт меню «Фактична калькуляція».
+    `EstimateSharePage` (`/estimate/:id`, публично; построчный кошторис, «що змінилося»,
+    погодження при росте, оплата LiqPay/monobank, показ чека `taxUrl`). API `src/api/endpoints/payments.ts`.
+  - Firestore-правило `priceEstimates` (get публичный, create/update — админ, backend пишет статусы)
+    уже покрывает поток — менять не потребовалось. Проверено: `tsc --noEmit`, `npm run build` — чисто;
+    инвариант Σ(goods)==total — юнит-тестом (в т.ч. дробные qty/сезон).
+  - НЕ сделано: выгрузка фактической сметы в 1С (finalInvoice/finalPrice/FixNumber); опция «оплатить
+    на месте» из редактора мастера; замена 1С-monopay на клиентской ServiceSharePage (сейчас
+    отдельный `/estimate/:id`); себестоимость/анализ план-факт по нормо-часам (по решению — позже).
+
 - Движок оплат (МУЛЬТИ-ФОП) — backend, начат:
   - `server/fops.js` — реестр ФОП из env `FOPS_CONFIG` (JSON; секреты только там). Каждый ФОП: liqpay/
     monoChast/monoAcquire/checkbox. `listFopsPublic` — без секретов (для UI).
