@@ -290,7 +290,9 @@ export interface EstimateOffer {
   title: string // заголовок предложения (кораблик/скарга)
   variantIds: string[] // id вариантов (Estimate stage='proposed')
   selectedVariantId: string | null // выбранный клиентом вариант (путь ремонта)
-  status: 'pending_choice' | 'chosen' // ждём выбора / выбран
+  // 'pending_choice' — ждём выбора; 'chosen' — выбран; 'locked' — по выбранному варианту уже
+  // собрана фактическая калькуляция → переизбор клиентом заблокирован (иначе факт/чек разойдутся).
+  status: 'pending_choice' | 'chosen' | 'locked'
   createdAt: string
   createdBy: string | null
   chosenAt?: string | null

@@ -170,14 +170,14 @@ export const pricingService = {
     }
   },
 
-  // Сохранить предложение (набор вариантов) — только администратор (см. rules)
-  saveOffer: async (offer: EstimateOffer): Promise<{ id: string } | null> => {
+  // Upsert предложения (набор вариантов) — только администратор (см. rules). ПИШЕМ ЧЕРЕЗ MERGE и
+  // принимаем ЧАСТИЧНЫЙ объект: редактор мастера обновляет только свои поля (title/variantIds),
+  // не затирая проставленные backend-ом selectedVariantId/status/chosenAt (выбор клиента).
+  saveOffer: async (offer: Partial<EstimateOffer> & { id: string }): Promise<{ id: string } | null> => {
     if (!db || !auth?.currentUser) return null
     try {
-      const id = offer.id || generateId()
-      const payload: EstimateOffer = { ...offer, id, createdBy: offer.createdBy || auth.currentUser.email }
-      await setDoc(doc(db, OFFERS_COLLECTION, id), payload)
-      return { id }
+      await setDoc(doc(db, OFFERS_COLLECTION, offer.id), { ...offer, updatedAt: new Date().toISOString() }, { merge: true })
+      return { id: offer.id }
     } catch (error) {
       console.error('Error saving offer:', error)
       return null

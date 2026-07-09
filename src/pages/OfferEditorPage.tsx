@@ -40,7 +40,7 @@ export default function OfferEditorPage() {
   const [serviceKind, setServiceKind] = useState<ServiceKind>('repair')
   const [variants, setVariants] = useState<VariantEntry[]>([])
   const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null)
-  const [offerStatus, setOfferStatus] = useState<'pending_choice' | 'chosen' | null>(null)
+  const [offerStatus, setOfferStatus] = useState<'pending_choice' | 'chosen' | 'locked' | null>(null)
 
   // текущий собираемый вариант
   const [label, setLabel] = useState('')
@@ -126,18 +126,21 @@ export default function OfferEditorPage() {
       if (!saved) { notify('Не вдалося зберегти варіант', 'error'); return }
       const nextVariants = [...variants, { id: saved.id, label: label.trim(), total: currentEstimate.total }]
       setVariants(nextVariants)
-      // upsert предложение
-      const offer: EstimateOffer = {
-        id: oid,
-        requestId: currentEstimate.requestId ?? null,
-        title: title || currentEstimate.title || 'Пропозиція',
-        variantIds: nextVariants.map((v) => v.id),
-        selectedVariantId,
-        status: offerStatus || 'pending_choice',
-        createdAt: new Date().toISOString(),
-        createdBy: user?.email ?? null,
-      }
-      await pricingService.saveOffer(offer)
+      // upsert предложения. На ПЕРВОМ варианте инициализируем; далее пишем ТОЛЬКО свои поля
+      // (title/variantIds) через merge — иначе затрём выбор клиента (selectedVariantId/status/chosenAt).
+      const offerPatch: Partial<EstimateOffer> & { id: string } = offerId
+        ? { id: oid, title: title || currentEstimate.title || 'Пропозиція', variantIds: nextVariants.map((v) => v.id) }
+        : {
+            id: oid,
+            requestId: currentEstimate.requestId ?? null,
+            title: title || currentEstimate.title || 'Пропозиція',
+            variantIds: nextVariants.map((v) => v.id),
+            selectedVariantId: null,
+            status: 'pending_choice',
+            createdAt: new Date().toISOString(),
+            createdBy: user?.email ?? null,
+          }
+      await pricingService.saveOffer(offerPatch)
       setOfferId(oid)
       setOfferStatus((s) => s || 'pending_choice')
       // очистить конструктор под следующий вариант

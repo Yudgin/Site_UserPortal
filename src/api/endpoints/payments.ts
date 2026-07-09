@@ -83,7 +83,7 @@ export interface EstimatePublic {
 
 // Публичный вид предложения (набора вариантов) для клиента
 export interface OfferPublicView {
-  offer: { id: string; title: string; status: 'pending_choice' | 'chosen'; selectedVariantId: string | null }
+  offer: { id: string; title: string; status: 'pending_choice' | 'chosen' | 'locked'; selectedVariantId: string | null }
   variants: SafeEstimate[]
 }
 

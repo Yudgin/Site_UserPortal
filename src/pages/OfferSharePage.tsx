@@ -55,6 +55,7 @@ export default function OfferSharePage() {
   const { offer, variants } = data
   const single = variants.length === 1
   const selectedId = offer.selectedVariantId
+  const locked = offer.status === 'locked' // мастер уже собрал факт по выбранному — переизбор закрыт
 
   return (
     <Container maxWidth="md" sx={{ py: 4 }}>
@@ -68,8 +69,9 @@ export default function OfferSharePage() {
 
       {selectedId && (
         <Alert severity="success" icon={<CheckIcon />} sx={{ mb: 3 }}>
-          Ви обрали варіант. Майстер підготує фактичний кошторис за цим шляхом і надішле посилання для оплати.
-          {!single && ' За потреби можна змінити вибір нижче.'}
+          {locked
+            ? 'Ваш вибір зафіксовано. Майстер готує фактичний кошторис і надішле посилання для оплати.'
+            : <>Ви обрали варіант. Майстер підготує фактичний кошторис за цим шляхом і надішле посилання для оплати.{!single && ' За потреби можна змінити вибір нижче.'}</>}
         </Alert>
       )}
       {err && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setErr('')}>{err}</Alert>}
@@ -105,7 +107,7 @@ export default function OfferSharePage() {
                 <Button
                   variant={isSelected ? 'outlined' : 'contained'}
                   color={isSelected ? 'success' : 'primary'}
-                  disabled={!!busy}
+                  disabled={!!busy || locked || isSelected}
                   onClick={() => choose(v.id)}
                 >
                   {busy === v.id ? 'Зберігаємо…' : isSelected ? 'Обрано' : single ? 'Підтвердити кошторис' : 'Обрати цей варіант'}

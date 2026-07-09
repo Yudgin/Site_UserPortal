@@ -233,6 +233,20 @@ export function registerPayments(app, deps) {
       if (!claim.ok) return res.status(claim.status).json({ success: false, error: { code: claim.code, message: claim.message } })
 
       const est = claim.est
+      // Целостность пути: факт должен быть по ВЫБРАННОМУ клиентом варианту. Если факт собран по
+      // варианту A, а клиент затем переизбрал B — не даём оплатить «не тот» путь (снимаем claim).
+      if (est.parentEstimateId) {
+        const pSnap = await adminDb.collection('priceEstimates').doc(String(est.parentEstimateId)).get()
+        const parent = pSnap.exists ? pSnap.data() : null
+        if (parent && parent.offerId) {
+          const oSnap = await adminDb.collection('estimateOffers').doc(String(parent.offerId)).get()
+          const offer = oSnap.exists ? oSnap.data() : null
+          if (offer && offer.selectedVariantId && offer.selectedVariantId !== est.parentEstimateId) {
+            await ref.set({ payInitiatedAt: null }, { merge: true }).catch(() => {})
+            return res.status(409).json({ success: false, error: { code: 'PATH_CHANGED', message: 'Клієнт змінив обраний варіант — потрібен новий фактичний кошторис' } })
+          }
+        }
+      }
       const goods = est.receiptGoods
       // Сумма к оплате = согласованный total сметы. createPayment сверит amount==Σ(goods): для
       // корректной сметы совпадёт (estimate2goods точен по построению), а если позиции не
@@ -379,8 +393,12 @@ export function registerPayments(app, deps) {
         const s = await tx.get(ref)
         if (!s.exists) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Пропозицію не знайдено' }
         const offer = s.data()
+        // Оффер заморожен (по выбранному варианту уже собран факт) — переизбор запрещён.
+        if (offer.status === 'locked') return { ok: false, status: 409, code: 'LOCKED', message: 'Вибір зафіксовано — зверніться до майстра' }
         const ids = Array.isArray(offer.variantIds) ? offer.variantIds : []
         if (!ids.includes(String(variantId))) return { ok: false, status: 400, code: 'BAD_VARIANT', message: 'Такого варіанта немає в пропозиції' }
+        // Повторный выбор того же варианта — идемпотентно, не переписываем chosenAt.
+        if (offer.selectedVariantId === String(variantId) && offer.status === 'chosen') return { ok: true }
         tx.set(ref, { selectedVariantId: String(variantId), status: 'chosen', chosenAt: nowIso(), updatedAt: nowIso() }, { merge: true })
         return { ok: true }
       })

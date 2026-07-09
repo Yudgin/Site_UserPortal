@@ -146,6 +146,11 @@ export default function ActualEstimateEditorPage() {
       const res = await pricingService.saveEstimate(toSave)
       if (!res) { notify('Не вдалося зберегти кошторис', 'error'); return null }
       setSavedId(res.id)
+      // Факт собран по выбранному варианту → «замораживаем» предложение: клиент больше не может
+      // переизбрать путь (иначе оффер и факт/чек разойдутся).
+      if (prelim?.offerId) {
+        await pricingService.saveOffer({ id: prelim.offerId, status: 'locked' }).catch(() => {})
+      }
       notify(required ? 'Збережено. Потрібне погодження клієнта (перевищено поріг)' : 'Фактичний кошторис збережено та погоджено', required ? 'info' : 'success')
       return res.id
     } catch (e) {
