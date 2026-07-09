@@ -225,7 +225,7 @@ export function registerPayments(app, deps) {
         if (e.status !== 'approved') return { ok: false, status: 409, code: 'NOT_APPROVED', message: 'Кошторис не погоджено' }
         if (!Array.isArray(e.receiptGoods) || !e.receiptGoods.length) return { ok: false, status: 400, code: 'NO_GOODS', message: 'У кошторисі немає позицій для чека' }
         if (!e.fopId) return { ok: false, status: 400, code: 'NO_FOP', message: 'ФОП для кошторису не призначено' }
-        const recent = e.payInitiatedAt && Date.now() - Date.parse(e.payInitiatedAt) < 15 * 60 * 1000
+        const recent = e.payInitiatedAt && Date.now() - Date.parse(e.payInitiatedAt) < 3 * 60 * 1000
         if (recent) return { ok: false, status: 409, code: 'PAY_IN_PROGRESS', message: 'Оплата вже створюється — оновіть сторінку за хвилину' }
         tx.set(ref, { payInitiatedAt: nowIso() }, { merge: true })
         return { ok: true, est: e }
@@ -234,8 +234,11 @@ export function registerPayments(app, deps) {
 
       const est = claim.est
       const goods = est.receiptGoods
-      // Сумма — из позиций чека (server-authoritative), а не из est.total → AMOUNT_MISMATCH невозможен.
-      const amount = checkbox.goodsTotalKop(goods) / 100
+      // Сумма к оплате = согласованный total сметы. createPayment сверит amount==Σ(goods): для
+      // корректной сметы совпадёт (estimate2goods точен по построению), а если позиции не
+      // покрывают total (напр. знижкові/від'ємні рядки не потрапили в чек) — оплата будет
+      // отклонена AMOUNT_MISMATCH, а не тихо спишет с клиента больше/меньше согласованного.
+      const amount = est.total
       try {
         const r = await createPayment({
           fopId: est.fopId, amount, goods, method: method || 'liqpay-card',
@@ -262,16 +265,19 @@ export function registerPayments(app, deps) {
   // валидируются: approve только из pending_approval; reject терминален; paid неизменяем.
   const setEstimateStatus = async (id, status, allowedFrom, extra = {}) => {
     const ref = adminDb.collection('priceEstimates').doc(String(id))
-    const snap = await ref.get()
-    if (!snap.exists) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Кошторис не знайдено' }
-    const est = snap.data()
-    if (est.paymentId || est.status === 'paid') return { ok: false, status: 409, code: 'ALREADY_PAID', message: 'Кошторис уже оплачено' }
-    if (est.status === 'rejected') return { ok: false, status: 409, code: 'REJECTED', message: 'Кошторис відхилено остаточно' }
-    if (allowedFrom && !allowedFrom.includes(est.status || 'approved')) {
-      return { ok: false, status: 409, code: 'BAD_STATE', message: 'Недопустимий перехід статусу' }
-    }
-    await ref.set({ status, updatedAt: nowIso(), ...extra }, { merge: true })
-    return { ok: true }
+    // Транзакция: проверка допустимости перехода и запись атомарны (нет гонки approve/reject).
+    return adminDb.runTransaction(async (tx) => {
+      const snap = await tx.get(ref)
+      if (!snap.exists) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Кошторис не знайдено' }
+      const est = snap.data()
+      if (est.paymentId || est.status === 'paid') return { ok: false, status: 409, code: 'ALREADY_PAID', message: 'Кошторис уже оплачено' }
+      if (est.status === 'rejected') return { ok: false, status: 409, code: 'REJECTED', message: 'Кошторис відхилено остаточно' }
+      if (allowedFrom && !allowedFrom.includes(est.status || 'approved')) {
+        return { ok: false, status: 409, code: 'BAD_STATE', message: 'Недопустимий перехід статусу' }
+      }
+      tx.set(ref, { status, updatedAt: nowIso(), ...extra }, { merge: true })
+      return { ok: true }
+    })
   }
 
   app.post('/api/estimates/:id/approve', async (req, res) => {
@@ -301,7 +307,7 @@ export function registerPayments(app, deps) {
   // Публичный БЕЗОПАСНЫЙ вид сметы для клиента (без внутренней экономики/PII: ставка, подытоги,
   // сезонный коэффициент, createdBy, requestId, receiptGoods — не отдаются). Клиент грузит смету
   // через этот эндпоинт, а не напрямую из Firestore (правило get закрыто до админа).
-  const safeEstimate = (e) => e && ({
+  const safeEstimate = (e) => e ? ({
     id: e.id,
     title: e.title || '',
     complaint: e.complaint || '',
@@ -315,7 +321,7 @@ export function registerPayments(app, deps) {
     paid: e.status === 'paid' || !!e.paidAt,
     paidAt: e.paidAt || null,
     taxUrl: e.taxUrl || null,
-  })
+  }) : null
 
   app.get('/api/estimates/:id/public', async (req, res) => {
     if (!adminDb) return res.status(503).json({ success: false })

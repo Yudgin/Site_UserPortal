@@ -788,7 +788,15 @@ export const needsReapproval = (
   // Сравниваем на НЕокруглённом проценте (иначе рост 10.004% округлился бы до 10.0 и прошёл
   // как «в пределах»); в решение возвращаем округлённое значение для отображения.
   const prelimTotal = round2(prelim.total)
-  const rawPercent = prelimTotal > 0 ? ((round2(actual.total) - prelimTotal) / prelimTotal) * 100 : 0
+  const actualTotal = round2(actual.total)
+  // Предварительная = 0 (напр. бесплатная диагностика): процент не определён. Любой рост с нуля
+  // до положительной суммы — существенный, требует согласования клиента (не авто-«decrease»).
+  if (prelimTotal <= 0) {
+    return actualTotal > 0
+      ? { required: true, reason: 'exceeds-threshold', diffPercent: 100, thresholdPct: 0 }
+      : { required: false, reason: 'decrease', diffPercent: 0, thresholdPct: 0 }
+  }
+  const rawPercent = ((actualTotal - prelimTotal) / prelimTotal) * 100
   const diffPercent = round2(rawPercent)
   if (rawPercent <= 0) return { required: false, reason: 'decrease', diffPercent, thresholdPct: 0 }
   if (rawPercent <= NO_REAPPROVAL_DEVIATION_PCT) {

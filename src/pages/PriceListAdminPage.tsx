@@ -685,7 +685,7 @@ function MaterialDialog({ material, onClose, onSave }: { material: Material; onC
           <TextField label="Код" size="small" value={m.code} onChange={(e) => setM({ ...m, code: e.target.value })} />
           <LocalizedField label="Название" value={m.name} required onChange={(name) => setM({ ...m, name })} />
           <LocalizedField label="Единица" value={m.unit} required onChange={(unit) => setM({ ...m, unit })} />
-          <TextField label="Цена за единицу, ₴" type="number" size="small" value={m.price} onChange={(e) => setM({ ...m, price: Number(e.target.value) })} />
+          <TextField label="Цена за единицу, ₴" type="number" size="small" value={m.price} inputProps={{ min: 0, step: 0.01 }} onChange={(e) => setM({ ...m, price: Math.max(0, Number(e.target.value)) })} />
           <FormControlLabel control={<Switch checked={!!m.waivesHighSeasonSurcharge} onChange={(e) => setM({ ...m, waivesHighSeasonSurcharge: e.target.checked })} />} label="Оборудование: снимает наценку высокого сезона" />
           <FormControlLabel control={<Switch checked={m.active} onChange={(e) => setM({ ...m, active: e.target.checked })} />} label="Активен" />
         </Box>
@@ -712,7 +712,7 @@ function AddonDialog({ addon, onClose, onSave }: { addon: Addon; onClose: () => 
             <MenuItem value="service">Услуга</MenuItem>
             <MenuItem value="product">Товар</MenuItem>
           </TextField>
-          <TextField label="Цена, ₴" type="number" size="small" value={a.price} onChange={(e) => setA({ ...a, price: Number(e.target.value) })} />
+          <TextField label="Цена, ₴" type="number" size="small" value={a.price} inputProps={{ min: 0, step: 0.01 }} onChange={(e) => setA({ ...a, price: Math.max(0, Number(e.target.value)) })} />
           <FormControlLabel control={<Switch checked={a.active} onChange={(e) => setA({ ...a, active: e.target.checked })} />} label="Активен" />
         </Box>
       </DialogContent>
