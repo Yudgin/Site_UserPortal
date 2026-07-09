@@ -312,6 +312,8 @@ export function registerPayments(app, deps) {
     title: e.title || '',
     complaint: e.complaint || '',
     kind: e.kind || 'preliminary',
+    stage: e.stage || (e.kind === 'actual' ? 'actual' : 'proposed'),
+    variantLabel: e.variantLabel || '',
     status: e.status || 'approved',
     total: e.total,
     currency: e.currency || 'UAH',
@@ -337,6 +339,55 @@ export function registerPayments(app, deps) {
       return res.json({ success: true, data: { estimate: safeEstimate(e), parent: safeEstimate(parent) } })
     } catch (err) {
       console.error('estimate public:', err.message)
+      res.status(500).json({ success: false })
+    }
+  })
+
+  // Публичный вид ПРЕДЛОЖЕНИЯ (набора вариантов) для клиента: варианты (безопасные виды) + выбранный.
+  app.get('/api/offers/:id/public', async (req, res) => {
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const snap = await adminDb.collection('estimateOffers').doc(String(req.params.id)).get()
+      if (!snap.exists) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Пропозицію не знайдено' } })
+      const offer = snap.data()
+      const ids = Array.isArray(offer.variantIds) ? offer.variantIds : []
+      // Грузим варианты и отдаём в порядке variantIds (безопасные виды, без внутренней экономики)
+      const variants = []
+      for (const vid of ids) {
+        const vs = await adminDb.collection('priceEstimates').doc(String(vid)).get()
+        if (vs.exists) variants.push(safeEstimate(vs.data()))
+      }
+      return res.json({ success: true, data: {
+        offer: { id: offer.id, title: offer.title || '', status: offer.status || 'pending_choice', selectedVariantId: offer.selectedVariantId || null },
+        variants,
+      } })
+    } catch (err) {
+      console.error('offer public:', err.message)
+      res.status(500).json({ success: false })
+    }
+  })
+
+  // Клиент выбирает вариант (путь ремонта). Доступ по знанию id предложения (capability-token).
+  // Пишем backend-ом. Пока не выбран/не «заморожен» — можно переизбрать; после — фиксируется chosen.
+  app.post('/api/offers/:id/choose', async (req, res) => {
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const { variantId } = req.body || {}
+      if (!variantId) return res.status(400).json({ success: false, error: { code: 'NO_VARIANT', message: 'Потрібен variantId' } })
+      const ref = adminDb.collection('estimateOffers').doc(String(req.params.id))
+      const out = await adminDb.runTransaction(async (tx) => {
+        const s = await tx.get(ref)
+        if (!s.exists) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Пропозицію не знайдено' }
+        const offer = s.data()
+        const ids = Array.isArray(offer.variantIds) ? offer.variantIds : []
+        if (!ids.includes(String(variantId))) return { ok: false, status: 400, code: 'BAD_VARIANT', message: 'Такого варіанта немає в пропозиції' }
+        tx.set(ref, { selectedVariantId: String(variantId), status: 'chosen', chosenAt: nowIso(), updatedAt: nowIso() }, { merge: true })
+        return { ok: true }
+      })
+      if (!out.ok) return res.status(out.status).json({ success: false, error: { code: out.code, message: out.message } })
+      return res.json({ success: true })
+    } catch (err) {
+      console.error('offer choose:', err.message)
       res.status(500).json({ success: false })
     }
   })

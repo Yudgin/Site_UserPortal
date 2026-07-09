@@ -64,6 +64,8 @@ export interface SafeEstimate {
   title: string
   complaint: string
   kind: 'preliminary' | 'actual'
+  stage: 'ai' | 'proposed' | 'actual'
+  variantLabel: string
   status: string
   total: number
   currency: string
@@ -77,6 +79,12 @@ export interface SafeEstimate {
 export interface EstimatePublic {
   estimate: SafeEstimate
   parent: SafeEstimate | null
+}
+
+// Публичный вид предложения (набора вариантов) для клиента
+export interface OfferPublicView {
+  offer: { id: string; title: string; status: 'pending_choice' | 'chosen'; selectedVariantId: string | null }
+  variants: SafeEstimate[]
 }
 
 interface ApiEnvelope<T> {
@@ -103,6 +111,18 @@ export const paymentsApi = {
   getEstimatePublic: async (id: string): Promise<EstimatePublic> => {
     const { data } = await client.get<ApiEnvelope<EstimatePublic>>(`/api/estimates/${id}/public`)
     return unwrap(data)
+  },
+
+  // Публичный вид предложения (варианты + выбранный)
+  getOfferPublic: async (id: string): Promise<OfferPublicView> => {
+    const { data } = await client.get<ApiEnvelope<OfferPublicView>>(`/api/offers/${id}/public`)
+    return unwrap(data)
+  },
+
+  // Клиент выбирает вариант (путь ремонта)
+  chooseVariant: async (offerId: string, variantId: string): Promise<void> => {
+    const { data } = await client.post<ApiEnvelope<void>>(`/api/offers/${offerId}/choose`, { variantId })
+    if (!data.success) throw new Error(data.error?.message || 'Не вдалося обрати варіант')
   },
 
   // Создать оплату из фактической сметы (деньги/позиции — из persisted-сметы на сервере)

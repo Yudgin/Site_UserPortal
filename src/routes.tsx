@@ -35,6 +35,8 @@ import ComplaintsAdminPage from '@/pages/ComplaintsAdminPage'
 import TasksAdminPage from '@/pages/TasksAdminPage'
 import ActualEstimateEditorPage from '@/pages/ActualEstimateEditorPage'
 import EstimateSharePage from '@/pages/EstimateSharePage'
+import OfferEditorPage from '@/pages/OfferEditorPage'
+import OfferSharePage from '@/pages/OfferSharePage'
 import Layout from '@/components/common/Layout'
 
 interface ProtectedRouteProps {
@@ -148,6 +150,9 @@ export const AppRoutes = () => {
       {/* Actual estimate share — public (opened by client via unguessable estimate id) */}
       <Route path="/estimate/:id" element={<EstimateSharePage />} />
 
+      {/* Offer (variant choice) share — public (opened by client via unguessable offer id) */}
+      <Route path="/offer/:id" element={<OfferSharePage />} />
+
       {/* Public knowledge article view - public */}
       <Route path="/help/:id" element={<KnowledgeArticlePage />} />
 
@@ -221,6 +226,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <PriceListAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Offer editor (master builds variants) - requires auth (email-gated inside) */}
+      <Route
+        path="/offer-editor"
+        element={
+          <AuthenticatedRoute>
+            <OfferEditorPage />
           </AuthenticatedRoute>
         }
       />

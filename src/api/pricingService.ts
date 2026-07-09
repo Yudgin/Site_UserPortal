@@ -1,6 +1,6 @@
 import { db, auth } from './firebase'
 import { doc, getDoc, setDoc, collection, query, where, getDocs, limit, orderBy } from 'firebase/firestore'
-import type { Estimate, WorkCategory, Work, Kit, Material, Addon, PricingSettings } from '@/types/pricing'
+import type { Estimate, EstimateOffer, WorkCategory, Work, Kit, Material, Addon, PricingSettings } from '@/types/pricing'
 import { priceListSeed, defaultPricingSettings } from '@/data/priceListSeed'
 import { isAdminEmail } from '@/config/access'
 import { secureId } from '@/utils/id'
@@ -23,6 +23,7 @@ const PRICE_DOC = 'current'
 const PRICE_COLLECTION = 'priceList'
 const PRICE_ARCHIVE_COLLECTION = 'priceArchive'
 const ESTIMATES_COLLECTION = 'priceEstimates'
+const OFFERS_COLLECTION = 'estimateOffers'
 
 // Запись архива цен: снимок предыдущей версии каталога, сделанный перед перезаписью.
 export interface PriceArchiveEntry extends PriceListDoc {
@@ -166,6 +167,32 @@ export const pricingService = {
     } catch (error) {
       console.error('Error loading estimates by request:', error)
       return []
+    }
+  },
+
+  // Сохранить предложение (набор вариантов) — только администратор (см. rules)
+  saveOffer: async (offer: EstimateOffer): Promise<{ id: string } | null> => {
+    if (!db || !auth?.currentUser) return null
+    try {
+      const id = offer.id || generateId()
+      const payload: EstimateOffer = { ...offer, id, createdBy: offer.createdBy || auth.currentUser.email }
+      await setDoc(doc(db, OFFERS_COLLECTION, id), payload)
+      return { id }
+    } catch (error) {
+      console.error('Error saving offer:', error)
+      return null
+    }
+  },
+
+  // Загрузить предложение по id (для админа; клиент — через backend /api/offers/:id/public)
+  loadOffer: async (id: string): Promise<EstimateOffer | null> => {
+    if (!db) return null
+    try {
+      const snap = await getDoc(doc(db, OFFERS_COLLECTION, id))
+      return snap.exists() ? (snap.data() as EstimateOffer) : null
+    } catch (error) {
+      console.error('Error loading offer:', error)
+      return null
     }
   },
 

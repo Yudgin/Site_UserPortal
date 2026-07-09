@@ -98,6 +98,7 @@ export default function Layout() {
   // Add admin menu for developers only
   if (user?.role === 'developer') {
     menuItems.push({ text: 'Прайс-лист', icon: <PriceListIcon />, path: '/pricelist-admin' })
+    menuItems.push({ text: 'Пропозиція клієнту', icon: <EstimateIcon />, path: '/offer-editor' })
     menuItems.push({ text: 'Фактична калькуляція', icon: <EstimateIcon />, path: '/actual-estimate' })
     menuItems.push({ text: 'Жалобы→работы', icon: <ComplaintIcon />, path: '/complaints-admin' })
     menuItems.push({ text: 'Соглашение', icon: <TermsIcon />, path: '/service-content-admin' })

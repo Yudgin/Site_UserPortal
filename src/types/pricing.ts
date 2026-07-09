@@ -219,6 +219,15 @@ export interface EstimateComplaintRef {
 // Отсутствие поля kind у старых смет трактуется как 'preliminary' (обратная совместимость).
 export type EstimateKind = 'preliminary' | 'actual'
 
+// ==== Три стадии калькуляции ====
+//
+//  • 'ai'       — предварительная оценка ИИ (черновик, внутренняя; source='ai'). Заготовка мастеру.
+//  • 'proposed' — утверждённый мастером ВАРИАНТ для клиента. Вариантов может быть несколько
+//                 (offerId группирует их в одно предложение); клиент выбирает ОДИН путь.
+//  • 'actual'   — фактическая калькуляция по выбранному варианту. По ней оплата и фискальный чек.
+// Соотношение с kind: 'ai'/'proposed' → kind='preliminary'; 'actual' → kind='actual'.
+export type EstimateStage = 'ai' | 'proposed' | 'actual'
+
 // Статус жизненного цикла (в основном для фактической сметы):
 //  • 'draft'            — черновик мастера (ещё правится);
 //  • 'pending_approval' — рост сметы > порога, ждёт согласия клиента;
@@ -257,8 +266,13 @@ export interface Estimate {
   createdBy: string | null
   // — Предварительная/фактическая калькуляция и связь с оплатой —
   kind?: EstimateKind // роль сметы (по умолчанию 'preliminary')
+  stage?: EstimateStage // стадия: 'ai' | 'proposed' | 'actual' (уточняет kind)
   status?: EstimateStatus // статус жизненного цикла (для фактической)
-  parentEstimateId?: string | null // предварительная, из которой выросла фактическая
+  parentEstimateId?: string | null // из чего выросла: proposed←ai, actual←выбранный proposed-вариант
+  // Для stage='proposed' — принадлежность к предложению (набору вариантов) и подпись варианта:
+  offerId?: string | null
+  variantLabel?: string // «Повний ремонт» / «Бюджетний» и т.п.
+  variantOrder?: number
   receiptGoods?: ReceiptGood[] // снимок позиций для чека (для фактической, на момент согласования)
   // Проставляются backend-ом после оплаты и фискализации (минуя клиентские правила):
   paymentId?: string | null // orderId в коллекции payments
@@ -266,6 +280,20 @@ export interface Estimate {
   paidAt?: string | null
   taxUrl?: string | null // ссылка на фискальный чек Checkbox
   fiscalCode?: string | null // фискальный код чека
+}
+
+// Предложение клиенту — набор вариантов (stage='proposed'), из которых клиент выбирает ОДИН путь.
+// Хранится в Firestore estimateOffers/{id}; клиент открывает по ссылке /offer/:id и выбирает вариант.
+export interface EstimateOffer {
+  id: string
+  requestId: string | null // привязка к заявке 1С (если из заявки)
+  title: string // заголовок предложения (кораблик/скарга)
+  variantIds: string[] // id вариантов (Estimate stage='proposed')
+  selectedVariantId: string | null // выбранный клиентом вариант (путь ремонта)
+  status: 'pending_choice' | 'chosen' // ждём выбора / выбран
+  createdAt: string
+  createdBy: string | null
+  chosenAt?: string | null
 }
 
 // ==== База знаний для AI-оценки ====

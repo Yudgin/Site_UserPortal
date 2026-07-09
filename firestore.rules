@@ -66,6 +66,12 @@ service cloud.firestore {
       allow update, delete: if isPriceAdmin() && resource.data.status != 'paid';
     }
 
+    // Предложения клиенту (наборы вариантов сметы). Прямой доступ — только администратор; клиент
+    // видит варианты и выбирает путь через backend (/api/offers/:id/public, /choose) — Admin SDK.
+    match /estimateOffers/{offerId} {
+      allow read, list, create, update, delete: if isPriceAdmin();
+    }
+
     // Редактируемые тексты сервиса (соглашение и т.п.) — публичное чтение,
     // запись только администратору.
     match /serviceContent/{docId} {
