@@ -28,6 +28,8 @@ try {
     ? getApps()[0]
     : initializeApp({ credential: applicationDefault(), projectId: FIREBASE_PROJECT_ID })
   adminDb = getFirestore(firebaseApp)
+  // Как и на клиенте: не бросать на undefined-полях, а игнорировать их (иначе .set падает).
+  adminDb.settings({ ignoreUndefinedProperties: true })
 } catch (e) {
   console.warn('⚠️  firebase-admin init failed — Telegram bot persistence disabled:', e.message)
 }
