@@ -515,6 +515,23 @@
   Telegram Premium, Settings → Business → Chatbots → @RunferryAssistance_Bot. У Viber аналога нет — там
   автоответчик-редирект на бота.
 
+- ПРОДАКШЕН-ДЕПЛОЙ (готово):
+  - Бэкенд (боты + AI + Нова Пошта + SMS + настройки) → **Google Cloud Run**, сервис `runferry-backend`,
+    регион europe-west3, URL `https://runferry-backend-98000160958.europe-west3.run.app`. Публичный,
+    `--no-cpu-throttling` (важно: обработка ИИ идёт после `res.sendStatus(200)`), 512Mi, min-instances 0.
+    Секреты — как env Cloud Run (из server/.env, в контейнер `.env` не попадает; firebase-admin через ADC
+    рантайм-аккаунта). Артефакты: `server/Dockerfile`, `.gcloudignore`, `.dockerignore`.
+  - Фронтенд → **Firebase Hosting** `https://droidmaps-runferry.web.app`. `.env.production`:
+    `VITE_BACKEND_URL` → Cloud Run (сервис-центр), `VITE_API_BASE_URL` → Render (мок-данные карты-портала,
+    не трогали). CORS `*` разрешает вызовы с сайта на Cloud Run.
+  - Боты: вебхуки Telegram (@RunferryAssistance_Bot) и Viber (`runferry`) переставлены на Cloud Run —
+    работают постоянно (временный cloudflared-туннель снят). Проверено на проде: сообщение→сессия в
+    Firestore + ответ ИИ; NP-прокси (Львів); CORS. amoCRM у Viber `arm-fishing` восстановлен; SalesDrive
+    отключён от `runferry` (restore-URL сохранён в комментарии server/.env).
+  - Деплой-команды: бэкенд `gcloud run deploy runferry-backend --source server --region europe-west3
+    --no-cpu-throttling --env-vars-file <env> --allow-unauthenticated`; фронт `npm run build` +
+    `firebase deploy --only hosting`. Redeploy бэкенда — та же команда (env берётся из server/.env обоих репо).
+
 **Периодический адверсариальный аудит (последний прогон):** 4 измерения × верификация на опровержение,
 подтверждено 5 находок, исправлено:
 - [HIGH→MEDIUM, исправлено] `estimate-chat`/`knowledge-chat` слали Anthropic два подряд `assistant`
