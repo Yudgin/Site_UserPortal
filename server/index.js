@@ -271,7 +271,8 @@ app.post('/api/sms/send-code', async (req, res) => {
       }
     )
 
-    console.log('TurboSMS response:', response.data)
+    // Не логируем полный ответ TurboSMS — он содержит телефон клиента (PII) в response_result.
+    console.log('TurboSMS send status:', response.data?.response_status || response.data?.response_code)
 
     // TurboSMS returns response_code 0 or status containing "SUCCESS" on success
     const isSuccess = response.data.response_code === 0 ||

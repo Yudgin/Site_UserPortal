@@ -250,7 +250,11 @@ export function registerPayments(app, deps) {
 
   // Создать оплату. body: { fopId, amount, goods:[{name,price,qty}], method, description, clientPhone?, resultUrl?, deliveryEmail?, estimateId? }
   // method: 'liqpay-card' | 'liqpay-paypart' | 'liqpay-moment' | 'mono-chast'
+  // ВНИМАНИЕ: произвольная оплата (сумма/goods/fopId из тела) — ТОЛЬКО админ. Клиент платит
+  // фактическую смету через /api/estimates/pay (там сумма/статус берутся из БД, а не от клиента).
+  // Публичный доступ сюда позволял бы оплатить смету на любую сумму и пометить её оплаченной.
   app.post('/api/pay/create', async (req, res) => {
+    if (!(await isAdminReq(req))) return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для адміністратора' } })
     if (!adminDb) return res.status(503).json({ success: false, error: { code: 'NO_DB', message: 'Firestore не настроен' } })
     if (!hasAnyFop()) return res.status(503).json({ success: false, error: { code: 'NO_FOPS', message: 'ФОП не настроены (FOPS_CONFIG)' } })
     try {
