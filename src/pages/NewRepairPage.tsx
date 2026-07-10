@@ -41,6 +41,7 @@ import {
 } from '@mui/icons-material'
 import LanguageSelector from '@/components/common/LanguageSelector'
 import { serviceApi, ServiceCenter, ServiceTypeItem, NewRepairRequest } from '@/api/endpoints/service'
+import { serviceRequestApi } from '@/api/endpoints/serviceRequest'
 import { chatSessionService } from '@/api/chatSessionService'
 import { clientProfileService } from '@/api/clientProfileService'
 import { aiApi } from '@/api/endpoints/ai'
@@ -455,6 +456,14 @@ export default function NewRepairPage() {
           sessionId: chatId || null,
         })
       }
+      // Заявку храним И у себя: локальная serviceRequest, связанная с 1С через externalRequestId.
+      await serviceRequestApi.createLocal({
+        sessionId: chatId || null,
+        externalRequestId: result.data.ID,
+        clientName: `${lastName} ${firstName}`.trim(),
+        clientPhone: formatPhoneForApi(phone),
+        complaint,
+      }).catch(() => {})
       setSuccess({ id: result.data.ID })
     } else {
       setError(result.error?.message || t('common.error'))

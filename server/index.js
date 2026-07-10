@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url'
 import { registerTelegramBot } from './telegram.js'
 import { registerViberBot } from './viber.js'
 import { registerManagerReply } from './managerReply.js'
+import { registerServiceRequests } from './serviceRequests.js'
 import { registerPayments } from './payments.js'
 
 dotenv.config()
@@ -976,6 +977,8 @@ registerTelegramBot(app, messengerDeps)
 registerViberBot(app, messengerDeps)
 // Ответ менеджера из веб-инбокса → доставка в канал + возврат бота при упоминании.
 registerManagerReply(app, messengerDeps)
+// Публичное создание нашей локальной заявки из формы /repair/new (в дополнение к 1С).
+registerServiceRequests(app, { adminDb })
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 registerPayments(app, { adminDb })
