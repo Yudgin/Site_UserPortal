@@ -43,11 +43,26 @@ export function registerNotifications(app, deps) {
   const messengerOpen = (session) => {
     if (!session || !session.channel) return false
     if (typeof senders[session.channel] !== 'function') return false
+    // Без хотя бы одного входящего сообщения клиента проактивная отправка ненадёжна
+    // (Telegram может отклонить bot-initiated, Viber — вне сессии) → лучше SMS.
+    if (!lastClientAt(session)) return false
     const win = CHANNEL_WINDOW_MS[session.channel]
     if (!win || win <= 0) return true // без лимита (Telegram)
-    const last = lastClientAt(session)
-    if (!last) return false // ни одного входящего — сессия не активна
-    return Date.now() - new Date(last).getTime() <= win
+    return Date.now() - new Date(lastClientAt(session)).getTime() <= win
+  }
+
+  // Реально ли доставлено. Провайдеры отвечают HTTP 200 даже при логической ошибке
+  // (Telegram {ok:false}, Viber {status:≠0}), а send() глотает и сетевые ошибки (→ null).
+  // Поэтому проверяем содержимое ответа, иначе провал молча пометится 'sent' и не будет SMS-фолбэка.
+  const deliveredOk = (channel, r) => {
+    if (!r) return false
+    if (channel === 'telegram') return r.ok === true
+    if (channel === 'viber') return r.status === 0
+    return !!r
+  }
+  const deliveryDetail = (r) => {
+    if (!r) return 'no response'
+    return r.description || r.status_message || (typeof r === 'object' ? JSON.stringify(r).slice(0, 120) : String(r))
   }
 
   // Основной вызов: отправить оповещение клиенту. Авто-выбор канала (мессенджер → иначе SMS).
@@ -72,11 +87,23 @@ export function registerNotifications(app, deps) {
     const body = event === 'custom' ? (text || '') : template(event, { link: resolvedLink, ttn: resolvedTtn, text })
     if (!body || !body.trim()) throw new Error('empty notification body')
 
-    // Идемпотентность авто-событий: детерминированный id; если уже отправлено — не шлём повторно.
+    // Идемпотентность авто-событий (offer/actual/ttn): детерминированный id + ТРАНЗАКЦИОННЫЙ захват,
+    // чтобы два параллельных вызова не отправили дважды. Уже отправленное → skip; свежую 'pending'
+    // (другой вызов сейчас шлёт) тоже пропускаем; иначе резервируем и продолжаем отправку.
     const autoId = serviceRequestId && event !== 'custom' ? `ntf-${serviceRequestId}-${event}` : null
+    const ref = autoId ? adminDb.collection('notifications').doc(autoId) : adminDb.collection('notifications').doc()
     if (autoId) {
-      const ex = await adminDb.collection('notifications').doc(autoId).get()
-      if (ex.exists && ex.data()?.status === 'sent') return { ...ex.data(), skipped: true }
+      const claim = await adminDb.runTransaction(async (tx) => {
+        const snap = await tx.get(ref)
+        const cur = snap.exists ? snap.data() : null
+        if (cur && cur.status === 'sent') return { skip: true, rec: cur }
+        if (cur && cur.status === 'pending' && cur.claimedAt && Date.now() - new Date(cur.claimedAt).getTime() < 60000) {
+          return { skip: true, rec: cur }
+        }
+        tx.set(ref, { id: autoId, status: 'pending', claimedAt: nowIso(), event, serviceRequestId }, { merge: true })
+        return { skip: false }
+      })
+      if (claim.skip) return { ...claim.rec, skipped: true }
     }
 
     // Загружаем сессию для выбора канала.
@@ -93,9 +120,9 @@ export function registerNotifications(app, deps) {
     if (session && messengerOpen(session)) {
       channel = session.channel
       try {
-        await senders[channel](session, body)
-        ok = true
-        via = 'messenger'
+        const r = await senders[channel](session, body)
+        if (deliveredOk(channel, r)) { ok = true; via = 'messenger' }
+        else error = `messenger(${channel}): ${deliveryDetail(r)}`
       } catch (e) {
         error = `messenger: ${e?.message || e}`
       }
@@ -115,8 +142,8 @@ export function registerNotifications(app, deps) {
         error = 'немає доступного каналу (мессенджер поза вікном і немає телефону)'
       }
     }
+    if (ok) error = null // успешная доставка (в т.ч. SMS-фолбэк) — без ошибки в журнале
 
-    const ref = autoId ? adminDb.collection('notifications').doc(autoId) : adminDb.collection('notifications').doc()
     const rec = {
       id: ref.id,
       createdAt: nowIso(),
