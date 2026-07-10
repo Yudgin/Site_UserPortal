@@ -34,6 +34,9 @@ export interface ServiceRequest {
   boat?: string // модель/название кораблика (если известно)
   complaint: string // сводная жалоба/описание
   status: ServiceRequestStatus
+  // Диагностика после получения кораблика: выявленные неисправности (текстом). Помогает уточнить
+  // предварительную калькуляцию (мастер точнее определил неисправность).
+  diagnostics?: { text: string; at: string; by: string | null } | null
   // Привязанные калькуляции и оплата:
   aiEstimateId?: string | null // материализованная предварительная оценка ИИ (stage='ai')
   offerId?: string | null // предложение с вариантами (предварительные калькуляции)

@@ -41,6 +41,7 @@ export default function OfferEditorPage() {
 
   const [offerId, setOfferId] = useState('')
   const [title, setTitle] = useState('')
+  const [diagSeed, setDiagSeed] = useState('') // диагностика заявки → засев ИИ-подбора
   const [serviceKind, setServiceKind] = useState<ServiceKind>('repair')
   const [variants, setVariants] = useState<VariantEntry[]>([])
   const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null)
@@ -73,6 +74,8 @@ export default function OfferEditorPage() {
       if (!sr) return
       const auto = [sr.boat, sr.complaint ? sr.complaint.slice(0, 60) : ''].filter(Boolean).join(' — ')
       setTitle((t) => t || auto || 'Пропозиція')
+      // Диагностика (уточнённые неисправности) — засев для ИИ-подбора позиций.
+      if (sr.diagnostics?.text) setDiagSeed(sr.diagnostics.text)
     })
   }, [serviceRequestId])
 
@@ -255,7 +258,7 @@ export default function OfferEditorPage() {
             onChange={(_e, w) => w && addRow(w.id)} renderInput={(p) => <TextField {...p} label="Додати роботу" />} value={null} blurOnSelect clearOnBlur />
           <Autocomplete sx={{ flex: 2 }} size="small" options={activeKits} getOptionLabel={(k) => `${k.code} · ${tName(k.name, 'uk')}`}
             onChange={(_e, k) => k && addKit(k.id)} renderInput={(p) => <TextField {...p} label="Додати набір" />} value={null} blurOnSelect clearOnBlur />
-          <AiWorkPicker priceContext={priceCtx} catalog={indexed} onAdd={addWorks} />
+          <AiWorkPicker priceContext={priceCtx} catalog={indexed} onAdd={addWorks} initialDescription={diagSeed} />
         </Stack>
 
         {rows.length === 0 ? (

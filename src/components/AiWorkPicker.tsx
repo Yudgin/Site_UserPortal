@@ -1,7 +1,7 @@
 // ИИ-подбор позиций прайса для мастера. Диалог: мастер описывает, что планирует выставить
 // клиенту, ИИ возвращает позиции прайса (workCode+qty); совпавшие с каталогом можно добавить
 // в смету. Переиспользуется в редакторе предложения и фактической калькуляции.
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Button, Dialog, DialogTitle, DialogContent, DialogActions, TextField, Alert, List, ListItem,
   ListItemText, Checkbox, Box, Typography,
@@ -12,13 +12,19 @@ import { tName, type PriceCatalog, type EstimateWorkInput } from '@/utils/pricin
 
 interface Picked { workId: string | null; code: string; name: string; qty: number; matched: boolean }
 
-export default function AiWorkPicker({ priceContext, catalog, onAdd }: {
+export default function AiWorkPicker({ priceContext, catalog, onAdd, initialDescription }: {
   priceContext: string
   catalog: PriceCatalog
   onAdd: (works: EstimateWorkInput[]) => void
+  initialDescription?: string // засев описания (напр. из диагностики заявки)
 }) {
   const [open, setOpen] = useState(false)
   const [desc, setDesc] = useState('')
+
+  // При открытии диалога с пустым полем — засеваем описанием из диагностики (если есть).
+  useEffect(() => {
+    if (open) setDesc((d) => d || (initialDescription || '').trim())
+  }, [open, initialDescription])
   const [loading, setLoading] = useState(false)
   const [picked, setPicked] = useState<Picked[] | null>(null)
   const [note, setNote] = useState('')

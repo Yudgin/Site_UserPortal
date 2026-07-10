@@ -443,9 +443,11 @@ export default function NewRepairPage() {
     const result = await serviceApi.createRepairRequest(request)
 
     if (result.success && result.data) {
-      // Принятие условий → в 1С (окремий ендпоінт). Не блокуємо успіх форми, якщо не вдалося.
-      if (acceptedTerms) {
-        await serviceApi.acceptTerms(result.data.ID).catch(() => {})
+      // 1С может вернуть success без номера — не строим по нему URL и не теряем локальную запись.
+      const requestId = String(result.data.ID || '').trim()
+      // Принятие условий → в 1С (окремий ендпоінт). Тільки за наявності номера. Best-effort.
+      if (acceptedTerms && requestId) {
+        await serviceApi.acceptTerms(requestId).catch(() => {})
       }
       // Сохраняем согласование в связанную чат-сессию (если заявка из чата) — менеджер увидит его.
       const chatId = searchParams.get('chat')
@@ -463,12 +465,12 @@ export default function NewRepairPage() {
       // Заявку храним И у себя: локальная serviceRequest, связанная с 1С через externalRequestId.
       await serviceRequestApi.createLocal({
         sessionId: chatId || null,
-        externalRequestId: result.data.ID,
+        externalRequestId: requestId || null,
         clientName: `${lastName} ${firstName}`.trim(),
         clientPhone: formatPhoneForApi(phone),
         complaint,
       }).catch(() => {})
-      setSuccess({ id: result.data.ID })
+      setSuccess({ id: requestId })
     } else {
       setError(result.error?.message || t('common.error'))
     }

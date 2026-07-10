@@ -11,15 +11,18 @@ import {
 } from '@mui/material'
 import {
   Home as HomeIcon, Forum as ChatIcon, LocalOffer as OfferIcon, Build as ActualIcon,
-  Payments as PaymentsIcon, Save as SaveIcon, CheckCircle as CheckIcon,
+  Payments as PaymentsIcon, Save as SaveIcon, CheckCircle as CheckIcon, Psychology as AiIcon,
+  Biotech as DiagIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import { serviceRequestService } from '@/api/serviceRequestService'
+import { chatSessionService } from '@/api/chatSessionService'
 import { pricingService } from '@/api/pricingService'
 import { formatMoney } from '@/utils/pricing'
 import { SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequestStatus } from '@/types/serviceRequest'
 import type { EstimateOffer, Estimate } from '@/types/pricing'
+import type { PreliminaryEstimate } from '@/types/chat'
 
 const STATUSES = Object.keys(SERVICE_REQUEST_STATUS_LABELS) as ServiceRequestStatus[]
 
@@ -30,10 +33,12 @@ export default function ServiceRequestPage() {
   const [req, setReq] = useState<ServiceRequest | null>(null)
   const [offer, setOffer] = useState<EstimateOffer | null>(null)
   const [actual, setActual] = useState<Estimate | null>(null)
+  const [aiEstimate, setAiEstimate] = useState<PreliminaryEstimate | null>(null) // оценка ИИ из переписки
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [complaint, setComplaint] = useState('')
   const [boat, setBoat] = useState('')
+  const [diag, setDiag] = useState('') // текст диагностики (выявленные неисправности)
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
@@ -44,8 +49,11 @@ export default function ServiceRequestPage() {
     if (r) {
       setComplaint(r.complaint || '')
       setBoat(r.boat || '')
+      setDiag(r.diagnostics?.text || '')
       if (r.offerId) pricingService.loadOffer(r.offerId).then(setOffer)
       if (r.actualEstimateId) pricingService.loadEstimate(r.actualEstimateId).then(setActual)
+      // Предварительная оценка ИИ — из связанного обращения (та, что ИИ показывал в переписке).
+      if (r.sessionId) chatSessionService.load(r.sessionId).then((s) => setAiEstimate(s?.estimate || null))
     }
     setLoading(false)
   }, [id])
@@ -61,6 +69,16 @@ export default function ServiceRequestPage() {
     if (ok) { setReq((r) => (r ? { ...r, ...fields } : r)); return true }
     notify('Не вдалося зберегти', 'error')
     return false
+  }
+
+  // Сохранить диагностику. Первое сохранение с текстом продвигает статус new → diagnostics.
+  const saveDiag = () => {
+    const text = diag.trim()
+    const fields: Partial<ServiceRequest> = {
+      diagnostics: text ? { text, at: new Date().toISOString(), by: user?.email || null } : null,
+    }
+    if (text && req?.status === 'new' && !req?.paymentId) fields.status = 'diagnostics'
+    patch(fields).then((ok) => { if (ok) notify('Діагностику збережено') })
   }
 
   if (!user || !isAdminEmail(user.email)) {
@@ -106,6 +124,54 @@ export default function ServiceRequestPage() {
           <Button variant="outlined" startIcon={<SaveIcon />} disabled={saving} onClick={() => patch({ complaint, boat })}>Зберегти</Button>
         </Stack>
         {req.externalRequestId && <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>Заявка 1С: {req.externalRequestId}</Typography>}
+      </Paper>
+
+      {/* Предварительная оценка ИИ — та, что клиент видел в переписке (ориентировочная, до диагностики) */}
+      {aiEstimate && aiEstimate.lines.length > 0 && (
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+            <AiIcon fontSize="small" color="secondary" />
+            <Typography variant="subtitle1">Попередня оцінка ІІ (з переписки)</Typography>
+          </Stack>
+          <Stack spacing={0.5}>
+            {aiEstimate.lines.map((l, i) => (
+              <Stack key={i} direction="row" justifyContent="space-between" spacing={2}>
+                <Typography variant="body2" color="text.secondary">{l.label}</Typography>
+                <Typography variant="body2" sx={{ whiteSpace: 'nowrap' }}>{formatMoney(l.price)}</Typography>
+              </Stack>
+            ))}
+            <Divider sx={{ my: 0.5 }} />
+            <Stack direction="row" justifyContent="space-between" spacing={2}>
+              <Typography variant="subtitle2">Разом (орієнтовно)</Typography>
+              <Typography variant="subtitle2" sx={{ whiteSpace: 'nowrap' }}>{formatMoney(aiEstimate.total)}</Typography>
+            </Stack>
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+            Орієнтовна оцінка ІІ до діагностики — уточніть після огляду кораблика.
+          </Typography>
+        </Paper>
+      )}
+
+      {/* Диагностика — выявленные неисправности после получения кораблика (питает предложение) */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+          <DiagIcon fontSize="small" color="primary" />
+          <Typography variant="subtitle1">Діагностика (виявлені несправності)</Typography>
+        </Stack>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          Отримали кораблик — опишіть виявлені несправності. Це уточнює попередню калькуляцію:
+          ІІ-підбір позицій у пропозиції засівається цим текстом.
+        </Typography>
+        <TextField value={diag} onChange={(e) => setDiag(e.target.value)} fullWidth multiline minRows={3}
+          placeholder="напр. люфт сервоприводу керма, окислені контакти, тріщина корпусу біля бункера" />
+        <Stack direction="row" spacing={2} sx={{ mt: 1, flexWrap: 'wrap' }} alignItems="center">
+          <Button variant="outlined" startIcon={<SaveIcon />} disabled={saving} onClick={saveDiag}>Зберегти діагностику</Button>
+          {req.diagnostics?.at && (
+            <Typography variant="caption" color="text.secondary">
+              оновлено {new Date(req.diagnostics.at).toLocaleString('uk-UA')}
+            </Typography>
+          )}
+        </Stack>
       </Paper>
 
       {/* Крок 1: Предложение (предварительные калькуляции) */}
