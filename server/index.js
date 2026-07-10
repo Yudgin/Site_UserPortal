@@ -680,6 +680,72 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
   }
 })
 
+// ============ AI-подбор позиций прайса для МАСТЕРА (редакторы предложения/факта) ============
+// Мастер описывает, что планирует выставить клиенту, ИИ подбирает позиции ИЗ ПРАЙСА (по кодам).
+app.post('/api/ai/pick-works', async (req, res) => {
+  try {
+    const { description = '', priceContext = '', knowledgeContext = '' } = req.body
+    if (!anthropic) return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
+    if (!String(description).trim()) return res.status(400).json({ success: false, error: { code: 'NO_DESC', message: 'Порожній опис' } })
+
+    const system = [
+      'Ти — помічник МАЙСТРА сервісного центру RunFerry. Майстер описує, які роботи планує виставити клієнту.',
+      'Підбери відповідні позиції ВИКЛЮЧНО з наданого прайсу — повертай їх КОДИ (те, що в дужках [код]) і кількість. НЕ вигадуй кодів, яких немає в прайсі.',
+      'Якщо опис відповідає набору робіт — розклади на окремі роботи. Загальні роботи (приймання, тест, пакування) движок додасть сам — їх додавати не треба.',
+      'Якщо якоїсь потрібної позиції немає в прайсі — не вигадуй її, а коротко зазнач це в полі note (українською).',
+    ].join('\n') + (priceContext ? `\n\nПРАЙС (використовуй ЛИШЕ ці коди [код]):\n${priceContext}` : '') + (knowledgeContext ? `\n\nДовідка:\n${knowledgeContext}` : '')
+
+    const message = await anthropic.messages.create({
+      model: AI_MODEL,
+      max_tokens: 1200,
+      system,
+      messages: [{ role: 'user', content: String(description) }],
+      output_config: {
+        format: {
+          type: 'json_schema',
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              works: {
+                type: 'array',
+                description: 'Підібрані позиції прайсу',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    workCode: { type: 'string', description: 'Код роботи з прайсу (без дужок)' },
+                    qty: { type: 'number', description: 'Кількість (за замовчуванням 1)' },
+                    name: { type: 'string', description: 'Назва позиції (для показу майстру)' },
+                  },
+                  required: ['workCode', 'qty', 'name'],
+                },
+              },
+              note: { type: 'string', description: 'Коментар майстру: що не знайдено в прайсі / уточнення (може бути порожнім)' },
+            },
+            required: ['works', 'note'],
+          },
+        },
+      },
+    })
+
+    const raw = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = { works: [], note: raw }
+    }
+    const works = Array.isArray(parsed.works)
+      ? parsed.works.filter((w) => w && w.workCode).map((w) => ({ workCode: String(w.workCode).trim(), qty: Number(w.qty) > 0 ? Number(w.qty) : 1, name: String(w.name || '').trim() }))
+      : []
+    res.json({ success: true, data: { works, note: String(parsed.note || ''), usage: buildUsage(message.usage) } })
+  } catch (error) {
+    console.error('AI pick-works error:', error?.message || error)
+    res.status(500).json({ success: false, error: { code: 'AI_FAILED', message: 'Не вдалося підібрати позиції' } })
+  }
+})
+
 // ============ AI-консультант (эксплуатация + самопомощь) ============
 const KNOWLEDGE_SYSTEM = [
   'Ти — консультант сервісного центру RunFerry (прикормочні рибальські кораблики).',

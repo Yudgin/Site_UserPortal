@@ -25,6 +25,8 @@ import {
   buildEstimate, estimate2goods, compareEstimates, needsReapproval, tName, formatMoney,
   type EstimateWorkInput,
 } from '@/utils/pricing'
+import { buildPriceContext } from '@/utils/aiContext'
+import AiWorkPicker from '@/components/AiWorkPicker'
 import type { Estimate, ServiceKind } from '@/types/pricing'
 
 interface WorkRow extends EstimateWorkInput {
@@ -121,7 +123,10 @@ export default function ActualEstimateEditorPage() {
   const reapproval = useMemo(() => (prelim && actual ? needsReapproval(prelim, actual) : null), [prelim, actual])
   const goods = useMemo(() => (actual ? estimate2goods(actual, 'uk') : []), [actual])
 
+  const priceCtx = useMemo(() => buildPriceContext(catalog), [catalog])
   const addRow = (workId: string) => setRows((r) => [...r, { key: `w${Date.now()}${r.length}`, workId, qty: 1 }])
+  const addWorks = (works: EstimateWorkInput[]) =>
+    setRows((r) => [...r, ...works.map((w, i) => ({ key: `ai${Date.now()}${i}`, workId: w.workId, qty: w.qty }))])
   const addKit = (kitId: string) => {
     const kit = indexed.kits[kitId]
     if (!kit) return
@@ -254,6 +259,7 @@ export default function ActualEstimateEditorPage() {
             renderInput={(p) => <TextField {...p} label="Додати набір (розгорнути)" />}
             value={null} blurOnSelect clearOnBlur
           />
+          <AiWorkPicker priceContext={priceCtx} catalog={indexed} onAdd={addWorks} />
         </Stack>
 
         {rows.length === 0 ? (

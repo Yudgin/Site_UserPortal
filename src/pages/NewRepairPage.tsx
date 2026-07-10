@@ -443,6 +443,10 @@ export default function NewRepairPage() {
     const result = await serviceApi.createRepairRequest(request)
 
     if (result.success && result.data) {
+      // Принятие условий → в 1С (окремий ендпоінт). Не блокуємо успіх форми, якщо не вдалося.
+      if (acceptedTerms) {
+        await serviceApi.acceptTerms(result.data.ID).catch(() => {})
+      }
       // Сохраняем согласование в связанную чат-сессию (если заявка из чата) — менеджер увидит его.
       const chatId = searchParams.get('chat')
       if (chatId) {

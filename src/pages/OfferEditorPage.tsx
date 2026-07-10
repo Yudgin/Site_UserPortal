@@ -22,6 +22,8 @@ import { pricingService } from '@/api/pricingService'
 import { serviceRequestService } from '@/api/serviceRequestService'
 import { secureId } from '@/utils/id'
 import { buildEstimate, tName, formatMoney, type EstimateWorkInput } from '@/utils/pricing'
+import { buildPriceContext } from '@/utils/aiContext'
+import AiWorkPicker from '@/components/AiWorkPicker'
 import type { Estimate, EstimateOffer, ServiceKind } from '@/types/pricing'
 
 interface WorkRow extends EstimateWorkInput { key: string }
@@ -59,11 +61,20 @@ export default function OfferEditorPage() {
     if (!parentId) return
     pricingService.loadEstimate(parentId).then((est) => {
       if (!est) return
-      setTitle((t) => t || est.title || '')
       setRows(est.lines.filter((l) => l.type === 'labor').map((l, i) => ({ key: `p${i}`, workId: l.refId, qty: l.qty })))
       setLabel((v) => v || 'Варіант 1')
     })
   }, [parentId])
+
+  // Авто-название предложения из заявки (кораблик + скарга); мастер за потреби відредагує.
+  useEffect(() => {
+    if (!serviceRequestId) return
+    serviceRequestService.get(serviceRequestId).then((sr) => {
+      if (!sr) return
+      const auto = [sr.boat, sr.complaint ? sr.complaint.slice(0, 60) : ''].filter(Boolean).join(' — ')
+      setTitle((t) => t || auto || 'Пропозиція')
+    })
+  }, [serviceRequestId])
 
   // Открыть существующее предложение (посмотреть статус/варианты, собрать факт)
   useEffect(() => {
@@ -85,6 +96,9 @@ export default function OfferEditorPage() {
 
   const activeWorks = useMemo(() => Object.values(indexed.works).filter((w) => w.active), [indexed])
   const activeKits = useMemo(() => Object.values(indexed.kits).filter((k) => k.active), [indexed])
+  const priceCtx = useMemo(() => buildPriceContext(catalog), [catalog])
+  const addWorks = (works: EstimateWorkInput[]) =>
+    setRows((r) => [...r, ...works.map((w, i) => ({ key: `ai${Date.now()}${i}`, workId: w.workId, qty: w.qty }))])
 
   const currentEstimate: Estimate | null = useMemo(() => {
     const works = rows.filter((r) => r.workId && indexed.works[r.workId]).map((r) => ({ workId: r.workId, qty: r.qty }))
@@ -241,6 +255,7 @@ export default function OfferEditorPage() {
             onChange={(_e, w) => w && addRow(w.id)} renderInput={(p) => <TextField {...p} label="Додати роботу" />} value={null} blurOnSelect clearOnBlur />
           <Autocomplete sx={{ flex: 2 }} size="small" options={activeKits} getOptionLabel={(k) => `${k.code} · ${tName(k.name, 'uk')}`}
             onChange={(_e, k) => k && addKit(k.id)} renderInput={(p) => <TextField {...p} label="Додати набір" />} value={null} blurOnSelect clearOnBlur />
+          <AiWorkPicker priceContext={priceCtx} catalog={indexed} onAdd={addWorks} />
         </Stack>
 
         {rows.length === 0 ? (
