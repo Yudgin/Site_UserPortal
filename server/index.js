@@ -526,7 +526,8 @@ const AI_CONTEXTS = {
   generic: 'Це текст повідомлення для клієнта сервісного центру.',
 }
 
-app.post('/api/ai/improve-text', adminOnly, async (req, res) => {
+// Публичный: используется анонимными клиентами на /questionnaire и /repair/new (не гейтить!).
+app.post('/api/ai/improve-text', aiPublicLimiter, async (req, res) => {
   try {
     const { currentText = '', userPrompt = '', history = [], context = 'generic', lang = 'uk' } = req.body
 
@@ -625,13 +626,16 @@ app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
 
     // Внутренние заметки менеджера в промпт не идут; client → user, ai/manager → assistant.
     // Кап входа (публичный эндпоинт): последние 40 сообщений, каждое ≤ 8000 символов — защита бюджета.
-    const chatMessages = mergeConsecutiveMessages(
+    let chatMessages = mergeConsecutiveMessages(
       messages
         .filter((m) => !m.internal && m.text)
         .slice(-40)
         .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text).slice(0, 8000) }))
     )
-    if (chatMessages.length === 0 || chatMessages[0].role !== 'user') {
+    // После среза окно могло начаться с ответа ассистента — убираем ведущие assistant (Anthropic
+    // требует, чтобы диалог начинался с user), иначе длинные диалоги ловили бы 400.
+    while (chatMessages.length && chatMessages[0].role !== 'user') chatMessages = chatMessages.slice(1)
+    if (chatMessages.length === 0) {
       return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
     }
 
@@ -828,13 +832,14 @@ app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
     }
 
     // Кап входа (публичный эндпоинт): последние 40 сообщений, каждое ≤ 8000 символов.
-    const chatMessages = mergeConsecutiveMessages(
+    let chatMessages = mergeConsecutiveMessages(
       messages
         .filter((m) => !m.internal && m.text)
         .slice(-40)
         .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text).slice(0, 8000) }))
     )
-    if (chatMessages.length === 0 || chatMessages[0].role !== 'user') {
+    while (chatMessages.length && chatMessages[0].role !== 'user') chatMessages = chatMessages.slice(1)
+    if (chatMessages.length === 0) {
       return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
     }
 

@@ -102,7 +102,8 @@ service cloud.firestore {
       allow create: if true;
       // Клиент дополняет свою сессию по знанию id, но не может подменить id/дату создания,
       // не может УКОРОТИТЬ историю (size только растёт) и не может менять серверо/менеджеро-
-      // контролируемые поля: паузу бота, канал/адресата мессенджера и учёт стоимости ИИ.
+      // контролируемые поля: паузу бота и канал/адресата мессенджера. (aiUsage НЕ закрепляем —
+      // веб-клиент легитимно накапливает стоимость ИИ при каждом ответе.)
       // Это ограничивает злоупотребление по знанию id (id криптостойкий). Админ — полный доступ.
       allow update: if isPriceAdmin()
         || (request.resource.data.id == resource.data.id
@@ -111,8 +112,7 @@ service cloud.firestore {
             && request.resource.data.get('botPaused', false) == resource.data.get('botPaused', false)
             && request.resource.data.get('channel', '') == resource.data.get('channel', '')
             && request.resource.data.get('channelUserId', '') == resource.data.get('channelUserId', '')
-            && request.resource.data.get('businessConnectionId', '') == resource.data.get('businessConnectionId', '')
-            && request.resource.data.get('aiUsage', {}) == resource.data.get('aiUsage', {}));
+            && request.resource.data.get('businessConnectionId', '') == resource.data.get('businessConnectionId', ''));
       allow delete: if isPriceAdmin();
     }
 

@@ -10,28 +10,48 @@ const clientIp = (req) => {
   return req.ip || req.socket?.remoteAddress || 'unknown'
 }
 
+// Проверка окна БЕЗ коммита: возвращает { ok, commit() }. commit() фиксирует попадание.
+const check = (key, windowMs, max) => {
+  const now = Date.now()
+  let arr = buckets.get(key)
+  if (!arr) { arr = []; buckets.set(key, arr) }
+  while (arr.length && now - arr[0] > windowMs) arr.shift()
+  return { ok: arr.length < max, commit: () => arr.push(now) }
+}
+
+const DEFAULT_MSG = 'Забагато запитів. Спробуйте трохи пізніше.'
+
 // keyFn(req) -> строка ключа (по умолчанию IP). name — префикс, чтобы разные лимитеры не пересекались.
-export function rateLimit({ name = 'rl', windowMs, max, keyFn, message = 'Забагато запитів. Спробуйте трохи пізніше.' }) {
-  return (req, res, next) => {
-    const now = Date.now()
-    const key = `${name}:${keyFn ? keyFn(req) : clientIp(req)}`
-    let arr = buckets.get(key)
-    if (!arr) { arr = []; buckets.set(key, arr) }
-    while (arr.length && now - arr[0] > windowMs) arr.shift()
-    if (arr.length >= max) {
+export function rateLimit({ name = 'rl', windowMs, max, keyFn, message = DEFAULT_MSG }) {
+  const keyOf = (req) => `${name}:${keyFn ? keyFn(req) : clientIp(req)}`
+  const mw = (req, res, next) => {
+    const r = check(keyOf(req), windowMs, max)
+    if (!r.ok) {
       res.setHeader('Retry-After', Math.ceil(windowMs / 1000))
       return res.status(429).json({ success: false, error: { code: 'RATE_LIMITED', message } })
     }
-    arr.push(now)
+    r.commit()
     next()
   }
+  // Для combine: проверить без коммита (чтобы заблокированный запрос не «сжигал» слоты других лимитеров).
+  mw._peek = (req) => check(keyOf(req), windowMs, max)
+  mw._meta = { windowMs, message }
+  return mw
 }
 
-// Комбинированный лимитер: запрос проходит, только если все под-лимитеры пропустили.
+// Комбинированный лимитер: ДВУХФАЗНО — сначала проверяем все под-лимитеры, и только если ВСЕ
+// прошли, фиксируем попадание в каждом. Иначе ранний лимитер записал бы попадание даже когда
+// поздний отклонил (заблокированные ретраи «сжигали» бы, например, IP-квоту).
 export const combine = (...mws) => (req, res, next) => {
-  let i = 0
-  const run = () => (i >= mws.length ? next() : mws[i++](req, res, run))
-  run()
+  const checks = mws.map((mw) => mw._peek(req))
+  const failedIdx = checks.findIndex((c) => !c.ok)
+  if (failedIdx >= 0) {
+    const mw = mws[failedIdx]
+    res.setHeader('Retry-After', Math.ceil(mw._meta.windowMs / 1000))
+    return res.status(429).json({ success: false, error: { code: 'RATE_LIMITED', message: mw._meta.message || DEFAULT_MSG } })
+  }
+  checks.forEach((c) => c.commit())
+  next()
 }
 
 export { clientIp }
