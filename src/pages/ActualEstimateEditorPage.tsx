@@ -45,6 +45,7 @@ export default function ActualEstimateEditorPage() {
   const serviceRequestId = params.get('request') || '' // наша заявка на обслуживание
 
   const [prelim, setPrelim] = useState<Estimate | null>(null)
+  const [editParentId, setEditParentId] = useState<string | null>(null) // id родителя в режиме ?edit=
   const [rows, setRows] = useState<WorkRow[]>([])
   const [serviceKind, setServiceKind] = useState<ServiceKind>('repair')
   const [title, setTitle] = useState('')
@@ -94,7 +95,10 @@ export default function ActualEstimateEditorPage() {
       setServiceKind((act.sections?.[0]?.serviceKind as ServiceKind) || 'repair')
       if (act.fopId) setFopId(act.fopId)
       setRows(act.lines.filter((l) => l.type === 'labor').map((l, i) => ({ key: `e${i}`, workId: l.refId, qty: l.qty })))
-      if (act.parentEstimateId) pricingService.loadEstimate(act.parentEstimateId).then((p) => p && setPrelim(p))
+      if (act.parentEstimateId) {
+        setEditParentId(act.parentEstimateId) // помним связь, даже если родитель ещё грузится
+        pricingService.loadEstimate(act.parentEstimateId).then((p) => p && setPrelim(p))
+      }
     })
   }, [editId])
 
@@ -156,6 +160,18 @@ export default function ActualEstimateEditorPage() {
           notify('Кошторис уже оплачено — редагування заблоковано', 'error')
           return null
         }
+        // Клиент прямо сейчас на оплате (claim на ~3 хв): правка суммы разошлась бы с чеком → недоплата.
+        if (fresh && fresh.payInitiatedAt && Date.now() - Date.parse(fresh.payInitiatedAt) < 3 * 60 * 1000) {
+          notify('Клієнт зараз оплачує цей кошторис — зачекайте кілька хвилин перед редагуванням', 'error')
+          return null
+        }
+      }
+      // Если у факта ЕСТЬ родитель (из ?parent= или из загруженного факта), но предварительная
+      // ещё не догрузилась — не сохраняем: иначе потеряем связь план/факт и проверку reapproval.
+      const knownParentId = parentId || editParentId || null
+      if (knownParentId && !prelim) {
+        notify('Зачекайте: завантажується попередній кошторис для звірки план/факт', 'error')
+        return null
       }
       const required = reapproval?.required ?? false
       const srId = serviceRequestId || prelim?.serviceRequestId || null
@@ -164,7 +180,7 @@ export default function ActualEstimateEditorPage() {
         id: savedId || '', // повторное сохранение перезапишет ту же смету
         kind: 'actual',
         status: required ? 'pending_approval' : 'approved',
-        parentEstimateId: prelim?.id ?? null,
+        parentEstimateId: prelim?.id ?? knownParentId,
         serviceRequestId: srId,
         receiptGoods: estimate2goods(actual, 'uk'),
         fopId,

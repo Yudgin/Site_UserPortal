@@ -469,9 +469,17 @@ export function registerPayments(app, deps) {
         tx.set(ref, { selectedVariantId: String(variantId), status: 'chosen', chosenAt: nowIso(), updatedAt: nowIso() }, { merge: true })
         return { ok: true, serviceRequestId: offer.serviceRequestId || null }
       })
-      // Клиент выбрал путь → двигаем нашу заявку в «погоджено».
+      // Клиент выбрал путь → двигаем нашу заявку в «погоджено». НО не воскрешаем отменённую/
+      // завершённую и не откатываем оплаченную (иначе поздний выбор варианта «оживит» заявку).
       if (out.ok && out.serviceRequestId) {
-        await adminDb.collection('serviceRequests').doc(String(out.serviceRequestId)).set({ status: 'approved', updatedAt: nowIso() }, { merge: true }).catch(() => {})
+        const srRef = adminDb.collection('serviceRequests').doc(String(out.serviceRequestId))
+        await adminDb.runTransaction(async (tx) => {
+          const s = await tx.get(srRef)
+          if (!s.exists) return
+          const d = s.data()
+          if (d.status === 'cancelled' || d.status === 'done' || d.paymentId) return
+          tx.set(srRef, { status: 'approved', updatedAt: nowIso() }, { merge: true })
+        }).catch(() => {})
       }
       if (!out.ok) return res.status(out.status).json({ success: false, error: { code: out.code, message: out.message } })
       return res.json({ success: true })

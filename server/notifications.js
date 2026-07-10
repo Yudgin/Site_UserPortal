@@ -90,7 +90,12 @@ export function registerNotifications(app, deps) {
     // Идемпотентность авто-событий (offer/actual/ttn): детерминированный id + ТРАНЗАКЦИОННЫЙ захват,
     // чтобы два параллельных вызова не отправили дважды. Уже отправленное → skip; свежую 'pending'
     // (другой вызов сейчас шлёт) тоже пропускаем; иначе резервируем и продолжаем отправку.
-    const autoId = serviceRequestId && event !== 'custom' ? `ntf-${serviceRequestId}-${event}` : null
+    // ВАЖНО: ttn идемпотентен ПО НОМЕРУ накладной — исправленный/новый ТТН уходит клиенту, а
+    // повторная отправка того же номера не задваивается (offer/actual — по одному разу на заявку).
+    const ttnSlug = String(resolvedTtn || 'none').replace(/[^\w-]+/g, '').slice(0, 40)
+    const autoId = serviceRequestId && event !== 'custom'
+      ? (event === 'ttn' ? `ntf-${serviceRequestId}-ttn-${ttnSlug}` : `ntf-${serviceRequestId}-${event}`)
+      : null
     const ref = autoId ? adminDb.collection('notifications').doc(autoId) : adminDb.collection('notifications').doc()
     if (autoId) {
       const claim = await adminDb.runTransaction(async (tx) => {

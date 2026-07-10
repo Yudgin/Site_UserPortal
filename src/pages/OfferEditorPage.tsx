@@ -43,6 +43,7 @@ export default function OfferEditorPage() {
   const [offerId, setOfferId] = useState('')
   const [title, setTitle] = useState('')
   const [diagSeed, setDiagSeed] = useState('') // диагностика заявки → засев ИИ-подбора
+  const [loadedSrId, setLoadedSrId] = useState('') // serviceRequestId, вычитанный из открытого оффера
   const [serviceKind, setServiceKind] = useState<ServiceKind>('repair')
   const [variants, setVariants] = useState<VariantEntry[]>([])
   const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null)
@@ -86,6 +87,7 @@ export default function OfferEditorPage() {
     pricingService.loadOffer(loadOfferId).then(async (offer) => {
       if (!offer) { notify('Пропозицію не знайдено', 'error'); return }
       setOfferId(offer.id)
+      setLoadedSrId(offer.serviceRequestId || '') // чтобы новые варианты/факт остались привязаны к заявке
       setTitle(offer.title || '')
       setSelectedVariantId(offer.selectedVariantId)
       setOfferStatus(offer.status)
@@ -128,6 +130,11 @@ export default function OfferEditorPage() {
   const addVariant = async () => {
     if (!currentEstimate) { notify('Додайте роботи до варіанта', 'error'); return }
     if (!label.trim()) { notify('Вкажіть назву варіанта', 'error'); return }
+    // К уже выбранному/замороженному предложению вариант добавлять нельзя (клиент его не выберет).
+    if (offerStatus === 'chosen' || offerStatus === 'locked') {
+      notify('Пропозицію вже обрано/зафіксовано — додавання варіантів недоступне', 'error'); return
+    }
+    const effectiveSrId = serviceRequestId || loadedSrId // сохраняем привязку к заявке и при ?offer=
     setSaving(true)
     try {
       const oid = offerId || secureId(16)
@@ -138,7 +145,7 @@ export default function OfferEditorPage() {
         stage: 'proposed',
         status: 'approved', // вариант утверждён мастером (это его предложение)
         offerId: oid,
-        serviceRequestId: serviceRequestId || null,
+        serviceRequestId: effectiveSrId || null,
         variantLabel: label.trim(),
         variantOrder: variants.length,
         parentEstimateId: parentId || null,
@@ -155,7 +162,7 @@ export default function OfferEditorPage() {
         : {
             id: oid,
             requestId: currentEstimate.requestId ?? null,
-            serviceRequestId: serviceRequestId || null,
+            serviceRequestId: effectiveSrId || null,
             title: title || currentEstimate.title || 'Пропозиція',
             variantIds: nextVariants.map((v) => v.id),
             selectedVariantId: null,
@@ -163,12 +170,13 @@ export default function OfferEditorPage() {
             createdAt: new Date().toISOString(),
             createdBy: user?.email ?? null,
           }
-      await pricingService.saveOffer(offerPatch)
+      const savedOffer = await pricingService.saveOffer(offerPatch)
+      if (!savedOffer) { notify('Не вдалося зберегти пропозицію', 'error'); return }
       // При создании предложения привязываем его к заявке и двигаем её статус.
-      if (isFirst && serviceRequestId) {
-        await serviceRequestService.save({ id: serviceRequestId, offerId: oid, status: 'offered' }).catch(() => {})
+      if (isFirst && effectiveSrId) {
+        await serviceRequestService.save({ id: effectiveSrId, offerId: oid, status: 'offered' }).catch(() => {})
         // Авто-оповещение клиента: попередня калькуляція готова (канал выбирает сервер; идемпотентно).
-        notificationApi.notify({ serviceRequestId, event: 'offer' }).catch(() => {})
+        notificationApi.notify({ serviceRequestId: effectiveSrId, event: 'offer' }).catch(() => {})
       }
       setOfferId(oid)
       setOfferStatus((s) => s || 'pending_choice')
@@ -241,7 +249,7 @@ export default function OfferEditorPage() {
           )}
           {offerStatus === 'chosen' && chosenVariant && (
             <Alert severity="success" sx={{ mt: 2 }} action={
-              <Button color="inherit" size="small" startIcon={<ActualIcon />} onClick={() => navigate(`/actual-estimate?parent=${selectedVariantId}`)}>
+              <Button color="inherit" size="small" startIcon={<ActualIcon />} onClick={() => navigate(`/actual-estimate?parent=${selectedVariantId}${(serviceRequestId || loadedSrId) ? `&request=${serviceRequestId || loadedSrId}` : ''}`)}>
                 Скласти факт
               </Button>
             }>

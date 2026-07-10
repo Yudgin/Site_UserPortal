@@ -229,6 +229,12 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
   const createServiceRequest = async () => {
     setCreatingOffer(true)
     try {
+      // Заявка по обращению уже могла быть создана (мастером или ранее) и продвинута по статусу —
+      // не перезатираем её (status/complaint/1С-связь). Проверяем в момент клика (не только по
+      // предзагруженному existingRequestId, который мог не успеть/упасть) и просто открываем.
+      const detId = `sr-${s.id}`
+      const already = await serviceRequestService.get(detId)
+      if (already) { navigate(`/service-request/${already.id}`); return }
       let aiEstimateId: string | null = null
       if (s.estimate && s.estimate.lines.length) {
         const { works, unmatched } = aiEstimateToWorkInputs(s.estimate.lines, indexed)

@@ -276,6 +276,7 @@ export interface Estimate {
   variantOrder?: number
   receiptGoods?: ReceiptGood[] // снимок позиций для чека (для фактической, на момент согласования)
   // Проставляются backend-ом после оплаты и фискализации (минуя клиентские правила):
+  payInitiatedAt?: string | null // клиент начал оплату (claim на ~3 хв) — редактировать нельзя
   paymentId?: string | null // orderId в коллекции payments
   fopId?: string | null // ФОП, принявший оплату и выбивший чек
   paidAt?: string | null

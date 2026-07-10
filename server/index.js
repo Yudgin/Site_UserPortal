@@ -114,6 +114,8 @@ const sendSms = async (phone, text) => {
   const formattedPhone = formatPhoneNumber(String(phone || ''))
   if (!/^380\d{9}$/.test(formattedPhone)) return { ok: false, error: 'invalid phone' }
   if (!TURBOSMS_TOKEN) {
+    // В production без токена НЕ имитируем успех — иначе журнал получит ложный status='sent'.
+    if (process.env.NODE_ENV === 'production') return { ok: false, error: 'sms not configured' }
     console.log(`[DEV] SMS to ${formattedPhone}: ${text}`)
     return { ok: true, messageId: 'dev-mode' }
   }
@@ -121,7 +123,7 @@ const sendSms = async (phone, text) => {
     const response = await axios.post(
       `${TURBOSMS_API_URL}/message/send.json`,
       { recipients: [formattedPhone], sms: { sender: TURBOSMS_SENDER, text } },
-      { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TURBOSMS_TOKEN}` } }
+      { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TURBOSMS_TOKEN}` }, timeout: 15000 }
     )
     const ok = response.data.response_code === 0 ||
       (response.data.response_status && String(response.data.response_status).includes('SUCCESS'))
@@ -268,6 +270,10 @@ app.post('/api/sms/send-code', smsSendLimiter, async (req, res) => {
 
     // Check if we have API token
     if (!TURBOSMS_TOKEN) {
+      // В production без токена не имитируем успех — иначе клиент ждёт код, которого нет.
+      if (process.env.NODE_ENV === 'production') {
+        return res.status(503).json({ success: false, error: { code: 'SMS_NOT_CONFIGURED', message: 'SMS-сервіс тимчасово недоступний' } })
+      }
       console.log(`[DEV] Verification code for ${formattedPhone}: ${code}`)
       return res.json({
         success: true,
@@ -290,6 +296,7 @@ app.post('/api/sms/send-code', smsSendLimiter, async (req, res) => {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${TURBOSMS_TOKEN}`,
         },
+        timeout: 15000,
       }
     )
 
