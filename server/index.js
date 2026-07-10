@@ -14,6 +14,8 @@ import { registerManagerReply } from './managerReply.js'
 import { registerServiceRequests } from './serviceRequests.js'
 import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
+import { verifyFirebaseAdmin } from './adminAuth.js'
+import { rateLimit, combine } from './rateLimit.js'
 
 dotenv.config()
 
@@ -86,6 +88,26 @@ const isValidUkrainianPhone = (phone) => {
 // Публичный адрес сайта (для ссылок в оповещениях). Тот же дефолт, что в messengerCore.
 const SITE_URL = (process.env.SITE_URL || 'https://my.runferry.com').replace(/\/$/, '')
 
+// ==== Защита публичных эндпоинтов: rate-limit + админ-гейт ====
+// Только админ (Firebase ID-токен). Для master-инструментов (генерация ИИ в админке).
+const adminOnly = async (req, res, next) => {
+  if (await verifyFirebaseAdmin(req)) return next()
+  return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для адміністратора' } })
+}
+const phoneKey = (req) => formatPhoneNumber(String(req.body?.phone || 'nophone'))
+// SMS-код: не чаще 1/мин и 5/час на номер + 20/час на IP (анти-бомбер, защита баланса TurboSMS).
+const smsSendLimiter = combine(
+  rateLimit({ name: 'sms-ip', windowMs: 60 * 60 * 1000, max: 20 }),
+  rateLimit({ name: 'sms-phone-min', windowMs: 60 * 1000, max: 1, keyFn: phoneKey, message: 'Код вже надіслано. Зачекайте хвилину.' }),
+  rateLimit({ name: 'sms-phone-hour', windowMs: 60 * 60 * 1000, max: 5, keyFn: phoneKey, message: 'Забагато запитів коду. Спробуйте пізніше.' }),
+)
+// Проверка кода: не более 6 попыток за 10 мин на номер (анти-brute-force 4-значного кода).
+const smsVerifyLimiter = rateLimit({ name: 'sms-verify', windowMs: 10 * 60 * 1000, max: 6, keyFn: phoneKey, message: 'Забагато спроб. Спробуйте пізніше.' })
+// Публичные AI-эндпоинты (чат клиента): 20/мин на IP (защита бюджета Anthropic).
+const aiPublicLimiter = rateLimit({ name: 'ai', windowMs: 60 * 1000, max: 20 })
+// Прокси к внешним сервисам (Nova Poshta, 1С-settings): 40/мин на IP (защита квоты/абьюза).
+const proxyLimiter = rateLimit({ name: 'proxy', windowMs: 60 * 1000, max: 40 })
+
 // Отправить произвольный SMS через TurboSMS. Возвращает { ok, messageId?, error? }.
 // В DEV (без токена) — логируем и считаем успехом, чтобы поток не падал.
 const sendSms = async (phone, text) => {
@@ -138,7 +160,7 @@ app.get('/health', (req, res) => {
 })
 
 // Get settings schema
-app.get('/api/settings/schema', async (req, res) => {
+app.get('/api/settings/schema', proxyLimiter, async (req, res) => {
   try {
     const { localization = 'en_US', email = '', chipId, chipType = 'chip_type' } = req.query
 
@@ -176,7 +198,7 @@ app.get('/api/settings/schema', async (req, res) => {
 })
 
 // Get current settings values for a boat
-app.get('/api/settings/values/:boatId', async (req, res) => {
+app.get('/api/settings/values/:boatId', proxyLimiter, async (req, res) => {
   try {
     const { boatId } = req.params
     res.json({
@@ -196,7 +218,7 @@ app.get('/api/settings/values/:boatId', async (req, res) => {
 })
 
 // Update a setting value
-app.put('/api/settings/:boatId/:settingId', async (req, res) => {
+app.put('/api/settings/:boatId/:settingId', proxyLimiter, async (req, res) => {
   try {
     const { boatId, settingId } = req.params
     const { value } = req.body
@@ -217,7 +239,7 @@ app.put('/api/settings/:boatId/:settingId', async (req, res) => {
 // ============ SMS Verification Endpoints ============
 
 // Send verification code
-app.post('/api/sms/send-code', async (req, res) => {
+app.post('/api/sms/send-code', smsSendLimiter, async (req, res) => {
   try {
     const { phone } = req.body
 
@@ -309,7 +331,7 @@ app.post('/api/sms/send-code', async (req, res) => {
 })
 
 // Verify code
-app.post('/api/sms/verify-code', (req, res) => {
+app.post('/api/sms/verify-code', smsVerifyLimiter, (req, res) => {
   const { phone, code } = req.body
 
   if (!phone || !code) {
@@ -373,7 +395,7 @@ const npRequest = async (modelName, calledMethod, methodProperties) => {
 }
 
 // Search cities by name
-app.post('/api/novaposhta/cities', async (req, res) => {
+app.post('/api/novaposhta/cities', proxyLimiter, async (req, res) => {
   try {
     const { query } = req.body
     if (!query) {
@@ -394,7 +416,7 @@ app.post('/api/novaposhta/cities', async (req, res) => {
 })
 
 // Get warehouses by city Ref
-app.post('/api/novaposhta/warehouses', async (req, res) => {
+app.post('/api/novaposhta/warehouses', proxyLimiter, async (req, res) => {
   try {
     const { cityRef, searchQuery } = req.body
     if (!cityRef) {
@@ -419,7 +441,7 @@ app.post('/api/novaposhta/warehouses', async (req, res) => {
 })
 
 // Track parcel by TTN
-app.post('/api/novaposhta/track', async (req, res) => {
+app.post('/api/novaposhta/track', proxyLimiter, async (req, res) => {
   try {
     const { ttn } = req.body
     if (!ttn) {
@@ -496,7 +518,7 @@ const AI_CONTEXTS = {
   generic: 'Це текст повідомлення для клієнта сервісного центру.',
 }
 
-app.post('/api/ai/improve-text', async (req, res) => {
+app.post('/api/ai/improve-text', adminOnly, async (req, res) => {
   try {
     const { currentText = '', userPrompt = '', history = [], context = 'generic', lang = 'uk' } = req.body
 
@@ -582,7 +604,7 @@ const CHAT_SYSTEM = [
   'ПОЛЕ estimate: якщо ти назвав клієнту конкретні ціни — продублюй їх структуровано: lines (позиція + ціна за наведеною розбивкою) і total (підсумок у грн). Якщо конкретної суми не називав — lines=[] і total=0.',
 ].join('\n')
 
-app.post('/api/ai/estimate-chat', async (req, res) => {
+app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
   try {
     const { messages = [], priceContext = '', knowledgeContext = '', corrections = [] } = req.body
 
@@ -593,11 +615,13 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
       return res.status(400).json({ success: false, error: { code: 'NO_MESSAGES', message: 'Порожній діалог' } })
     }
 
-    // Внутренние заметки менеджера в промпт не идут; client → user, ai/manager → assistant
+    // Внутренние заметки менеджера в промпт не идут; client → user, ai/manager → assistant.
+    // Кап входа (публичный эндпоинт): последние 40 сообщений, каждое ≤ 8000 символов — защита бюджета.
     const chatMessages = mergeConsecutiveMessages(
       messages
         .filter((m) => !m.internal && m.text)
-        .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text) }))
+        .slice(-40)
+        .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text).slice(0, 8000) }))
     )
     if (chatMessages.length === 0 || chatMessages[0].role !== 'user') {
       return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
@@ -710,7 +734,7 @@ app.post('/api/ai/estimate-chat', async (req, res) => {
 
 // ============ AI-подбор позиций прайса для МАСТЕРА (редакторы предложения/факта) ============
 // Мастер описывает, что планирует выставить клиенту, ИИ подбирает позиции ИЗ ПРАЙСА (по кодам).
-app.post('/api/ai/pick-works', async (req, res) => {
+app.post('/api/ai/pick-works', adminOnly, async (req, res) => {
   try {
     const { description = '', priceContext = '', knowledgeContext = '' } = req.body
     if (!anthropic) return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
@@ -784,7 +808,7 @@ const KNOWLEDGE_SYSTEM = [
   'М’яко попереджай: відповіді автоматизовані й можуть бути неточними — ми наповнюємо базу знань і працюємо над її коректністю.',
 ].join('\n')
 
-app.post('/api/ai/knowledge-chat', async (req, res) => {
+app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
   try {
     const { messages = [], knowledgeContext = '', corrections = [] } = req.body
 
@@ -795,10 +819,12 @@ app.post('/api/ai/knowledge-chat', async (req, res) => {
       return res.status(400).json({ success: false, error: { code: 'NO_MESSAGES', message: 'Порожній діалог' } })
     }
 
+    // Кап входа (публичный эндпоинт): последние 40 сообщений, каждое ≤ 8000 символов.
     const chatMessages = mergeConsecutiveMessages(
       messages
         .filter((m) => !m.internal && m.text)
-        .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text) }))
+        .slice(-40)
+        .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text).slice(0, 8000) }))
     )
     if (chatMessages.length === 0 || chatMessages[0].role !== 'user') {
       return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
@@ -926,7 +952,7 @@ const BUILD_PRICING_SCHEMA = {
   required: ['summary', 'materials', 'works', 'kit'],
 }
 
-app.post('/api/ai/build-pricing', async (req, res) => {
+app.post('/api/ai/build-pricing', adminOnly, async (req, res) => {
   try {
     const { instruction = '', catalogContext = '', laborRate = 0 } = req.body
 
@@ -1002,7 +1028,7 @@ const BUILD_COMPLAINT_SCHEMA = {
   required: ['symptom', 'keywords', 'diagnosticWorkCodes', 'variants'],
 }
 
-app.post('/api/ai/build-complaint', async (req, res) => {
+app.post('/api/ai/build-complaint', adminOnly, async (req, res) => {
   try {
     const { description = '', catalogContext = '' } = req.body
     if (!anthropic) {

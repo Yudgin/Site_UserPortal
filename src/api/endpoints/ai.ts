@@ -1,8 +1,16 @@
 import axios from 'axios'
 import { ApiResponse } from '@/types/api'
+import { auth } from '@/api/firebase'
 
 // Backend URL (ключ Claude живёт на сервере, см. server/index.js /api/ai/improve-text)
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3002'
+
+// Мастер-инструменты ИИ (improve-text, pick-works, build-*) на бэкенде за админ-гейтом —
+// шлём Firebase ID-токен. Публичные (estimate-chat/knowledge-chat, чат клиента) — без токена.
+const adminHeaders = async (): Promise<Record<string, string>> => {
+  const t = await auth?.currentUser?.getIdToken?.()
+  return t ? { Authorization: `Bearer ${t}` } : {}
+}
 
 // Одна запись истории правок текста через ИИ
 export interface AiHistoryEntry {
@@ -104,7 +112,7 @@ export const aiApi = {
   // Улучшить/переписать текст по промпту с учётом истории правок
   improveText: async (params: ImproveTextParams): Promise<ApiResponse<{ text: string; usage?: AiUsage }>> => {
     try {
-      const response = await axios.post(`${BACKEND_URL}/api/ai/improve-text`, params)
+      const response = await axios.post(`${BACKEND_URL}/api/ai/improve-text`, params, { headers: await adminHeaders() })
       return { success: true, data: response.data.data }
     } catch (error: any) {
       return {
@@ -160,7 +168,7 @@ export const aiApi = {
     params: { description: string; priceContext?: string; knowledgeContext?: string }
   ): Promise<ApiResponse<{ works: { workCode: string; qty: number; name: string }[]; note: string; usage?: AiUsage }>> => {
     try {
-      const response = await axios.post(`${BACKEND_URL}/api/ai/pick-works`, params)
+      const response = await axios.post(`${BACKEND_URL}/api/ai/pick-works`, params, { headers: await adminHeaders() })
       return { success: true, data: response.data.data }
     } catch (error: any) {
       return {
@@ -176,7 +184,7 @@ export const aiApi = {
   // AI-конструктор услуги: описание словами → структура работ/материалов/набора
   buildPricing: async (params: BuildPricingParams): Promise<ApiResponse<BuildPricingResult>> => {
     try {
-      const response = await axios.post(`${BACKEND_URL}/api/ai/build-pricing`, params)
+      const response = await axios.post(`${BACKEND_URL}/api/ai/build-pricing`, params, { headers: await adminHeaders() })
       return { success: true, data: response.data.data }
     } catch (error: any) {
       return {
@@ -192,7 +200,7 @@ export const aiApi = {
   // AI-генератор шаблона жалобы: описание выполненного ремонта → симптом + диагностика + варианты
   buildComplaint: async (params: BuildComplaintParams): Promise<ApiResponse<AiBuiltComplaint>> => {
     try {
-      const response = await axios.post(`${BACKEND_URL}/api/ai/build-complaint`, params)
+      const response = await axios.post(`${BACKEND_URL}/api/ai/build-complaint`, params, { headers: await adminHeaders() })
       return { success: true, data: response.data.data }
     } catch (error: any) {
       return {

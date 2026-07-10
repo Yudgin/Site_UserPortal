@@ -2,14 +2,19 @@
 // (в дополнение к отправке в 1С). Заявку пишет BACKEND (admin SDK, минуя правила), а поля
 // КОНТРОЛИРУЕТ сервер — клиент НЕ может задать статус/связи с калькуляциями/оплатой.
 import crypto from 'crypto'
+import { rateLimit } from './rateLimit.js'
 
 const nowIso = () => new Date().toISOString()
 const clip = (v, n) => (v ? String(v).slice(0, n) : undefined)
+const isEmpty = (v) => v === undefined || v === null || v === ''
+
+// Публичный эндпоинт: 10 заявок/час на IP (анти-спам; id детерминированные и угадываемые).
+const srLimiter = rateLimit({ name: 'service-requests', windowMs: 60 * 60 * 1000, max: 10 })
 
 export function registerServiceRequests(app, deps) {
   const { adminDb } = deps
 
-  app.post('/api/service-requests', async (req, res) => {
+  app.post('/api/service-requests', srLimiter, async (req, res) => {
     if (!adminDb) return res.status(503).json({ success: false })
     try {
       const b = req.body || {}
@@ -21,18 +26,22 @@ export function registerServiceRequests(app, deps) {
 
       const finalId = await adminDb.runTransaction(async (tx) => {
         const s = await tx.get(ref)
+        const cur = s.exists ? s.data() : null
         const now = nowIso()
         // status/id/createdAt — только при СОЗДАНИИ (не откатываем уже продвинутую заявку).
         const patch = {
           ...(s.exists ? {} : { id, createdAt: now, createdBy: 'client', status: 'new' }),
-          ...(sessionId ? { sessionId } : {}),
-          ...(externalRequestId ? { externalRequestId } : {}),
-          ...(clip(b.clientName, 120) ? { clientName: clip(b.clientName, 120) } : {}),
-          ...(clip(b.clientPhone, 32) ? { clientPhone: clip(b.clientPhone, 32) } : {}),
-          ...(clip(b.boat, 120) ? { boat: clip(b.boat, 120) } : {}),
-          ...(clip(b.complaint, 2000) ? { complaint: clip(b.complaint, 2000) } : {}),
           updatedAt: now,
         }
+        // Контент/связи: на СОЗДАНИИ ставим; на существующей — только ЗАПОЛНЯЕМ ПУСТЫЕ поля.
+        // Иначе повторный (или подделанный по угадываемому id) запрос затёр бы PII реальной заявки.
+        const fill = (key, val) => { if (val === undefined) return; if (!s.exists || isEmpty(cur[key])) patch[key] = val }
+        fill('sessionId', sessionId || undefined)
+        fill('externalRequestId', externalRequestId || undefined)
+        fill('clientName', clip(b.clientName, 120))
+        fill('clientPhone', clip(b.clientPhone, 32))
+        fill('boat', clip(b.boat, 120))
+        fill('complaint', clip(b.complaint, 2000))
         tx.set(ref, patch, { merge: true })
         return id
       })
