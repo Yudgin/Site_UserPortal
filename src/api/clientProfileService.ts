@@ -1,10 +1,12 @@
+import axios from 'axios'
 import { db, auth } from './firebase'
-import { doc, getDoc, setDoc, collection, getDocs, query, limit, orderBy, arrayUnion } from 'firebase/firestore'
+import { doc, getDoc, collection, getDocs, query, limit, orderBy } from 'firebase/firestore'
 import { normalizePhone } from '@/utils/phone'
 import type { ClientProfile } from '@/types/clientProfile'
 
 // Профили клиентов. Ключ = нормализованный телефон → слияние по телефону автоматическое.
 const COLLECTION = 'clientProfiles'
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3002'
 
 interface UpsertExtra {
   name?: string
@@ -16,28 +18,24 @@ interface UpsertExtra {
 }
 
 export const clientProfileService = {
-  // Create-or-update профиля по телефону. Массивы наполняются arrayUnion (не перезаписываются),
-  // имя/email пишутся только если непустые (чтобы не затирать существующие).
+  // Create-or-update профиля по телефону — через BACKEND (Admin SDK). Прямую клиентскую запись
+  // закрыли правилами: иначе аноним по угадываемому телефону-ключу мог перезаписать чужой PII.
+  // Сервер сливает безопасно: имя/email — только если пусто; массивы — arrayUnion.
   upsertByPhone: async (phone: string, extra: UpsertExtra = {}): Promise<{ id: string } | null> => {
-    if (!db) return null
     const id = normalizePhone(phone)
     if (!id) return null
     try {
       const uid = extra.authUid || auth?.currentUser?.uid || null
-      // arrayUnion требует минимум 1 аргумент — включаем поле только когда есть что добавить.
-      const payload: Record<string, unknown> = {
+      const { data } = await axios.post(`${BACKEND_URL}/api/client-profiles/upsert`, {
         id,
-        phone: id,
-        updatedAt: new Date().toISOString(),
-        ...(extra.name && extra.name.trim() ? { name: extra.name.trim() } : {}),
-        ...(extra.email && extra.email.trim() ? { email: extra.email.trim() } : {}),
-        ...(uid ? { authUids: arrayUnion(uid) } : {}),
-        ...(extra.boatId ? { boatIds: arrayUnion(extra.boatId) } : {}),
-        ...(extra.sessionId ? { sessionIds: arrayUnion(extra.sessionId) } : {}),
-        ...(extra.taskId ? { taskIds: arrayUnion(extra.taskId) } : {}),
-      }
-      await setDoc(doc(db, COLLECTION, id), payload, { merge: true })
-      return { id }
+        name: extra.name,
+        email: extra.email,
+        authUid: uid,
+        boatId: extra.boatId,
+        sessionId: extra.sessionId,
+        taskId: extra.taskId,
+      })
+      return data?.success ? { id } : null
     } catch (error) {
       console.error('Error upserting client profile:', error)
       return null

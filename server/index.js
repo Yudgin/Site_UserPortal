@@ -14,6 +14,7 @@ import { registerManagerReply } from './managerReply.js'
 import { registerServiceRequests } from './serviceRequests.js'
 import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
+import { registerClientProfiles } from './clientProfiles.js'
 import { verifyFirebaseAdmin } from './adminAuth.js'
 import { rateLimit, combine } from './rateLimit.js'
 
@@ -1106,6 +1107,8 @@ registerViberBot(app, messengerDeps)
 registerManagerReply(app, messengerDeps)
 // Публичное создание нашей локальной заявки из формы /repair/new (в дополнение к 1С).
 registerServiceRequests(app, { adminDb })
+// Публичный upsert профиля клиента (через сервер — чтобы аноним не перезаписывал чужой PII).
+registerClientProfiles(app, { adminDb })
 // Журнал информирования клиента: авто-выбор канала (мессенджер в окне / иначе SMS).
 registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUrl: SITE_URL })
 

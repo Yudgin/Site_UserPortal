@@ -100,14 +100,19 @@ service cloud.firestore {
       allow get: if true;
       allow list: if isPriceAdmin();
       allow create: if true;
-      // Клиент дополняет свою сессию по знанию id, но не может подменить id/дату создания
-      // и не может УКОРОТИТЬ/переписать историю — только дополнять (size только растёт).
-      // Это ограничивает подмену чужой переписки (id теперь криптостойкий).
-      // Администратор — полный доступ.
+      // Клиент дополняет свою сессию по знанию id, но не может подменить id/дату создания,
+      // не может УКОРОТИТЬ историю (size только растёт) и не может менять серверо/менеджеро-
+      // контролируемые поля: паузу бота, канал/адресата мессенджера и учёт стоимости ИИ.
+      // Это ограничивает злоупотребление по знанию id (id криптостойкий). Админ — полный доступ.
       allow update: if isPriceAdmin()
         || (request.resource.data.id == resource.data.id
             && request.resource.data.createdAt == resource.data.createdAt
-            && request.resource.data.messages.size() >= resource.data.messages.size());
+            && request.resource.data.messages.size() >= resource.data.messages.size()
+            && request.resource.data.get('botPaused', false) == resource.data.get('botPaused', false)
+            && request.resource.data.get('channel', '') == resource.data.get('channel', '')
+            && request.resource.data.get('channelUserId', '') == resource.data.get('channelUserId', '')
+            && request.resource.data.get('businessConnectionId', '') == resource.data.get('businessConnectionId', '')
+            && request.resource.data.get('aiUsage', {}) == resource.data.get('aiUsage', {}));
       allow delete: if isPriceAdmin();
     }
 
@@ -154,12 +159,12 @@ service cloud.firestore {
       allow read, update, delete: if isPriceAdmin();
     }
 
-    // Профили клиентов (ключ = нормализованный телефон). Клиентские потоки (опросник,
-    // заявка) делают merge-upsert (arrayUnion только добавляет) — поэтому create/update
-    // разрешены всем, но с лимитом полей. Чтение/список — только администратор (PII).
-    // Полноценно от абьюза — App Check + rate-limit (в бэклоге).
+    // Профили клиентов (ключ = нормализованный телефон, содержит PII). Прямая клиентская запись
+    // ЗАКРЫТА: аноним по угадываемому ключу мог бы перезаписать чужой профиль. Клиентские потоки
+    // (опросник, заявка) пишут через backend /api/client-profiles/upsert (Admin SDK, безопасное
+    // слияние: имя/email только если пусто, массивы arrayUnion). Мессенджеры — тоже сервер.
     match /clientProfiles/{docId} {
-      allow create, update: if request.resource.data.keys().size() <= 10;
+      allow create, update: if false;
       allow read, list, delete: if isPriceAdmin();
     }
 
