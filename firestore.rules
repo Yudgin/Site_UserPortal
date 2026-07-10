@@ -54,6 +54,13 @@ service cloud.firestore {
       allow read, list: if isPriceAdmin();
     }
 
+    // Журнал оповещений клиента (готова калькуляция, відправлення тощо). Пишет только backend
+    // (Admin SDK, /api/notify — проверка админ-токена там). Клиент/фронт — только чтение (админ).
+    match /notifications/{ntfId} {
+      allow read, list: if isPriceAdmin();
+      allow write: if false;
+    }
+
     // Сметы. Прямое чтение — ТОЛЬКО администратор (внутренняя экономика: ставка, подытоги,
     // сезонный коэф., createdBy, requestId/PII). Клиент видит смету через backend
     // /api/estimates/:id/public — безопасный вид без внутренних полей.

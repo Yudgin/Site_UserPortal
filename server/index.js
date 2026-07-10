@@ -12,6 +12,7 @@ import { registerTelegramBot } from './telegram.js'
 import { registerViberBot } from './viber.js'
 import { registerManagerReply } from './managerReply.js'
 import { registerServiceRequests } from './serviceRequests.js'
+import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
 
 dotenv.config()
@@ -80,6 +81,32 @@ const formatPhoneNumber = (phone) => {
 const isValidUkrainianPhone = (phone) => {
   const formatted = formatPhoneNumber(phone)
   return /^380\d{9}$/.test(formatted)
+}
+
+// Публичный адрес сайта (для ссылок в оповещениях). Тот же дефолт, что в messengerCore.
+const SITE_URL = (process.env.SITE_URL || 'https://my.runferry.com').replace(/\/$/, '')
+
+// Отправить произвольный SMS через TurboSMS. Возвращает { ok, messageId?, error? }.
+// В DEV (без токена) — логируем и считаем успехом, чтобы поток не падал.
+const sendSms = async (phone, text) => {
+  const formattedPhone = formatPhoneNumber(String(phone || ''))
+  if (!/^380\d{9}$/.test(formattedPhone)) return { ok: false, error: 'invalid phone' }
+  if (!TURBOSMS_TOKEN) {
+    console.log(`[DEV] SMS to ${formattedPhone}: ${text}`)
+    return { ok: true, messageId: 'dev-mode' }
+  }
+  try {
+    const response = await axios.post(
+      `${TURBOSMS_API_URL}/message/send.json`,
+      { recipients: [formattedPhone], sms: { sender: TURBOSMS_SENDER, text } },
+      { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TURBOSMS_TOKEN}` } }
+    )
+    const ok = response.data.response_code === 0 ||
+      (response.data.response_status && String(response.data.response_status).includes('SUCCESS'))
+    return { ok: !!ok, messageId: response.data.response_result?.[0]?.message_id, error: ok ? undefined : (response.data.response_status || 'sms failed') }
+  } catch (e) {
+    return { ok: false, error: e?.message || 'sms error' }
+  }
 }
 
 // Settings API configuration — credentials come from environment only (see .env.example)
@@ -1045,6 +1072,8 @@ registerViberBot(app, messengerDeps)
 registerManagerReply(app, messengerDeps)
 // Публичное создание нашей локальной заявки из формы /repair/new (в дополнение к 1С).
 registerServiceRequests(app, { adminDb })
+// Журнал информирования клиента: авто-выбор канала (мессенджер в окне / иначе SMS).
+registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUrl: SITE_URL })
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 registerPayments(app, { adminDb })

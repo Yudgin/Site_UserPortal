@@ -12,17 +12,20 @@ import {
 import {
   Home as HomeIcon, Forum as ChatIcon, LocalOffer as OfferIcon, Build as ActualIcon,
   Payments as PaymentsIcon, Save as SaveIcon, CheckCircle as CheckIcon, Psychology as AiIcon,
-  Biotech as DiagIcon,
+  Biotech as DiagIcon, NotificationsActive as NotifyIcon, LocalShipping as ShipIcon, Send as SendIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import { serviceRequestService } from '@/api/serviceRequestService'
 import { chatSessionService } from '@/api/chatSessionService'
+import { notificationService } from '@/api/notificationService'
+import { notificationApi } from '@/api/endpoints/notification'
 import { pricingService } from '@/api/pricingService'
 import { formatMoney } from '@/utils/pricing'
 import { SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequestStatus } from '@/types/serviceRequest'
 import type { EstimateOffer, Estimate } from '@/types/pricing'
 import type { PreliminaryEstimate } from '@/types/chat'
+import { NOTIFICATION_EVENT_LABELS, type ClientNotification } from '@/types/notification'
 
 const STATUSES = Object.keys(SERVICE_REQUEST_STATUS_LABELS) as ServiceRequestStatus[]
 
@@ -39,6 +42,10 @@ export default function ServiceRequestPage() {
   const [complaint, setComplaint] = useState('')
   const [boat, setBoat] = useState('')
   const [diag, setDiag] = useState('') // текст диагностики (выявленные неисправности)
+  const [notifs, setNotifs] = useState<ClientNotification[]>([]) // журнал оповещений
+  const [notifText, setNotifText] = useState('') // произвольное сообщение клиенту
+  const [ttnInput, setTtnInput] = useState('') // номер ТТН для оповещения об отправке
+  const [sending, setSending] = useState(false)
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
@@ -54,6 +61,7 @@ export default function ServiceRequestPage() {
       if (r.actualEstimateId) pricingService.loadEstimate(r.actualEstimateId).then(setActual)
       // Предварительная оценка ИИ — из связанного обращения (та, что ИИ показывал в переписке).
       if (r.sessionId) chatSessionService.load(r.sessionId).then((s) => setAiEstimate(s?.estimate || null))
+      notificationService.listByRequest(id).then(setNotifs)
     }
     setLoading(false)
   }, [id])
@@ -79,6 +87,32 @@ export default function ServiceRequestPage() {
     }
     if (text && req?.status === 'new' && !req?.paymentId) fields.status = 'diagnostics'
     patch(fields).then((ok) => { if (ok) notify('Діагностику збережено') })
+  }
+
+  const reloadNotifs = () => notificationService.listByRequest(id).then(setNotifs)
+
+  // Отправка произвольного оповещения клиенту (канал выбирает сервер: мессенджер / SMS).
+  const sendCustom = async () => {
+    const text = notifText.trim()
+    if (!text) return
+    setSending(true)
+    const rec = await notificationApi.notify({ serviceRequestId: id, event: 'custom', text })
+    setSending(false)
+    if (rec?.status === 'sent') { notify(`Надіслано (${rec.via === 'sms' ? 'SMS' : rec.channel})`); setNotifText('') }
+    else notify(rec?.error || 'Не вдалося надіслати', 'error')
+    reloadNotifs()
+  }
+
+  // Оповещение об отправке кораблика (ТТН). Сохраняем номер на заявке и шлём клиенту.
+  const sendTtn = async () => {
+    const ttn = ttnInput.trim()
+    setSending(true)
+    if (ttn) await patch({ waybillNumber: ttn })
+    const rec = await notificationApi.notify({ serviceRequestId: id, event: 'ttn', ttn: ttn || undefined })
+    setSending(false)
+    if (rec?.status === 'sent') { notify(`Повідомлення про відправку надіслано (${rec.via === 'sms' ? 'SMS' : rec.channel})`); setTtnInput('') }
+    else notify(rec?.error || 'Не вдалося надіслати', 'error')
+    reloadNotifs()
   }
 
   if (!user || !isAdminEmail(user.email)) {
@@ -225,6 +259,49 @@ export default function ServiceRequestPage() {
           </Stack>
         ) : (
           <Alert severity="info">Оплата стане доступною клієнту на сторінці фактичного кошторису.</Alert>
+        )}
+      </Paper>
+
+      {/* Информирование клиента — журнал оповещений (канал: мессенджер в окне / иначе SMS) */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+          <NotifyIcon fontSize="small" color="primary" />
+          <Typography variant="subtitle1">Інформування клієнта</Typography>
+        </Stack>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          Канал обирається автоматично: месенджер (Telegram — завжди; Viber — до 24 год після
+          останнього повідомлення клієнта) або SMS. Попередня/фактична калькуляція та відправлення
+          повідомляються автоматично; тут можна надіслати й довільне повідомлення.
+        </Typography>
+
+        {/* Произвольное сообщение клиенту */}
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} alignItems={{ sm: 'flex-start' }}>
+          <TextField value={notifText} onChange={(e) => setNotifText(e.target.value)} size="small" fullWidth multiline
+            placeholder="Повідомлення клієнту (напр. потрібна доплата, уточнення по ремонту)" />
+          <Button variant="contained" startIcon={<SendIcon />} disabled={sending || !notifText.trim()} onClick={sendCustom}>Надіслати</Button>
+        </Stack>
+
+        {/* Оповещение об отправке (ТТН) */}
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} alignItems={{ sm: 'center' }}>
+          <TextField value={ttnInput} onChange={(e) => setTtnInput(e.target.value)} size="small"
+            label="ТТН (номер накладної)" placeholder={req.waybillNumber || 'напр. 20450…'} sx={{ minWidth: 220 }} />
+          <Button variant="outlined" startIcon={<ShipIcon />} disabled={sending} onClick={sendTtn}>Повідомити про відправку</Button>
+        </Stack>
+
+        {/* История оповещений */}
+        {notifs.length > 0 && (
+          <Stack spacing={0.75} sx={{ mt: 1 }}>
+            <Divider sx={{ mb: 0.5 }} />
+            {notifs.map((n) => (
+              <Stack key={n.id} direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap' }}>
+                <Chip size="small" color={n.status === 'sent' ? 'success' : 'error'}
+                  label={n.status === 'sent' ? (n.via === 'sms' ? 'SMS' : n.channel || 'месенджер') : 'помилка'} />
+                <Typography variant="caption" color="text.secondary" sx={{ minWidth: 130 }}>{NOTIFICATION_EVENT_LABELS[n.event]}</Typography>
+                <Typography variant="body2" sx={{ flex: 1, minWidth: 160 }}>{n.text}</Typography>
+                <Typography variant="caption" color="text.secondary">{new Date(n.createdAt).toLocaleString('uk-UA')}</Typography>
+              </Stack>
+            ))}
+          </Stack>
         )}
       </Paper>
 

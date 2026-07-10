@@ -20,6 +20,7 @@ import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { pricingService } from '@/api/pricingService'
 import { serviceRequestService } from '@/api/serviceRequestService'
+import { notificationApi } from '@/api/endpoints/notification'
 import { paymentsApi, FopPublic } from '@/api/endpoints/payments'
 import {
   buildEstimate, estimate2goods, compareEstimates, needsReapproval, tName, formatMoney,
@@ -172,7 +173,11 @@ export default function ActualEstimateEditorPage() {
       if (!res) { notify('Не вдалося зберегти кошторис', 'error'); return null }
       setSavedId(res.id)
       // Привязываем факт к заявке и двигаем её в «в роботі».
-      if (srId) await serviceRequestService.save({ id: srId, actualEstimateId: res.id, status: 'in_work' }).catch(() => {})
+      if (srId) {
+        await serviceRequestService.save({ id: srId, actualEstimateId: res.id, status: 'in_work' }).catch(() => {})
+        // Авто-оповещение клиента: фактична калькуляція готова (канал выбирает сервер; идемпотентно).
+        notificationApi.notify({ serviceRequestId: srId, event: 'actual' }).catch(() => {})
+      }
       // Факт собран по выбранному варианту → «замораживаем» предложение: клиент больше не может
       // переизбрать путь (иначе оффер и факт/чек разойдутся).
       if (prelim?.offerId) {

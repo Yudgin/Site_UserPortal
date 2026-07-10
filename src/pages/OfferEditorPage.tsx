@@ -20,6 +20,7 @@ import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { pricingService } from '@/api/pricingService'
 import { serviceRequestService } from '@/api/serviceRequestService'
+import { notificationApi } from '@/api/endpoints/notification'
 import { secureId } from '@/utils/id'
 import { buildEstimate, tName, formatMoney, type EstimateWorkInput } from '@/utils/pricing'
 import { buildPriceContext } from '@/utils/aiContext'
@@ -166,6 +167,8 @@ export default function OfferEditorPage() {
       // При создании предложения привязываем его к заявке и двигаем её статус.
       if (isFirst && serviceRequestId) {
         await serviceRequestService.save({ id: serviceRequestId, offerId: oid, status: 'offered' }).catch(() => {})
+        // Авто-оповещение клиента: попередня калькуляція готова (канал выбирает сервер; идемпотентно).
+        notificationApi.notify({ serviceRequestId, event: 'offer' }).catch(() => {})
       }
       setOfferId(oid)
       setOfferStatus((s) => s || 'pending_choice')
