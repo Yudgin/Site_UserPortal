@@ -100,8 +100,16 @@ export const resolveActiveSeason = (settings: PricingSettings, month: number): S
   return seasons.find((s) => s.coefficient === 1) ?? DEFAULT_SEASON
 }
 
-// Текущий месяц (1–12)
-export const currentMonth = (): number => new Date().getMonth() + 1
+// Текущий месяц (1–12) в часовом поясе Украины (Europe/Kyiv). Сезонная наценка привязана к
+// украинскому времени, а не к TZ рантайма (Cloud Run — UTC) или браузера клиента (может быть
+// за кордоном): иначе у границы месяца коэффициент сезона «плавал» бы в зависимости от места расчёта.
+export const currentMonth = (): number => {
+  try {
+    return parseInt(new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Kyiv', month: 'numeric' }).format(new Date()), 10)
+  } catch {
+    return new Date().getMonth() + 1
+  }
+}
 
 // Эффективный сезонный коэффициент.
 // Наценка высокого сезона не применяется (коэффициент не поднимается выше 1), если это
