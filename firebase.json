@@ -7,6 +7,11 @@
       "**/node_modules/**"
     ],
     "rewrites": [
+      { "source": "/api/firmware/list", "function": "firmwareList" },
+      { "source": "/api/firmware/download", "function": "firmwareDownload" },
+      { "source": "/api/firmware/download-win", "function": "firmwareDownloadWin" },
+      { "source": "/api/firmware/download-mac", "function": "firmwareDownloadMac" },
+      { "source": "/api/stations/list", "function": "stationList" },
       {
         "source": "**",
         "destination": "/index.html"

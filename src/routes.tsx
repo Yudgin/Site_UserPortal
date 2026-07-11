@@ -39,6 +39,7 @@ import OfferEditorPage from '@/pages/OfferEditorPage'
 import OfferSharePage from '@/pages/OfferSharePage'
 import PaymentsAdminPage from '@/pages/PaymentsAdminPage'
 import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
+import MasterPage from '@/pages/MasterPage'
 import AccessAdminPage from '@/pages/AccessAdminPage'
 import ServiceRequestPage from '@/pages/ServiceRequestPage'
 import ServiceRequestsListPage from '@/pages/ServiceRequestsListPage'
@@ -363,6 +364,7 @@ export const AppRoutes = () => {
         <Route index element={<DashboardPage />} />
         <Route path="reservoir/:id" element={<ReservoirPage />} />
         <Route path="repairs" element={<RepairsPage />} />
+        <Route path="master" element={<MasterPage />} />
         <Route path="design" element={<DesignPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="admin" element={<AdminPage />} />
