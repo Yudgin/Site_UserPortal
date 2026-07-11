@@ -11,6 +11,7 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  Collapse,
   Toolbar,
   Typography,
   Avatar,
@@ -47,6 +48,8 @@ import {
   Insights as OwnerDashIcon,
   ManageAccounts as AccessIcon,
   Memory as FirmwareMenuIcon,
+  ExpandMore as ExpandMoreIcon,
+  ExpandLess as ExpandLessIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { useBoatStore } from '@/store/boatStore'
@@ -68,6 +71,7 @@ export default function Layout() {
 
   const [mobileOpen, setMobileOpen] = useState(false)
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null)
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({})
 
   const handleDrawerToggle = () => {
     setMobileOpen(!mobileOpen)
@@ -88,7 +92,13 @@ export default function Layout() {
     navigate('/login')
   }
 
-  const menuItems = [
+  // Навигация: плоские пункты + сворачиваемые группы (дерево). NavGroup имеет поле items.
+  type NavItem = { text: string; icon: JSX.Element; path: string }
+  type NavGroup = { group: string; icon: JSX.Element; items: NavItem[] }
+  type NavEntry = NavItem | NavGroup
+  const isGroup = (e: NavEntry): e is NavGroup => 'items' in e
+
+  const nav: NavEntry[] = [
     { text: t('reservoirs.title'), icon: <MapIcon />, path: '/' },
     { text: t('repairs.title'), icon: <RepairsIcon />, path: '/repairs' },
     { text: t('master.title', 'Прошивки пульта'), icon: <FirmwareMenuIcon />, path: '/master' },
@@ -96,34 +106,51 @@ export default function Layout() {
     { text: t('settings.title'), icon: <SettingsIcon />, path: '/settings' },
   ]
 
-  // Add distributor menu for distributors and developers
   if (user?.role === 'developer' || user?.role === 'distributor') {
-    menuItems.push({ text: t('distributor.title') || 'Distributor', icon: <DistributorIcon />, path: '/distributor' })
+    nav.push({ text: t('distributor.title') || 'Distributor', icon: <DistributorIcon />, path: '/distributor' })
   }
 
-  // Add admin menu for developers only
+  // Разделы для владельца — сгруппированы, чтобы меню не было длинной простынёй.
   if (user?.role === 'developer') {
-    menuItems.push({ text: 'Панель власника', icon: <OwnerDashIcon />, path: '/owner' })
-    menuItems.push({ text: 'Доступ до прошивок', icon: <FirmwareMenuIcon />, path: '/firmware-access' })
-    menuItems.push({ text: 'Доступ та центри', icon: <AccessIcon />, path: '/access' })
-    menuItems.push({ text: 'Прайс-лист', icon: <PriceListIcon />, path: '/pricelist-admin' })
-    menuItems.push({ text: 'Пропозиція клієнту', icon: <EstimateIcon />, path: '/offer-editor' })
-    menuItems.push({ text: 'Фактична калькуляція', icon: <EstimateIcon />, path: '/actual-estimate' })
-    menuItems.push({ text: 'Оплати та чеки', icon: <PaymentsIcon />, path: '/payments-admin' })
-    menuItems.push({ text: 'Жалобы→работы', icon: <ComplaintIcon />, path: '/complaints-admin' })
-    menuItems.push({ text: 'Соглашение', icon: <TermsIcon />, path: '/service-content-admin' })
-    menuItems.push({ text: 'База знаний', icon: <KnowledgeIcon />, path: '/knowledge-admin' })
-    menuItems.push({ text: 'Обращения', icon: <InboxIcon />, path: '/manager-inbox' })
-    menuItems.push({ text: 'Заявки', icon: <RequestIcon />, path: '/service-requests' })
-    menuItems.push({ text: 'Задачи', icon: <TaskIcon />, path: '/tasks-admin' })
-    menuItems.push({ text: 'Клиенты', icon: <ClientsIcon />, path: '/clients-admin' })
-    menuItems.push({ text: 'Профили', icon: <ProfileIcon />, path: '/client-profiles' })
-    menuItems.push({ text: 'Отзывы ИИ', icon: <FeedbackIcon />, path: '/feedback-admin' })
-    menuItems.push({ text: 'Презентация', icon: <PresentationIcon />, path: '/presentation' })
-    menuItems.push({ text: 'Опросник', icon: <QuestionnaireIcon />, path: '/questionnaire' })
-    menuItems.push({ text: 'Публичный прайс', icon: <PublicPriceIcon />, path: '/price' })
-    menuItems.push({ text: 'Admin', icon: <AdminIcon />, path: '/admin' })
+    nav.push({ text: 'Панель власника', icon: <OwnerDashIcon />, path: '/owner' })
+    nav.push({ group: 'Заявки та сервіс', icon: <InboxIcon />, items: [
+      { text: 'Обращения', icon: <InboxIcon />, path: '/manager-inbox' },
+      { text: 'Заявки', icon: <RequestIcon />, path: '/service-requests' },
+      { text: 'Задачи', icon: <TaskIcon />, path: '/tasks-admin' },
+    ] })
+    nav.push({ group: 'Калькуляції та оплати', icon: <PaymentsIcon />, items: [
+      { text: 'Пропозиція клієнту', icon: <EstimateIcon />, path: '/offer-editor' },
+      { text: 'Фактична калькуляція', icon: <EstimateIcon />, path: '/actual-estimate' },
+      { text: 'Оплати та чеки', icon: <PaymentsIcon />, path: '/payments-admin' },
+    ] })
+    nav.push({ group: 'Прайс і контент', icon: <PriceListIcon />, items: [
+      { text: 'Прайс-лист', icon: <PriceListIcon />, path: '/pricelist-admin' },
+      { text: 'Публічний прайс', icon: <PublicPriceIcon />, path: '/price' },
+      { text: 'Жалобы→работы', icon: <ComplaintIcon />, path: '/complaints-admin' },
+      { text: 'Соглашение', icon: <TermsIcon />, path: '/service-content-admin' },
+      { text: 'База знаний', icon: <KnowledgeIcon />, path: '/knowledge-admin' },
+      { text: 'Презентація', icon: <PresentationIcon />, path: '/presentation' },
+      { text: 'Опросник', icon: <QuestionnaireIcon />, path: '/questionnaire' },
+    ] })
+    nav.push({ group: 'Клієнти', icon: <ClientsIcon />, items: [
+      { text: 'Клиенты', icon: <ClientsIcon />, path: '/clients-admin' },
+      { text: 'Профили', icon: <ProfileIcon />, path: '/client-profiles' },
+      { text: 'Отзывы ИИ', icon: <FeedbackIcon />, path: '/feedback-admin' },
+    ] })
+    nav.push({ group: 'Доступ і система', icon: <AccessIcon />, items: [
+      { text: 'Доступ та центри', icon: <AccessIcon />, path: '/access' },
+      { text: 'Доступ до прошивок', icon: <FirmwareMenuIcon />, path: '/firmware-access' },
+      { text: 'Admin', icon: <AdminIcon />, path: '/admin' },
+    ] })
   }
+
+  // Группа открыта, если пользователь её раскрыл, либо (по умолчанию) в ней активный маршрут.
+  const groupHasActive = (g: NavGroup) => g.items.some((it) => it.path === location.pathname)
+  const isGroupOpen = (g: NavGroup) => openGroups[g.group] ?? groupHasActive(g)
+  const toggleGroup = (title: string, g: NavGroup) =>
+    setOpenGroups((prev) => ({ ...prev, [title]: !(prev[title] ?? groupHasActive(g)) }))
+
+  const go = (path: string) => { navigate(path); if (isMobile) setMobileOpen(false) }
 
   const drawer = (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -157,29 +184,45 @@ export default function Layout() {
         </Box>
       )}
 
-      {/* Navigation */}
-      <List sx={{ flex: 1, pt: 2 }}>
-        {menuItems.map((item) => (
-          <ListItem key={item.path} disablePadding>
-            <ListItemButton
-              selected={location.pathname === item.path}
-              onClick={() => {
-                navigate(item.path)
-                if (isMobile) setMobileOpen(false)
-              }}
-              sx={{
-                '&.Mui-selected': {
-                  '& .MuiListItemIcon-root': {
-                    color: 'primary.main',
-                  },
-                },
-              }}
-            >
-              <ListItemIcon>{item.icon}</ListItemIcon>
-              <ListItemText primary={item.text} />
-            </ListItemButton>
-          </ListItem>
-        ))}
+      {/* Navigation (дерево: плоские пункты + сворачиваемые группы) */}
+      <List sx={{ flex: 1, pt: 1, overflowY: 'auto' }}>
+        {nav.map((entry) =>
+          isGroup(entry) ? (
+            <Box key={entry.group}>
+              <ListItemButton onClick={() => toggleGroup(entry.group, entry)}>
+                <ListItemIcon>{entry.icon}</ListItemIcon>
+                <ListItemText primary={entry.group} primaryTypographyProps={{ fontWeight: 600 }} />
+                {isGroupOpen(entry) ? <ExpandLessIcon color="action" /> : <ExpandMoreIcon color="action" />}
+              </ListItemButton>
+              <Collapse in={isGroupOpen(entry)} timeout="auto" unmountOnExit>
+                <List disablePadding>
+                  {entry.items.map((item) => (
+                    <ListItemButton
+                      key={item.path}
+                      selected={location.pathname === item.path}
+                      onClick={() => go(item.path)}
+                      sx={{ pl: 4, '&.Mui-selected': { '& .MuiListItemIcon-root': { color: 'primary.main' } } }}
+                    >
+                      <ListItemIcon sx={{ minWidth: 38 }}>{item.icon}</ListItemIcon>
+                      <ListItemText primary={item.text} primaryTypographyProps={{ variant: 'body2' }} />
+                    </ListItemButton>
+                  ))}
+                </List>
+              </Collapse>
+            </Box>
+          ) : (
+            <ListItem key={entry.path} disablePadding>
+              <ListItemButton
+                selected={location.pathname === entry.path}
+                onClick={() => go(entry.path)}
+                sx={{ '&.Mui-selected': { '& .MuiListItemIcon-root': { color: 'primary.main' } } }}
+              >
+                <ListItemIcon>{entry.icon}</ListItemIcon>
+                <ListItemText primary={entry.text} />
+              </ListItemButton>
+            </ListItem>
+          )
+        )}
       </List>
     </Box>
   )
