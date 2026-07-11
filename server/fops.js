@@ -46,9 +46,11 @@ export async function refreshFops(adminDb) {
         privatPaypart: s.privatPaypart, // ПриватБанк оплата частями
         checkbox: s.checkbox,
       }
-    }).filter((f) => f.active !== false)
+    })
     // Мержим env-сид + Firestore: Firestore перекрывает/дополняет по id, но env-ФОПы НЕ теряются
-    // (иначе создание первого ФОПа в UI обесточило бы живые env-оплаты).
+    // (иначе создание первого ФОПа в UI обесточило бы живые env-оплаты). НЕактивные ФОПы тоже
+    // держим в кэше — getFop должен резолвить их для УЖЕ созданных заказов (вебхуки/чеки/reconcile).
+    // Флаг active скрывает ФОП только из ВЫБОРА для НОВЫХ оплат (listFopsPublic + createPayment).
     const byId = new Map(seedFromEnv().map((f) => [f.id, f]))
     for (const f of merged) byId.set(f.id, f)
     FOPS = [...byId.values()]
@@ -72,8 +74,9 @@ export const fopHas = (fop, path) => {
 const methodOn = (f, key, hasKey) => hasKey && (f.methods ? f.methods[key] !== false : true)
 
 // Публичный список ФОП (БЕЗ секретов) — для UI и /api/fops: id, name и какие методы доступны.
+// НЕактивные ФОПы скрываем — они не должны предлагаться для НОВЫХ оплат (но getFop их резолвит).
 export const listFopsPublic = () =>
-  FOPS.map((f) => ({
+  FOPS.filter((f) => f && f.active !== false).map((f) => ({
     id: f.id,
     name: f.name || f.id,
     methods: {

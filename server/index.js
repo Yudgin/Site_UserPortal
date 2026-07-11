@@ -1128,6 +1128,9 @@ registerPayments(app, { adminDb })
 registerFopsAdmin(app, { adminDb, refreshFops })
 // Подгружаем ФОПы из Firestore на старте (перекрывают ENV-сид, если заданы).
 refreshFops(adminDb).catch((e) => console.error('initial refreshFops:', e?.message || e))
+// Периодический рефреш — чтобы ДРУГИЕ инстансы Cloud Run подхватили изменения ФОПов (кэш в памяти
+// процесса; иначе колбэк на «устаревшем» инстансе не нашёл бы только что созданный ФОП).
+setInterval(() => refreshFops(adminDb).catch(() => {}), 60 * 1000).unref?.()
 
 // JSON Server for mock API (данные карты-портала: boats/reservoirs/…).
 // Изолируем: сбой mock-роутера (напр. отсутствует db.json) НЕ должен ронять сервер ботов/AI.

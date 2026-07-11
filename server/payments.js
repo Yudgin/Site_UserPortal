@@ -197,6 +197,8 @@ export function registerPayments(app, deps) {
   const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId, serviceRequestId }) => {
     const fop = getFop(fopId)
     if (!fop) return { ok: false, status: 400, code: 'BAD_FOP', message: 'Невідомий ФОП' }
+    // Новую оплату НЕ принимаем на выключенный ФОП (но getFop его резолвит для старых заказов).
+    if (fop.active === false) return { ok: false, status: 400, code: 'FOP_INACTIVE', message: 'ФОП вимкнено' }
 
     const gErr = validateGoods(goods)
     if (gErr) return { ok: false, status: 400, code: 'BAD_GOODS', message: gErr }

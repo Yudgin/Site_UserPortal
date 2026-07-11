@@ -136,6 +136,7 @@ export function registerFopsAdmin(app, deps) {
     if (!(await gate(req, res))) return
     if (!adminDb) return res.status(503).json({ success: false })
     const id = clip(req.params.id, 64).replace(/[^\w-]/g, '')
+    if (!id) return res.status(400).json({ success: false, error: { code: 'BAD_ID', message: 'Некоректний id' } })
     try {
       await Promise.all([
         adminDb.collection('fops').doc(id).delete(),
