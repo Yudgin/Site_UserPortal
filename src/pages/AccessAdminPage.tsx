@@ -19,7 +19,9 @@ import {
   type ServiceCenter, type UserProfile, type Role, type CenterPermission, type CenterAccess,
 } from '@/types/access'
 
-const ROLES: Role[] = ['owner', 'accountant', 'master']
+// Назначаемые роли. 'owner' пока не назначается: делегированный владелец заработает на уровне
+// данных лише у фазі 1b (правила/сервер почнуть читати роль); власник — акаунт за email.
+const ROLES: Role[] = ['accountant', 'master']
 
 export default function AccessAdminPage() {
   const navigate = useNavigate()
@@ -175,8 +177,11 @@ export default function AccessAdminPage() {
         <DialogTitle>Доступ: {userEdit?.email}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 0.5 }}>
-            <TextField select label="Роль" value={uRole} onChange={(e) => setURole(e.target.value as Role)} fullWidth>
-              {ROLES.map((r) => <MenuItem key={r} value={r}>{ROLE_LABELS[r]}</MenuItem>)}
+            <TextField select label="Роль" value={uRole} onChange={(e) => setURole(e.target.value as Role)} fullWidth
+              disabled={uRole === 'owner'} helperText={uRole === 'owner' ? 'Власник — обліковий запис за email, роль не змінюється' : undefined}>
+              {[...(ROLES.includes(uRole) ? [] : [uRole]), ...ROLES].map((r) => (
+                <MenuItem key={r} value={r} disabled={r === 'owner'}>{ROLE_LABELS[r]}</MenuItem>
+              ))}
             </TextField>
             <FormControlLabel control={<Switch checked={uActive} onChange={(e) => setUActive(e.target.checked)} />} label="Доступ активний" />
             {uRole === 'accountant' && <Alert severity="info">Бухгалтер: перегляд + виставлення на оплату по всіх центрах.</Alert>}

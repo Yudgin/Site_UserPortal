@@ -24,9 +24,10 @@ export function registerUserProfiles(app, deps) {
           lastLogin: nowIso(),
           updatedAt: nowIso(),
         }
+        // Владелец по email (с подтверждённой почтой) всегда должен иметь role='owner'/active.
+        const isOwner = dec.email === ADMIN_EMAIL && dec.email_verified === true
         if (!snap.exists) {
-          // Владелец по email — сразу owner; остальные — заготовка без доступа.
-          const isOwner = dec.email === ADMIN_EMAIL && dec.email_verified === true
+          // Первый вход: владелец — сразу owner; остальные — заготовка без доступа.
           tx.set(ref, {
             ...identity,
             role: isOwner ? 'owner' : 'master',
@@ -36,8 +37,9 @@ export function registerUserProfiles(app, deps) {
             createdBy: 'self',
           }, { merge: true })
         } else {
-          // Обновляем ТОЛЬКО identity — роль/центры/активность не трогаем.
-          tx.set(ref, identity, { merge: true })
+          // Повторный вход: обновляем identity; для владельца по email — само-исцеление до owner/active
+          // (на случай, если первый вход был без верификации почты). Роль остальных не трогаем.
+          tx.set(ref, { ...identity, ...(isOwner ? { role: 'owner', active: true } : {}) }, { merge: true })
         }
       })
       return res.json({ success: true })

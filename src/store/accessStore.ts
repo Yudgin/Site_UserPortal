@@ -40,7 +40,10 @@ export const useAccess = () => {
   const centers = useAccessStore((s) => s.centers)
   const loaded = useAccessStore((s) => s.loaded)
 
-  const isOwner = !!user && (isAdminEmail(user.email) || profile?.role === 'owner')
+  // Владелец: по email — всегда (единственный «несменяемый» владелец); по роли owner — только
+  // если профиль АКТИВЕН (чтобы деактивация делегированного владельца реально снимала доступ).
+  const emailOwner = !!user && isAdminEmail(user.email)
+  const isOwner = emailOwner || (!!profile && profile.active && profile.role === 'owner')
   const role: Role | null = isOwner ? 'owner' : profile?.active ? profile.role : null
 
   const can = (perm: CenterPermission, centerId?: string): boolean => {
