@@ -212,6 +212,12 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Шаблоны посылок Новой Почты (параметры для создания ТТН). Не-секрет; управляет владелец.
+    match /npTemplates/{id} {
+      allow read, list: if isPriceAdmin();
+      allow write: if isPriceAdmin();
+    }
+
     // Deny all other access by default
     match /{document=**} {
       allow read, write: if false;

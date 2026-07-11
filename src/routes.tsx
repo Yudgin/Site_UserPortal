@@ -42,6 +42,7 @@ import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
 import MasterPage from '@/pages/MasterPage'
 import FirmwareAccessAdminPage from '@/pages/FirmwareAccessAdminPage'
 import FopsAdminPage from '@/pages/FopsAdminPage'
+import NpTemplatesAdminPage from '@/pages/NpTemplatesAdminPage'
 import AccessAdminPage from '@/pages/AccessAdminPage'
 import ServiceRequestPage from '@/pages/ServiceRequestPage'
 import ServiceRequestsListPage from '@/pages/ServiceRequestsListPage'
@@ -214,6 +215,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <FopsAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Nova Poshta parcel templates - owner only (email-gated inside) */}
+      <Route
+        path="/np-templates"
+        element={
+          <AuthenticatedRoute>
+            <NpTemplatesAdminPage />
           </AuthenticatedRoute>
         }
       />

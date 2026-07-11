@@ -48,6 +48,7 @@ import {
   Insights as OwnerDashIcon,
   ManageAccounts as AccessIcon,
   Memory as FirmwareMenuIcon,
+  LocalShipping as ShippingIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
 } from '@mui/icons-material'
@@ -131,6 +132,9 @@ export default function Layout() {
       { text: 'База знаний', icon: <KnowledgeIcon />, path: '/knowledge-admin' },
       { text: 'Презентація', icon: <PresentationIcon />, path: '/presentation' },
       { text: 'Опросник', icon: <QuestionnaireIcon />, path: '/questionnaire' },
+    ] })
+    nav.push({ group: 'Доставка (Нова Пошта)', icon: <ShippingIcon />, items: [
+      { text: 'Шаблони посилок', icon: <ShippingIcon />, path: '/np-templates' },
     ] })
     nav.push({ group: 'Клієнти', icon: <ClientsIcon />, items: [
       { text: 'Клиенты', icon: <ClientsIcon />, path: '/clients-admin' },
