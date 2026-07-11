@@ -1,6 +1,8 @@
-// Диалог создания ТТН Новой Почты на ПРИЁМ кораблика: выбираем шаблон посылки + отделение
-// клиента (откуда шлёт) + оголошену вартість → создаём ТТН (от сервиса, плательщик клиент) и
-// сохраняем номер на заявке. Ошибку НП показываем текстом (первый прод-вызов — доводка маппинга).
+// Диалог создания ТТН Новой Почты. Сценарий берётся из выбранного шаблона:
+//  • приём (incoming): клиент сдаёт кораблик у себя (адрес — «звідки»), платит клиент.
+//  • возврат/новый/мелочи: сервис → клиент (адрес — «куди»), получатель = клиент; для возврата
+//    по умолчанию наложенный платёж = сумма факта (снимается сервером, если уже оплачено онлайн).
+// Ошибку НП показываем текстом (первый прод-вызов — доводка маппинга).
 import { useEffect, useMemo, useState } from 'react'
 import {
   Dialog, DialogTitle, DialogContent, DialogActions, Button, Stack, TextField, MenuItem, Alert,
@@ -9,12 +11,14 @@ import {
 import { npTemplateService } from '@/api/npTemplateService'
 import { npTtnApi } from '@/api/endpoints/npTtn'
 import { searchCities, getWarehouses, type NPCity, type NPWarehouse } from '@/api/endpoints/novaposhta'
-import { SIZE_LABELS, type NpTemplate } from '@/types/npTemplate'
+import { SIZE_LABELS, SCENARIO_LABELS, type NpTemplate } from '@/types/npTemplate'
 
-export default function CreateTtnDialog({ open, onClose, serviceRequestId, onCreated }: {
+export default function CreateTtnDialog({ open, onClose, serviceRequestId, clientName, clientPhone, onCreated }: {
   open: boolean
   onClose: () => void
   serviceRequestId: string
+  clientName?: string
+  clientPhone?: string
   onCreated: (ttn: string) => void
 }) {
   const [templates, setTemplates] = useState<NpTemplate[]>([])
@@ -29,29 +33,27 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, onCre
   const [err, setErr] = useState('')
   const [done, setDone] = useState<string | null>(null)
 
+  const tpl = useMemo(() => templates.find((t) => t.id === templateId) || null, [templates, templateId])
+  const scenario = tpl?.scenario || 'incoming'
+  const incoming = scenario === 'incoming'
+
   useEffect(() => {
     if (!open) return
-    setErr(''); setDone(null)
-    // Приёмные шаблоны (incoming), активные
+    setErr(''); setDone(null); setCity(null); setWarehouseRef('')
     npTemplateService.list().then((all) => {
-      const inc = all.filter((t) => t.active !== false && t.scenario === 'incoming')
-      setTemplates(inc)
-      setTemplateId((id) => id || (inc[0]?.id ?? ''))
+      const act = all.filter((t) => t.active !== false)
+      setTemplates(act)
+      setTemplateId((id) => id || (act[0]?.id ?? ''))
     })
   }, [open])
 
-  // Поиск городов НП по вводу
   useEffect(() => {
     if (cityQuery.trim().length < 2) { setCities([]); return }
     let alive = true
-    const t = setTimeout(async () => {
-      const res = await searchCities(cityQuery.trim())
-      if (alive) setCities(res)
-    }, 300)
+    const t = setTimeout(async () => { const r = await searchCities(cityQuery.trim()); if (alive) setCities(r) }, 300)
     return () => { alive = false; clearTimeout(t) }
   }, [cityQuery])
 
-  // Отделения выбранного города
   useEffect(() => {
     setWarehouses([]); setWarehouseRef('')
     if (!city?.Ref) return
@@ -65,6 +67,7 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, onCre
     setBusy(true); setErr('')
     const res = await npTtnApi.create({
       serviceRequestId, templateId, clientCityRef: city.Ref, clientWarehouseRef: warehouseRef, cost: Number(cost),
+      ...(incoming ? {} : { clientName, clientPhone }),
     })
     setBusy(false)
     if (res.ok && res.data) { setDone(res.data.ttn); onCreated(res.data.ttn) }
@@ -73,43 +76,40 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, onCre
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Створити ТТН на приймання кораблика</DialogTitle>
+      <DialogTitle>Створити ТТН Нової Пошти</DialogTitle>
       <DialogContent dividers>
         {done ? (
           <Alert severity="success">
-            ТТН створено: <b>{done}</b>. Номер збережено в заявці — тепер його можна надіслати клієнту
-            (кнопка «Повідомити про відправку» / оповіщення).
+            ТТН створено: <b>{done}</b>. Номер збережено в заявці — тепер його можна надіслати клієнту.
           </Alert>
         ) : (
           <Stack spacing={2} sx={{ pt: 1 }}>
-            <Typography variant="body2" color="text.secondary">
-              Посилка оформлюється від сервісу; клієнт здає кораблик у своєму відділенні за цим номером
-              і сплачує доставку готівкою при здачі.
-            </Typography>
             {templates.length === 0 ? (
-              <Alert severity="info">Немає шаблонів сценарію «приймання». Створіть їх на сторінці «Шаблони посилок».</Alert>
+              <Alert severity="info">Немає шаблонів посилок. Створіть їх на сторінці «Шаблони посилок».</Alert>
             ) : (
               <TextField select label="Шаблон посилки" value={templateId} onChange={(e) => setTemplateId(e.target.value)} size="small" fullWidth>
-                {templates.map((t) => <MenuItem key={t.id} value={t.id}>{t.name} · {SIZE_LABELS[t.size]} · {t.weight} кг</MenuItem>)}
+                {templates.map((t) => <MenuItem key={t.id} value={t.id}>{SCENARIO_LABELS[t.scenario]} · {t.name} · {SIZE_LABELS[t.size]}</MenuItem>)}
               </TextField>
             )}
+            <Typography variant="body2" color="text.secondary">
+              {incoming
+                ? 'Приймання: посилка оформлюється від сервісу; клієнт здає кораблик у своєму відділенні за цим номером і сплачує доставку готівкою при здачі.'
+                : `Відправлення клієнту (${SCENARIO_LABELS[scenario]}): отримувач — клієнт${scenario === 'return' && tpl?.cod ? '. Накладений платіж (сума факту) додається автоматично; якщо ремонт уже оплачено онлайн — не додається.' : '.'}`}
+            </Typography>
             <Autocomplete
               options={cities} getOptionLabel={(o) => o.Description || ''} filterOptions={(x) => x}
               value={city} onChange={(_, v) => setCity(v)} onInputChange={(_, v) => setCityQuery(v)}
               isOptionEqualToValue={(a, b) => a.Ref === b.Ref}
-              renderInput={(p) => <TextField {...p} label="Місто клієнта (звідки надсилає)" size="small" />}
+              renderInput={(p) => <TextField {...p} label={incoming ? 'Місто клієнта (звідки надсилає)' : 'Місто клієнта (куди надсилаємо)'} size="small" />}
             />
-            <TextField select label="Відділення клієнта" value={warehouseRef} onChange={(e) => setWarehouseRef(e.target.value)} size="small" fullWidth
+            <TextField select label={incoming ? 'Відділення клієнта (звідки)' : 'Відділення клієнта (куди)'} value={warehouseRef} onChange={(e) => setWarehouseRef(e.target.value)} size="small" fullWidth
               disabled={!city} helperText={city && warehouses.length === 0 ? 'Завантаження відділень…' : undefined}>
               {warehouses.map((w) => <MenuItem key={w.Ref} value={w.Ref}>{w.Description}</MenuItem>)}
             </TextField>
             <TextField label="Оголошена вартість, грн" type="number" value={cost} onChange={(e) => setCost(e.target.value)} size="small" fullWidth
-              helperText="Оціночна вартість кораблика для НП" />
-            {err && (
-              <Alert severity="error">
-                <Box sx={{ whiteSpace: 'pre-wrap' }}>{err}</Box>
-              </Alert>
-            )}
+              helperText="Оціночна вартість вмісту для НП" />
+            {!incoming && !clientPhone && <Alert severity="warning">У заявці немає телефону клієнта — отримувача НП може не вдатися створити.</Alert>}
+            {err && <Alert severity="error"><Box sx={{ whiteSpace: 'pre-wrap' }}>{err}</Box></Alert>}
           </Stack>
         )}
       </DialogContent>

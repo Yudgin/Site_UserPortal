@@ -15,6 +15,8 @@ export interface CreateTtnParams {
   clientWarehouseRef: string
   cost: number
   codAmount?: number
+  clientName?: string // для сценариев «сервис → клиент» (получатель)
+  clientPhone?: string
 }
 export interface CreateTtnResult {
   ttn: string

@@ -285,7 +285,7 @@ export default function ServiceRequestPage() {
 
         {/* Создание ТТН на приём + оповещение об отправке */}
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
-          <Button variant="contained" startIcon={<ShipIcon />} onClick={() => setTtnDialog(true)}>Створити ТТН (приймання)</Button>
+          <Button variant="contained" startIcon={<ShipIcon />} onClick={() => setTtnDialog(true)}>Створити ТТН</Button>
           <TextField value={ttnInput} onChange={(e) => setTtnInput(e.target.value)} size="small"
             label="ТТН (номер накладної)" placeholder={req.waybillNumber || 'напр. 20450…'} sx={{ minWidth: 220 }} />
           <Button variant="outlined" startIcon={<ShipIcon />} disabled={sending} onClick={sendTtn}>Повідомити про відправку</Button>
@@ -314,6 +314,7 @@ export default function ServiceRequestPage() {
       </Typography>
 
       <CreateTtnDialog open={ttnDialog} onClose={() => setTtnDialog(false)} serviceRequestId={id}
+        clientName={req.clientName} clientPhone={req.clientPhone}
         onCreated={(ttn) => { setTtnInput(ttn); setReq((r) => (r ? { ...r, waybillNumber: ttn } : r)); notify(`ТТН створено: ${ttn}`) }} />
 
       <Snackbar open={snack.open} autoHideDuration={5000} onClose={() => setSnack({ ...snack, open: false })} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
