@@ -15,6 +15,7 @@ import { registerServiceRequests } from './serviceRequests.js'
 import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
 import { registerClientProfiles } from './clientProfiles.js'
+import { registerUserProfiles } from './userProfiles.js'
 import { verifyFirebaseAdmin } from './adminAuth.js'
 import { rateLimit, combine } from './rateLimit.js'
 
@@ -1114,6 +1115,8 @@ registerManagerReply(app, messengerDeps)
 registerServiceRequests(app, { adminDb })
 // Публичный upsert профиля клиента (через сервер — чтобы аноним не перезаписывал чужой PII).
 registerClientProfiles(app, { adminDb })
+// Саморегистрация сотрудника при входе (identity; роль назначает владелец).
+registerUserProfiles(app, { adminDb })
 // Журнал информирования клиента: авто-выбор канала (мессенджер в окне / иначе SMS).
 registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUrl: SITE_URL })
 

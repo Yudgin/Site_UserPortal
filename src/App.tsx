@@ -6,6 +6,8 @@ import { useBoatStore } from '@/store/boatStore'
 import { useSettingsStore } from '@/store/settingsStore'
 import { firebaseAuth } from '@/api/firebase'
 import { isAdminEmail } from '@/config/access'
+import { useAccessStore } from '@/store/accessStore'
+import { userProfileService } from '@/api/userProfileService'
 
 function App() {
   const { setUser, setLoading, isLoading } = useAuthStore()
@@ -30,6 +32,12 @@ function App() {
           lastLogin: new Date().toISOString(),
         })
 
+        // Саморегистрация identity (для реестра сотрудников) + загрузка роли/центров (RBAC).
+        // Роль НЕ выдаём с клиента — только владелец назначает; здесь лишь читаем свой профиль.
+        userProfileService.registerSelf().finally(() => {
+          useAccessStore.getState().load(firebaseUser.uid)
+        })
+
         // Load user data from Firestore
         await Promise.all([
           loadBoatsFromServer(),
@@ -37,6 +45,7 @@ function App() {
         ])
       } else {
         setUser(null)
+        useAccessStore.getState().clear()
         // Clear local stores on logout
         useBoatStore.setState({ boats: [], selectedBoatId: null, isSynced: false })
         useSettingsStore.setState({

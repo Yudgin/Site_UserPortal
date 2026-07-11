@@ -61,6 +61,22 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Профили сотрудников (роли/центры/права). Своё — читать можно; список — владелец.
+    // Запись роли/центров/активности — ТОЛЬКО владелец. Саморегистрацию identity делает backend
+    // (Admin SDK минует правила), чтобы клиент не мог сам себе выдать роль.
+    match /users/{userId} {
+      allow get: if isPriceAdmin() || (request.auth != null && request.auth.uid == userId);
+      allow list: if isPriceAdmin();
+      allow write: if isPriceAdmin();
+    }
+
+    // Реестр сервисных центров (зон). Читать — авторизованным (мастерам нужны назви);
+    // создавать/менять — только владелец.
+    match /serviceCenters/{centerId} {
+      allow read, list: if request.auth != null;
+      allow write: if isPriceAdmin();
+    }
+
     // Сметы. Прямое чтение — ТОЛЬКО администратор (внутренняя экономика: ставка, подытоги,
     // сезонный коэф., createdBy, requestId/PII). Клиент видит смету через backend
     // /api/estimates/:id/public — безопасный вид без внутренних полей.

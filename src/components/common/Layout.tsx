@@ -45,6 +45,7 @@ import {
   Payments as PaymentsIcon,
   AssignmentTurnedIn as RequestIcon,
   Insights as OwnerDashIcon,
+  ManageAccounts as AccessIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { useBoatStore } from '@/store/boatStore'
@@ -101,6 +102,7 @@ export default function Layout() {
   // Add admin menu for developers only
   if (user?.role === 'developer') {
     menuItems.push({ text: 'Панель власника', icon: <OwnerDashIcon />, path: '/owner' })
+    menuItems.push({ text: 'Доступ та центри', icon: <AccessIcon />, path: '/access' })
     menuItems.push({ text: 'Прайс-лист', icon: <PriceListIcon />, path: '/pricelist-admin' })
     menuItems.push({ text: 'Пропозиція клієнту', icon: <EstimateIcon />, path: '/offer-editor' })
     menuItems.push({ text: 'Фактична калькуляція', icon: <EstimateIcon />, path: '/actual-estimate' })

@@ -16,4 +16,17 @@ export const verifyFirebaseAdmin = async (req) => {
   }
 }
 
+// Проверить, что запрос сделан ЛЮБЫМ аутентифицированным пользователем. Возвращает
+// декодированный токен { uid, email, ... } или null (для саморегистрации/резолва роли).
+export const verifyFirebaseUser = async (req) => {
+  const m = (req.get('authorization') || '').match(/^Bearer (.+)$/)
+  if (!m) return null
+  try {
+    return await getAuth().verifyIdToken(m[1], true)
+  } catch {
+    return null
+  }
+}
+
+export { ADMIN_EMAIL }
 export default verifyFirebaseAdmin

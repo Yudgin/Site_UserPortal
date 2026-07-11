@@ -39,6 +39,7 @@ import OfferEditorPage from '@/pages/OfferEditorPage'
 import OfferSharePage from '@/pages/OfferSharePage'
 import PaymentsAdminPage from '@/pages/PaymentsAdminPage'
 import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
+import AccessAdminPage from '@/pages/AccessAdminPage'
 import ServiceRequestPage from '@/pages/ServiceRequestPage'
 import ServiceRequestsListPage from '@/pages/ServiceRequestsListPage'
 import Layout from '@/components/common/Layout'
@@ -190,6 +191,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <OwnerDashboardPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Access & service centers management (owner-gated inside) */}
+      <Route
+        path="/access"
+        element={
+          <AuthenticatedRoute>
+            <AccessAdminPage />
           </AuthenticatedRoute>
         }
       />
