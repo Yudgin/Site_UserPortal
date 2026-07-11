@@ -26,6 +26,7 @@ import { SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequest
 import type { EstimateOffer, Estimate } from '@/types/pricing'
 import type { PreliminaryEstimate } from '@/types/chat'
 import { NOTIFICATION_EVENT_LABELS, type ClientNotification } from '@/types/notification'
+import CreateTtnDialog from '@/components/CreateTtnDialog'
 
 const STATUSES = Object.keys(SERVICE_REQUEST_STATUS_LABELS) as ServiceRequestStatus[]
 
@@ -46,6 +47,7 @@ export default function ServiceRequestPage() {
   const [notifText, setNotifText] = useState('') // произвольное сообщение клиенту
   const [ttnInput, setTtnInput] = useState('') // номер ТТН для оповещения об отправке
   const [sending, setSending] = useState(false)
+  const [ttnDialog, setTtnDialog] = useState(false) // диалог создания ТТН на приём
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
@@ -281,8 +283,9 @@ export default function ServiceRequestPage() {
           <Button variant="contained" startIcon={<SendIcon />} disabled={sending || !notifText.trim()} onClick={sendCustom}>Надіслати</Button>
         </Stack>
 
-        {/* Оповещение об отправке (ТТН) */}
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} alignItems={{ sm: 'center' }}>
+        {/* Создание ТТН на приём + оповещение об отправке */}
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
+          <Button variant="contained" startIcon={<ShipIcon />} onClick={() => setTtnDialog(true)}>Створити ТТН (приймання)</Button>
           <TextField value={ttnInput} onChange={(e) => setTtnInput(e.target.value)} size="small"
             label="ТТН (номер накладної)" placeholder={req.waybillNumber || 'напр. 20450…'} sx={{ minWidth: 220 }} />
           <Button variant="outlined" startIcon={<ShipIcon />} disabled={sending} onClick={sendTtn}>Повідомити про відправку</Button>
@@ -309,6 +312,9 @@ export default function ServiceRequestPage() {
       <Typography variant="caption" color="text.secondary">
         Порядок: заявка → пропозиція (варіанти) → клієнт обирає → фактична калькуляція → оплата (авто-чек).
       </Typography>
+
+      <CreateTtnDialog open={ttnDialog} onClose={() => setTtnDialog(false)} serviceRequestId={id}
+        onCreated={(ttn) => { setTtnInput(ttn); setReq((r) => (r ? { ...r, waybillNumber: ttn } : r)); notify(`ТТН створено: ${ttn}`) }} />
 
       <Snackbar open={snack.open} autoHideDuration={5000} onClose={() => setSnack({ ...snack, open: false })} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
         <Alert severity={snack.sev} onClose={() => setSnack({ ...snack, open: false })}>{snack.msg}</Alert>

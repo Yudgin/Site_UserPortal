@@ -15,6 +15,7 @@ import { registerServiceRequests } from './serviceRequests.js'
 import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
 import { registerFopsAdmin } from './fopsAdmin.js'
+import { registerNpTtn } from './novaPoshtaTtn.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
 import { registerUserProfiles } from './userProfiles.js'
@@ -1126,6 +1127,8 @@ registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUr
 registerPayments(app, { adminDb })
 // Управление ФОПами (владелец): мета в Firestore, секреты write-only (fopSecrets, backend-only).
 registerFopsAdmin(app, { adminDb, refreshFops })
+// Создание ТТН Новой Почты (InternetDocument.save) по шаблону — сценарий «приём кораблика».
+registerNpTtn(app, { adminDb })
 // Подгружаем ФОПы из Firestore на старте (перекрывают ENV-сид, если заданы).
 refreshFops(adminDb).catch((e) => console.error('initial refreshFops:', e?.message || e))
 // Периодический рефреш — чтобы ДРУГИЕ инстансы Cloud Run подхватили изменения ФОПов (кэш в памяти
