@@ -14,6 +14,8 @@ import { registerManagerReply } from './managerReply.js'
 import { registerServiceRequests } from './serviceRequests.js'
 import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
+import { registerFopsAdmin } from './fopsAdmin.js'
+import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
 import { registerUserProfiles } from './userProfiles.js'
 import { verifyFirebaseAdmin } from './adminAuth.js'
@@ -1122,6 +1124,10 @@ registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUr
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 registerPayments(app, { adminDb })
+// Управление ФОПами (владелец): мета в Firestore, секреты write-only (fopSecrets, backend-only).
+registerFopsAdmin(app, { adminDb, refreshFops })
+// Подгружаем ФОПы из Firestore на старте (перекрывают ENV-сид, если заданы).
+refreshFops(adminDb).catch((e) => console.error('initial refreshFops:', e?.message || e))
 
 // JSON Server for mock API (данные карты-портала: boats/reservoirs/…).
 // Изолируем: сбой mock-роутера (напр. отсутствует db.json) НЕ должен ронять сервер ботов/AI.

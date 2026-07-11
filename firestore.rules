@@ -202,6 +202,16 @@ service cloud.firestore {
       allow write: if isPriceAdmin();
     }
 
+    // ФОПы: мета (fops) и СЕКРЕТЫ (fopSecrets — платёжные ключи/токени) доступны ТОЛЬКО backend-у
+    // (Admin SDK минует правила). Клиентский доступ запрещён повністю — секрети не потрапляють у браузер.
+    // Управление — через /api/fops/admin (перевірка власника на сервері).
+    match /fops/{id} {
+      allow read, write: if false;
+    }
+    match /fopSecrets/{id} {
+      allow read, write: if false;
+    }
+
     // Deny all other access by default
     match /{document=**} {
       allow read, write: if false;

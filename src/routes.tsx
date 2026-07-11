@@ -41,6 +41,7 @@ import PaymentsAdminPage from '@/pages/PaymentsAdminPage'
 import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
 import MasterPage from '@/pages/MasterPage'
 import FirmwareAccessAdminPage from '@/pages/FirmwareAccessAdminPage'
+import FopsAdminPage from '@/pages/FopsAdminPage'
 import AccessAdminPage from '@/pages/AccessAdminPage'
 import ServiceRequestPage from '@/pages/ServiceRequestPage'
 import ServiceRequestsListPage from '@/pages/ServiceRequestsListPage'
@@ -203,6 +204,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <FirmwareAccessAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* ФОП management - owner only (email-gated inside) */}
+      <Route
+        path="/fops"
+        element={
+          <AuthenticatedRoute>
+            <FopsAdminPage />
           </AuthenticatedRoute>
         }
       />

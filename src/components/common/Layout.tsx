@@ -140,6 +140,7 @@ export default function Layout() {
     nav.push({ group: 'Доступ і система', icon: <AccessIcon />, items: [
       { text: 'Доступ та центри', icon: <AccessIcon />, path: '/access' },
       { text: 'Доступ до прошивок', icon: <FirmwareMenuIcon />, path: '/firmware-access' },
+      { text: 'ФОПи та ключі', icon: <PaymentsIcon />, path: '/fops' },
       { text: 'Admin', icon: <AdminIcon />, path: '/admin' },
     ] })
   }
