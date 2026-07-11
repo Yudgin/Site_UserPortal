@@ -40,6 +40,7 @@ import OfferSharePage from '@/pages/OfferSharePage'
 import PaymentsAdminPage from '@/pages/PaymentsAdminPage'
 import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
 import MasterPage from '@/pages/MasterPage'
+import FirmwareAccessAdminPage from '@/pages/FirmwareAccessAdminPage'
 import AccessAdminPage from '@/pages/AccessAdminPage'
 import ServiceRequestPage from '@/pages/ServiceRequestPage'
 import ServiceRequestsListPage from '@/pages/ServiceRequestsListPage'
@@ -192,6 +193,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <OwnerDashboardPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Firmware access management - owner only (email-gated inside) */}
+      <Route
+        path="/firmware-access"
+        element={
+          <AuthenticatedRoute>
+            <FirmwareAccessAdminPage />
           </AuthenticatedRoute>
         }
       />

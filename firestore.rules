@@ -195,8 +195,10 @@ service cloud.firestore {
       allow write: if isPriceAdmin();
     }
     // Персональный доступ пользователя к прошивкам (ключ = email). Отдельно от users (RBAC по uid).
+    // get — вошедший читает свой док (страница прошивок); list всех грантов — только владелец.
     match /firmwareUserAccess/{email} {
-      allow read: if request.auth != null;
+      allow get: if request.auth != null;
+      allow list: if isPriceAdmin();
       allow write: if isPriceAdmin();
     }
 

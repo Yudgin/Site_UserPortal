@@ -192,4 +192,35 @@ export const firmwareCatalogService = {
       return { brands: [], branches: [] }
     }
   },
+
+  // Выдать пользователю персональный доступ к брендам/веткам (перезаписывает списки). Пустые
+  // списки → удаляем документ (нет персональных грантов).
+  setUserFirmwareAccess: async (email: string, allowedBrands: string[], allowedBranches: string[]): Promise<boolean> => {
+    if (!db || !email) return false
+    try {
+      const ref = doc(db, 'firmwareUserAccess', email.toLowerCase())
+      await setDoc(ref, { email: email.toLowerCase(), allowedBrands, allowedBranches, updatedAt: new Date().toISOString() }, { merge: true })
+      return true
+    } catch (error) {
+      console.error('Error setting user firmware access:', error)
+      return false
+    }
+  },
+
+  // Все персональные гранты (для админ-страницы управления доступом).
+  listUserAccess: async (): Promise<{ email: string; brands: string[]; branches: string[] }[]> => {
+    if (!db) return []
+    try {
+      const snap = await getDocs(collection(db, 'firmwareUserAccess'))
+      return snap.docs
+        .map((d) => {
+          const v = d.data() as { allowedBrands?: string[]; allowedBranches?: string[] }
+          return { email: d.id, brands: v.allowedBrands || [], branches: v.allowedBranches || [] }
+        })
+        .filter((u) => u.brands.length > 0 || u.branches.length > 0)
+    } catch (error) {
+      console.error('Error listing user firmware access:', error)
+      return []
+    }
+  },
 }
