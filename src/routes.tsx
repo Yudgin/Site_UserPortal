@@ -38,6 +38,7 @@ import EstimateSharePage from '@/pages/EstimateSharePage'
 import OfferEditorPage from '@/pages/OfferEditorPage'
 import OfferSharePage from '@/pages/OfferSharePage'
 import PaymentsAdminPage from '@/pages/PaymentsAdminPage'
+import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
 import ServiceRequestPage from '@/pages/ServiceRequestPage'
 import ServiceRequestsListPage from '@/pages/ServiceRequestsListPage'
 import Layout from '@/components/common/Layout'
@@ -179,6 +180,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <FeedbackAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Owner dashboard - business overview (email-gated inside) */}
+      <Route
+        path="/owner"
+        element={
+          <AuthenticatedRoute>
+            <OwnerDashboardPage />
           </AuthenticatedRoute>
         }
       />

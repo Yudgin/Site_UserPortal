@@ -3,8 +3,10 @@
 // (бинарный digest). Тот же алгоритм — для проверки входящего вебхука на server_url.
 // Ключи берутся ПЕР-ФОП (fop.liqpay), чтобы деньги и чек шли от нужного ФОП.
 import crypto from 'crypto'
+import axios from 'axios'
 
 const CHECKOUT_URL = 'https://www.liqpay.ua/api/3/checkout'
+const REQUEST_URL = 'https://www.liqpay.ua/api/request'
 
 // data = base64(JSON(params))
 const encodeData = (params) => Buffer.from(JSON.stringify(params)).toString('base64')
@@ -57,4 +59,23 @@ export const verifyCallback = (fop, data, signature) => {
   }
 }
 
-export default { buildCheckout, decodeCallbackData, verifyCallback, liqpaySignature }
+// Запрос статуса платежа напрямую у LiqPay (для reconcile потерянного success-колбэка).
+// Возвращает распарсенный ответ { status, amount, paytype, payment_id, ... } или null при ошибке.
+export const queryStatus = async (fop, orderId) => {
+  const lp = (fop && fop.liqpay) || {}
+  if (!lp.publicKey || !lp.privateKey) return null
+  const data = encodeData({ public_key: lp.publicKey, version: 3, action: 'status', order_id: String(orderId) })
+  const signature = liqpaySignature(lp.privateKey, data)
+  try {
+    const body = new URLSearchParams({ data, signature }).toString()
+    const r = await axios.post(REQUEST_URL, body, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000,
+    })
+    return r.data
+  } catch (e) {
+    console.error('liqpay queryStatus:', e.message)
+    return null
+  }
+}
+
+export default { buildCheckout, decodeCallbackData, verifyCallback, liqpaySignature, queryStatus }

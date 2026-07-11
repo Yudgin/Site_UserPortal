@@ -610,6 +610,37 @@ export function registerPayments(app, deps) {
         await fiscalize(o, o.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : 'Оплата частинами (monobank)')
       }
     } catch (e) { console.error('reconcile failed query:', e.message) }
+    // 3) LiqPay «pending» дольше 5 минут — спросить статус напрямую (потерянный success-колбэк:
+    // деньги списаны, вебхук не дошёл → оплата зависла без чека). Свежие не трогаем (клиент ещё платит).
+    try {
+      const cutoff = Date.now() - 5 * 60 * 1000
+      const pend = await col().where('status', '==', 'pending').limit(50).get()
+      for (const doc of pend.docs) {
+        const o = doc.data()
+        if (o.provider !== 'liqpay') continue
+        if (o.createdAt && Date.parse(o.createdAt) > cutoff) continue
+        const fop = getFop(o.fopId)
+        if (!fop) continue
+        checked++
+        try {
+          const st = await liqpay.queryStatus(fop, o.orderId)
+          const s = st && st.status
+          if (s === 'success' || s === 'wait_compensation') {
+            // Оплачено. Сверяем сумму (как вебхук) прежде чем помечать paid и бить чек.
+            const paidAmt = Number(st.amount)
+            if (Number.isFinite(paidAmt) && Math.abs(paidAmt - Number(o.amount)) < 0.01) {
+              await saveOrder({ orderId: o.orderId, status: 'paid', paytype: st.paytype || o.method, providerOrderId: st.payment_id ? String(st.payment_id) : o.providerOrderId })
+              await fiscalize({ ...o, status: 'paid' }, 'Оплата частинами (LiqPay)')
+            } else {
+              console.warn('reconcile liqpay: сумма не совпала, чек НЕ бьём', o.orderId, paidAmt, o.amount)
+            }
+          } else if (s === 'failure' || s === 'error' || s === 'reversed') {
+            await saveOrder({ orderId: o.orderId, status: s }) // окончательно не прошёл
+          }
+          // processing/wait_accept/wait_secure и т.п. — оставляем pending, проверим позже
+        } catch (e) { console.error('reconcile liqpay', o.orderId, e.message) }
+      }
+    } catch (e) { console.error('reconcile liqpay pending query:', e.message) }
     return { checked }
   }
 
