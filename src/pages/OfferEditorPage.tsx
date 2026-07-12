@@ -8,11 +8,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, Snackbar, CircularProgress, Divider,
-  Table, TableBody, TableCell, TableContainer, TableHead, TableRow, IconButton, TextField,
-  Autocomplete, Chip, Stack, ToggleButton, ToggleButtonGroup, List, ListItem, ListItemText,
+  Chip, Stack, TextField, List, ListItem, ListItemText,
 } from '@mui/material'
 import {
-  Delete as DeleteIcon, Home as HomeIcon, ContentCopy as CopyIcon, AddCircle as AddVariantIcon,
+  Home as HomeIcon, ContentCopy as CopyIcon, AddCircle as AddVariantIcon,
   Build as ActualIcon, CheckCircle as CheckIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
@@ -22,14 +21,15 @@ import { pricingService } from '@/api/pricingService'
 import { serviceRequestService } from '@/api/serviceRequestService'
 import { notificationApi } from '@/api/endpoints/notification'
 import { secureId } from '@/utils/id'
-import { buildEstimate, tName, formatMoney, type EstimateWorkInput } from '@/utils/pricing'
+import { buildMultiEstimate, formatMoney } from '@/utils/pricing'
+import { estimateToSections, toComplaintSections, type EditableSection } from '@/utils/estimateSections'
 import { buildPriceContext } from '@/utils/aiContext'
-import AiWorkPicker from '@/components/AiWorkPicker'
 import ViewAsButton from '@/components/ViewAsButton'
+import SectionsWorksEditor from '@/components/SectionsWorksEditor'
+import EstimateSectionsView from '@/components/EstimateSectionsView'
 import { VIEW_ROLE_LABELS, type ViewRole } from '@/types/access'
-import type { Estimate, EstimateOffer, ServiceKind } from '@/types/pricing'
+import type { Estimate, EstimateOffer } from '@/types/pricing'
 
-interface WorkRow extends EstimateWorkInput { key: string }
 interface VariantEntry { id: string; label: string; total: number }
 
 export default function OfferEditorPage() {
@@ -47,14 +47,13 @@ export default function OfferEditorPage() {
   const [title, setTitle] = useState('')
   const [diagSeed, setDiagSeed] = useState('') // диагностика заявки → засев ИИ-подбора
   const [loadedSrId, setLoadedSrId] = useState('') // serviceRequestId, вычитанный из открытого оффера
-  const [serviceKind, setServiceKind] = useState<ServiceKind>('repair')
   const [variants, setVariants] = useState<VariantEntry[]>([])
   const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null)
   const [offerStatus, setOfferStatus] = useState<'pending_choice' | 'chosen' | 'locked' | null>(null)
 
-  // текущий собираемый вариант
+  // текущий собираемый вариант — разрезы по требованиям клиента
   const [label, setLabel] = useState('')
-  const [rows, setRows] = useState<WorkRow[]>([])
+  const [sections, setSections] = useState<EditableSection[]>([])
 
   const [saving, setSaving] = useState(false)
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' | 'info' }>({ open: false, msg: '', sev: 'success' })
@@ -62,15 +61,15 @@ export default function OfferEditorPage() {
 
   useEffect(() => { loadFromServer() }, [loadFromServer])
 
-  // Засев работ из существующей сметы (оценка ИИ / вариант) — по labor-строкам
+  // Засев из существующей сметы (оценка ИИ / вариант) — разрезами по требованиям.
   useEffect(() => {
     if (!parentId) return
     pricingService.loadEstimate(parentId).then((est) => {
       if (!est) return
-      setRows(est.lines.filter((l) => l.type === 'labor').map((l, i) => ({ key: `p${i}`, workId: l.refId, qty: l.qty })))
+      setSections((prev) => prev.length ? prev : estimateToSections(est, indexed))
       setLabel((v) => v || 'Варіант 1')
     })
-  }, [parentId])
+  }, [parentId, indexed])
 
   // Авто-название предложения из заявки (кораблик + скарга); мастер за потреби відредагує.
   useEffect(() => {
@@ -103,30 +102,17 @@ export default function OfferEditorPage() {
     })
   }, [loadOfferId])
 
-  const activeWorks = useMemo(() => Object.values(indexed.works).filter((w) => w.active), [indexed])
-  // Наборы разделены по направлениям — показываем только для выбранного (Ремонт/Апгрейд).
-  const activeKits = useMemo(() => Object.values(indexed.kits).filter((k) => k.active && k.serviceKind === serviceKind), [indexed, serviceKind])
   const priceCtx = useMemo(() => buildPriceContext(catalog), [catalog])
-  const addWorks = (works: EstimateWorkInput[]) =>
-    setRows((r) => [...r, ...works.map((w, i) => ({ key: `ai${Date.now()}${i}`, workId: w.workId, qty: w.qty }))])
 
+  // Текущий вариант считается из разрезов по требованиям (мульти-жалобы + авто общие работы).
   const currentEstimate: Estimate | null = useMemo(() => {
-    const works = rows.filter((r) => r.workId && indexed.works[r.workId]).map((r) => ({ workId: r.workId, qty: r.qty }))
-    if (!works.length) return null
-    return buildEstimate({
-      works, catalog: indexed, settings: catalog.settings, serviceKind,
+    const cs = toComplaintSections(sections, indexed)
+    if (!cs.length) return null
+    return buildMultiEstimate({
+      sections: cs, catalog: indexed, settings: catalog.settings,
       meta: { title, source: 'manual', createdBy: user?.email ?? null },
     })
-  }, [rows, indexed, catalog.settings, serviceKind, title, user])
-
-  const addRow = (workId: string) => setRows((r) => [...r, { key: `w${Date.now()}${r.length}`, workId, qty: 1 }])
-  const addKit = (kitId: string) => {
-    const kit = indexed.kits[kitId]
-    if (!kit) return
-    setRows((r) => [...r, ...kit.items.filter((it) => indexed.works[it.workId]?.active).map((it, i) => ({ key: `k${Date.now()}${i}`, workId: it.workId, qty: it.qty }))])
-  }
-  const setQty = (key: string, qty: number) => setRows((r) => r.map((x) => (x.key === key ? { ...x, qty: Math.max(0.1, qty) } : x)))
-  const removeRow = (key: string) => setRows((r) => r.filter((x) => x.key !== key))
+  }, [sections, indexed, catalog.settings, title, user])
 
   const clientLink = offerId ? `${window.location.origin}/offer/${offerId}` : ''
 
@@ -185,7 +171,7 @@ export default function OfferEditorPage() {
       setOfferId(oid)
       setOfferStatus((s) => s || 'pending_choice')
       // очистить конструктор под следующий вариант
-      setRows([])
+      setSections([])
       setLabel(`Варіант ${nextVariants.length + 1}`)
       notify('Варіант додано до пропозиції', 'success')
     } catch (e) {
@@ -234,13 +220,7 @@ export default function OfferEditorPage() {
       </Typography>
 
       <Paper sx={{ p: 2, mb: 3 }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 2 }}>
-          <TextField label="Назва пропозиції / кораблик" value={title} onChange={(e) => setTitle(e.target.value)} size="small" fullWidth />
-          <ToggleButtonGroup size="small" exclusive value={serviceKind} onChange={(_e, v) => v && setServiceKind(v)}>
-            <ToggleButton value="repair">Ремонт</ToggleButton>
-            <ToggleButton value="upgrade">Апгрейд</ToggleButton>
-          </ToggleButtonGroup>
-        </Stack>
+        <TextField label="Назва пропозиції / кораблик" value={title} onChange={(e) => setTitle(e.target.value)} size="small" fullWidth />
       </Paper>
 
       {/* Уже добавленные варианты */}
@@ -272,54 +252,18 @@ export default function OfferEditorPage() {
         </Paper>
       )}
 
-      {/* Конструктор текущего варианта */}
+      {/* Конструктор текущего варианта — разрезами по требованиям клиента */}
       <Paper sx={{ p: 2, mb: 3 }}>
         <Typography variant="subtitle1" sx={{ mb: 1.5 }}>{variants.length ? 'Наступний варіант' : 'Варіант'}</Typography>
         <TextField label="Назва варіанта" value={label} onChange={(e) => setLabel(e.target.value)} size="small" sx={{ mb: 2, maxWidth: 360 }} fullWidth
           placeholder="напр. Повний ремонт" />
-        <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ mb: 2 }}>
-          <Autocomplete sx={{ flex: 2 }} size="small" options={activeWorks} getOptionLabel={(w) => `${w.code} · ${tName(w.name, 'uk')}`}
-            onChange={(_e, w) => w && addRow(w.id)} renderInput={(p) => <TextField {...p} label="Додати роботу" />} value={null} blurOnSelect clearOnBlur />
-          <Autocomplete sx={{ flex: 2 }} size="small" options={activeKits} getOptionLabel={(k) => `${k.code} · ${tName(k.name, 'uk')}`}
-            onChange={(_e, k) => k && addKit(k.id)} renderInput={(p) => <TextField {...p} label="Додати набір" />} value={null} blurOnSelect clearOnBlur />
-          <AiWorkPicker priceContext={priceCtx} catalog={indexed} onAdd={addWorks} initialDescription={diagSeed} />
-        </Stack>
+        <SectionsWorksEditor sections={sections} onChange={setSections} catalog={indexed} priceContext={priceCtx} aiSeed={diagSeed} />
 
-        {rows.length === 0 ? (
-          <Alert severity="info">Додайте роботи або набір до варіанта.</Alert>
-        ) : (
-          <TableContainer>
-            <Table size="small">
-              <TableHead>
-                <TableRow sx={{ bgcolor: 'action.hover' }}>
-                  <TableCell>Позиція</TableCell>
-                  <TableCell align="right">К-сть / Сума</TableCell>
-                  <TableCell width={48} />
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {rows.map((r) => {
-                  const w = indexed.works[r.workId]
-                  return (
-                    <TableRow key={r.key}>
-                      <TableCell>{w ? `${w.code} · ${tName(w.name, 'uk')}` : r.workId}</TableCell>
-                      <TableCell align="right">
-                        <TextField type="number" size="small" value={r.qty} onChange={(e) => setQty(r.key, Number(e.target.value))} inputProps={{ min: 0.1, step: 0.5 }} sx={{ width: 80 }} />
-                      </TableCell>
-                      <TableCell><IconButton size="small" onClick={() => removeRow(r.key)}><DeleteIcon fontSize="small" /></IconButton></TableCell>
-                    </TableRow>
-                  )
-                })}
-                {currentEstimate && (
-                  <TableRow>
-                    <TableCell><b>Разом варіант</b></TableCell>
-                    <TableCell align="right"><b>{formatMoney(currentEstimate.total)}</b></TableCell>
-                    <TableCell />
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </TableContainer>
+        {currentEstimate && (
+          <Box sx={{ mt: 2, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>Попередній перегляд варіанта</Typography>
+            <EstimateSectionsView lines={currentEstimate.lines} sections={currentEstimate.sections} total={currentEstimate.total} currency={currentEstimate.currency} />
+          </Box>
         )}
 
         <Button variant="contained" startIcon={<AddVariantIcon />} onClick={addVariant} disabled={!currentEstimate || saving} sx={{ mt: 2 }}>

@@ -7,13 +7,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, CircularProgress, Divider,
-  Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip, Stack, TextField, MenuItem,
+  Chip, Stack, TextField, MenuItem,
 } from '@mui/material'
 import {
   Payment as PaymentIcon, Receipt as ReceiptIcon, CheckCircle as CheckIcon, Refresh as RefreshIcon,
 } from '@mui/icons-material'
 import { paymentsApi, submitLiqpayCheckout, FopPublic, PayMethod, SafeEstimate } from '@/api/endpoints/payments'
 import { compareEstimates, tName, formatMoney } from '@/utils/pricing'
+import EstimateSectionsView from '@/components/EstimateSectionsView'
 import type { Estimate } from '@/types/pricing'
 
 const ORDER_KEY = (id: string) => `rf_pay_order_${id}`
@@ -159,36 +160,10 @@ export default function EstimateSharePage() {
       {rejected && <Alert severity="info" sx={{ mb: 3 }}>Ви відхилили цей кошторис. Зв'яжіться з майстром для уточнення.</Alert>}
       {needsApproval && <Alert severity="warning" sx={{ mb: 3 }}>Обсяг робіт змінився — перегляньте зміни та погодьте кошторис, щоб перейти до оплати.</Alert>}
 
-      {/* Позиции */}
+      {/* Позиции — разрезами по требованиям клиента */}
       <Paper sx={{ p: 2, mb: 3 }}>
-        <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Склад робіт і матеріалів</Typography>
-        <TableContainer>
-          <Table size="small">
-            <TableHead>
-              <TableRow sx={{ bgcolor: 'action.hover' }}>
-                <TableCell>Позиція</TableCell>
-                <TableCell align="right">К-сть</TableCell>
-                <TableCell align="right">Сума</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {est.lines.map((l, i) => (
-                <TableRow key={i}>
-                  <TableCell>
-                    {tName(l.name, 'uk')}
-                    {l.type !== 'labor' && <Chip size="small" label={l.type === 'material' ? 'матеріал' : 'послуга'} sx={{ ml: 1 }} />}
-                  </TableCell>
-                  <TableCell align="right">{l.qty}</TableCell>
-                  <TableCell align="right">{formatMoney(l.lineTotal)}</TableCell>
-                </TableRow>
-              ))}
-              <TableRow>
-                <TableCell colSpan={2}><b>Разом до сплати</b></TableCell>
-                <TableCell align="right"><b>{formatMoney(est.total)}</b></TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
-        </TableContainer>
+        <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Склад робіт за вашими вимогами</Typography>
+        <EstimateSectionsView lines={est.lines} sections={est.sections} total={est.total} currency={est.currency} />
       </Paper>
 
       {/* Что изменилось (diff) */}

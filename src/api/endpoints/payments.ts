@@ -67,6 +67,7 @@ export interface SafeEstimateLine {
   qty: number
   unitPrice: number
   lineTotal: number
+  complaintIndex?: number | null // к какому требованию (секции) относится
 }
 export interface SafeEstimate {
   id: string
@@ -79,6 +80,7 @@ export interface SafeEstimate {
   total: number
   currency: string
   lines: SafeEstimateLine[]
+  sections?: { complaint: string; serviceKind?: 'repair' | 'upgrade' | null }[] | null // разрезы по требованиям
   fopId: string | null
   payMethods?: PayMethodKey[] // разрешённые способы оплаты (ключи; ФОП резолвит сервер)
   parentEstimateId: string | null

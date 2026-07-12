@@ -7,11 +7,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, CircularProgress, Chip, Stack, Divider,
-  Table, TableBody, TableCell, TableContainer, TableRow,
 } from '@mui/material'
 import { CheckCircle as CheckIcon } from '@mui/icons-material'
 import { paymentsApi, OfferPublicView } from '@/api/endpoints/payments'
-import { tName, formatMoney } from '@/utils/pricing'
+import { formatMoney } from '@/utils/pricing'
+import EstimateSectionsView from '@/components/EstimateSectionsView'
 
 export default function OfferSharePage() {
   const { id = '' } = useParams<{ id: string }>()
@@ -88,21 +88,7 @@ export default function OfferSharePage() {
                 </Typography>
                 <Typography variant="h6" color="primary">{formatMoney(v.total)}</Typography>
               </Box>
-              <TableContainer>
-                <Table size="small">
-                  <TableBody>
-                    {v.lines.map((l, i) => (
-                      <TableRow key={i}>
-                        <TableCell sx={{ border: 0, py: 0.25 }}>
-                          {tName(l.name, 'uk')}
-                          {l.type !== 'labor' && <Chip size="small" label={l.type === 'material' ? 'матеріал' : 'послуга'} sx={{ ml: 1 }} />}
-                        </TableCell>
-                        <TableCell align="right" sx={{ border: 0, py: 0.25 }}>{formatMoney(l.lineTotal)}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </TableContainer>
+              <EstimateSectionsView lines={v.lines} sections={v.sections} total={v.total} currency={v.currency} />
               <Box sx={{ mt: 1.5 }}>
                 <Button
                   variant={isSelected ? 'outlined' : 'contained'}

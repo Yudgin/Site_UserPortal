@@ -413,7 +413,9 @@ export function registerPayments(app, deps) {
     status: e.status || 'approved',
     total: e.total,
     currency: e.currency || 'UAH',
-    lines: (e.lines || []).map((l) => ({ type: l.type, refId: l.refId, name: l.name, qty: l.qty, unitPrice: l.unitPrice, lineTotal: l.lineTotal })),
+    lines: (e.lines || []).map((l) => ({ type: l.type, refId: l.refId, name: l.name, qty: l.qty, unitPrice: l.unitPrice, lineTotal: l.lineTotal, complaintIndex: l.complaintIndex ?? null })),
+    // Разрезы по требованиям (только метка + направление — клиенту показываем структуру, без внутреннего).
+    sections: Array.isArray(e.sections) ? e.sections.map((s) => ({ complaint: s.complaint || '', serviceKind: s.serviceKind || null })) : null,
     fopId: e.fopId || null,
     // Разрешённые способы оплаты (только ключи, без fopId — сервер сам резолвит ФОП при оплате).
     payMethods: Array.isArray(e.payOptions) ? e.payOptions.map((o) => o && o.method).filter(Boolean) : [],

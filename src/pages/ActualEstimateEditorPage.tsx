@@ -8,11 +8,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, Snackbar, CircularProgress, Divider,
-  Table, TableBody, TableCell, TableContainer, TableHead, TableRow, IconButton, TextField,
-  Autocomplete, Chip, Stack, ToggleButton, ToggleButtonGroup,
+  TextField, Chip, Stack,
 } from '@mui/material'
 import {
-  Delete as DeleteIcon, Home as HomeIcon, Save as SaveIcon,
+  Home as HomeIcon, Save as SaveIcon,
   ContentCopy as CopyIcon, Payment as PaymentIcon, Receipt as ReceiptIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
@@ -27,20 +26,17 @@ import { paymentsApi, FopPublic } from '@/api/endpoints/payments'
 import SpecialistPayoutsEditor from '@/components/SpecialistPayoutsEditor'
 import PayOptionsEditor from '@/components/PayOptionsEditor'
 import ViewAsButton from '@/components/ViewAsButton'
+import SectionsWorksEditor from '@/components/SectionsWorksEditor'
+import EstimateSectionsView from '@/components/EstimateSectionsView'
 import { PAY_METHOD_KEYS, PAY_METHOD_LABELS } from '@/types/pricing'
 import {
-  buildEstimate, estimate2goods, compareEstimates, needsReapproval, tName, formatMoney,
-  type EstimateWorkInput,
+  buildMultiEstimate, estimate2goods, compareEstimates, needsReapproval, tName, formatMoney,
 } from '@/utils/pricing'
+import { estimateToSections, toComplaintSections, type EditableSection } from '@/utils/estimateSections'
 import { buildPriceContext } from '@/utils/aiContext'
-import AiWorkPicker from '@/components/AiWorkPicker'
-import type { Estimate, ServiceKind, SpecialistPayout, EstimatePayOption } from '@/types/pricing'
+import type { Estimate, SpecialistPayout, EstimatePayOption } from '@/types/pricing'
 import type { ServiceRequest } from '@/types/serviceRequest'
 import { cardVisibility, type ServiceCenter, type ViewRole } from '@/types/access'
-
-interface WorkRow extends EstimateWorkInput {
-  key: string // локальный ключ строки (работа может повторяться)
-}
 
 export default function ActualEstimateEditorPage() {
   const navigate = useNavigate()
@@ -54,10 +50,8 @@ export default function ActualEstimateEditorPage() {
 
   const [prelim, setPrelim] = useState<Estimate | null>(null)
   const [editParentId, setEditParentId] = useState<string | null>(null) // id родителя в режиме ?edit=
-  const [rows, setRows] = useState<WorkRow[]>([])
-  const [serviceKind, setServiceKind] = useState<ServiceKind>('repair')
+  const [sections, setSections] = useState<EditableSection[]>([]) // разрезы по требованиям клиента
   const [title, setTitle] = useState('')
-  const [complaint, setComplaint] = useState('')
 
   const [fops, setFops] = useState<FopPublic[]>([])
 
@@ -87,16 +81,12 @@ export default function ActualEstimateEditorPage() {
     pricingService.loadEstimate(parentId).then((est) => {
       if (!est) { notify('Попередній кошторис не знайдено', 'error'); return }
       setPrelim(est)
-      setServiceKind((est.sections?.[0]?.serviceKind as ServiceKind) || 'repair')
       setTitle(est.title || '')
-      setComplaint(est.complaint || '')
-      // прифилл: работы из labor-строк предварительной (материалы/доп. подтянутся движком)
-      const seeded: WorkRow[] = est.lines
-        .filter((l) => l.type === 'labor')
-        .map((l, i) => ({ key: `p${i}`, workId: l.refId, qty: l.qty }))
-      setRows(seeded)
+      // Разрезы по требованиям наследуем из предварительной (её секции). Не затираем правки мастера
+      // при повторном срабатывании (напр. когда догрузился каталог) — сеем только если ещё пусто.
+      setSections((prev) => prev.length ? prev : estimateToSections(est, indexed))
     })
-  }, [parentId])
+  }, [parentId, indexed])
 
   // Режим РЕДАКТИРОВАНИЯ существующего факта (?edit=<id>): грузим сам факт (savedId=id →
   // пересохранение обновит его, а не создаст дубль), сеем работы, ФОП; для diff — его родителя.
@@ -106,17 +96,15 @@ export default function ActualEstimateEditorPage() {
       if (!act) { notify('Кошторис не знайдено', 'error'); return }
       setSavedId(editId)
       setTitle(act.title || '')
-      setComplaint(act.complaint || '')
-      setServiceKind((act.sections?.[0]?.serviceKind as ServiceKind) || 'repair')
       setPayouts(act.specialistPayouts || [])
       setPayOptions(act.payOptions || []) // старые сметы без payOptions — мастер выберет способы заново
-      setRows(act.lines.filter((l) => l.type === 'labor').map((l, i) => ({ key: `e${i}`, workId: l.refId, qty: l.qty })))
+      setSections((prev) => prev.length ? prev : estimateToSections(act, indexed)) // разрезы по требованиям
       if (act.parentEstimateId) {
         setEditParentId(act.parentEstimateId) // помним связь, даже если родитель ещё грузится
         pricingService.loadEstimate(act.parentEstimateId).then((p) => p && setPrelim(p))
       }
     })
-  }, [editId])
+  }, [editId, indexed])
 
   // Заявка (для специалистов/центра). При СОЗДАНИИ факта (без ?edit=) авто-подставляем специалистов
   // заявки в распределение (суммы 0 — мастер заполнит). При редактировании existing факта не трогаем.
@@ -152,47 +140,28 @@ export default function ActualEstimateEditorPage() {
     setPayOptions((prev) => prev.length ? prev : PAY_METHOD_KEYS.filter((m) => def[m]).map((m) => ({ method: m, fopId: def[m]! })))
   }, [center, editId])
 
-  const activeWorks = useMemo(() => Object.values(indexed.works).filter((w) => w.active), [indexed])
-  // Наборы разделены по направлениям — показываем только для выбранного (Ремонт/Апгрейд).
-  const activeKits = useMemo(() => Object.values(indexed.kits).filter((k) => k.active && k.serviceKind === serviceKind), [indexed, serviceKind])
-
-  // Живой расчёт фактической сметы
+  // Живой расчёт фактической сметы из разрезов-требований (мульти-жалобы + авто общие работы).
   const actual: Estimate | null = useMemo(() => {
-    const works = rows.filter((r) => r.workId && indexed.works[r.workId]).map((r) => ({ workId: r.workId, qty: r.qty }))
-    if (!works.length) return null
-    return buildEstimate({
-      works,
+    const cs = toComplaintSections(sections, indexed)
+    if (!cs.length) return null
+    return buildMultiEstimate({
+      sections: cs,
       catalog: indexed,
       settings: catalog.settings,
-      serviceKind,
       meta: {
         requestId: prelim?.requestId ?? null, // 1С-ссылка (унаследованная от предложения), если есть
         title: title || (prelim?.title ?? ''),
-        complaint: complaint || (prelim?.complaint ?? ''),
         source: 'manual',
         createdBy: user?.email ?? null,
       },
     })
-  }, [rows, indexed, catalog.settings, serviceKind, title, complaint, prelim, user])
+  }, [sections, indexed, catalog.settings, title, prelim, user])
 
   const comparison = useMemo(() => (prelim && actual ? compareEstimates(prelim, actual) : null), [prelim, actual])
   const reapproval = useMemo(() => (prelim && actual ? needsReapproval(prelim, actual) : null), [prelim, actual])
   const goods = useMemo(() => (actual ? estimate2goods(actual, 'uk') : []), [actual])
 
   const priceCtx = useMemo(() => buildPriceContext(catalog), [catalog])
-  const addRow = (workId: string) => setRows((r) => [...r, { key: `w${Date.now()}${r.length}`, workId, qty: 1 }])
-  const addWorks = (works: EstimateWorkInput[]) =>
-    setRows((r) => [...r, ...works.map((w, i) => ({ key: `ai${Date.now()}${i}`, workId: w.workId, qty: w.qty }))])
-  const addKit = (kitId: string) => {
-    const kit = indexed.kits[kitId]
-    if (!kit) return
-    const items: WorkRow[] = kit.items
-      .filter((it) => indexed.works[it.workId]?.active)
-      .map((it, i) => ({ key: `k${Date.now()}${i}`, workId: it.workId, qty: it.qty }))
-    setRows((r) => [...r, ...items])
-  }
-  const setQty = (key: string, qty: number) => setRows((r) => r.map((x) => (x.key === key ? { ...x, qty: Math.max(0.1, qty) } : x)))
-  const removeRow = (key: string) => setRows((r) => r.filter((x) => x.key !== key))
 
   const clientLink = savedId ? `${window.location.origin}/estimate/${savedId}` : ''
 
@@ -315,111 +284,26 @@ export default function ActualEstimateEditorPage() {
         чек тим ФОП, який прийме оплату. Клієнт отримає посилання для погодження та оплати.
       </Typography>
 
-      {/* Параметры */}
+      {/* Название калькуляции */}
       <Paper sx={{ p: 2, mb: 3 }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 2 }}>
-          <TextField label="Назва / кораблик" value={title} onChange={(e) => setTitle(e.target.value)} size="small" fullWidth />
-          <TextField label="Скарга" value={complaint} onChange={(e) => setComplaint(e.target.value)} size="small" fullWidth />
-        </Stack>
-        <ToggleButtonGroup
-          size="small" exclusive value={serviceKind}
-          onChange={(_e, v) => v && setServiceKind(v)}
-        >
-          <ToggleButton value="repair">Ремонт</ToggleButton>
-          <ToggleButton value="upgrade">Апгрейд (без сезонної націнки)</ToggleButton>
-        </ToggleButtonGroup>
+        <TextField label="Назва / кораблик" value={title} onChange={(e) => setTitle(e.target.value)} size="small" fullWidth />
       </Paper>
 
-      {/* Добавление работ/наборов */}
+      {/* Разрезы по требованиям клиента */}
       <Paper sx={{ p: 2, mb: 3 }}>
-        <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Роботи та матеріали</Typography>
-        <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ mb: 2 }}>
-          <Autocomplete
-            sx={{ flex: 2 }} size="small" options={activeWorks}
-            getOptionLabel={(w) => `${w.code} · ${tName(w.name, 'uk')}`}
-            onChange={(_e, w) => w && addRow(w.id)}
-            renderInput={(p) => <TextField {...p} label="Додати роботу" />}
-            value={null} blurOnSelect clearOnBlur
-          />
-          <Autocomplete
-            sx={{ flex: 2 }} size="small" options={activeKits}
-            getOptionLabel={(k) => `${k.code} · ${tName(k.name, 'uk')}`}
-            onChange={(_e, k) => k && addKit(k.id)}
-            renderInput={(p) => <TextField {...p} label="Додати набір (розгорнути)" />}
-            value={null} blurOnSelect clearOnBlur
-          />
-          <AiWorkPicker priceContext={priceCtx} catalog={indexed} onAdd={addWorks} />
-        </Stack>
-
-        {rows.length === 0 ? (
-          <Alert severity="info">Додайте роботи або набір, щоб зібрати фактичний кошторис.</Alert>
-        ) : (
-          <TableContainer>
-            <Table size="small">
-              <TableHead>
-                <TableRow sx={{ bgcolor: 'action.hover' }}>
-                  <TableCell>Робота</TableCell>
-                  <TableCell width={110}>Кількість</TableCell>
-                  <TableCell width={60} />
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {rows.map((r) => {
-                  const w = indexed.works[r.workId]
-                  return (
-                    <TableRow key={r.key}>
-                      <TableCell>{w ? `${w.code} · ${tName(w.name, 'uk')}` : r.workId}</TableCell>
-                      <TableCell>
-                        <TextField
-                          type="number" size="small" value={r.qty}
-                          onChange={(e) => setQty(r.key, Number(e.target.value))}
-                          inputProps={{ min: 0.1, step: 0.5 }} sx={{ width: 90 }}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <IconButton size="small" onClick={() => removeRow(r.key)}><DeleteIcon fontSize="small" /></IconButton>
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        )}
+        <Typography variant="subtitle1" sx={{ mb: 0.5 }}>Роботи за вимогами клієнта</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Кожна вимога — окремий розділ зі своїм напрямом (ремонт/апгрейд), роботами та набором. Загальні роботи додаються автоматично.
+        </Typography>
+        <SectionsWorksEditor sections={sections} onChange={setSections} catalog={indexed} priceContext={priceCtx} />
       </Paper>
 
-      {/* Результат — фактическая смета построчно */}
+      {/* Результат — фактическая смета разрезами по требованиям */}
       {actual && (
         <Paper sx={{ p: 2, mb: 3 }}>
           <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Фактичний кошторис</Typography>
-          <TableContainer>
-            <Table size="small">
-              <TableHead>
-                <TableRow sx={{ bgcolor: 'action.hover' }}>
-                  <TableCell>Позиція</TableCell>
-                  <TableCell align="right">К-сть</TableCell>
-                  <TableCell align="right">Сума</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {actual.lines.map((l, i) => (
-                  <TableRow key={i}>
-                    <TableCell>
-                      {tName(l.name, 'uk')}
-                      {l.type !== 'labor' && <Chip size="small" label={l.type === 'material' ? 'матеріал' : 'послуга'} sx={{ ml: 1 }} />}
-                    </TableCell>
-                    <TableCell align="right">{l.qty}</TableCell>
-                    <TableCell align="right">{formatMoney(l.lineTotal)}</TableCell>
-                  </TableRow>
-                ))}
-                <TableRow>
-                  <TableCell colSpan={2}><b>Разом</b></TableCell>
-                  <TableCell align="right"><b>{formatMoney(actual.total)}</b></TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </TableContainer>
-          <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+          <EstimateSectionsView lines={actual.lines} sections={actual.sections} total={actual.total} currency={actual.currency} />
+          <Typography variant="caption" color="text.secondary" sx={{ mt: 1.5, display: 'block' }}>
             <ReceiptIcon fontSize="inherit" sx={{ verticalAlign: 'middle', mr: 0.5 }} />
             У чеку буде {goods.length} позиц. (побудовано за вимогами фіскального чека).
           </Typography>

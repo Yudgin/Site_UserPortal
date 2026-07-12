@@ -390,6 +390,10 @@ export const buildEstimate = (params: BuildEstimateParams): Estimate => {
 
 // ==== Смета с несколькими жалобами (мульти-жалобы) ====
 
+// Метка авто-секции общих (сопутствующих) работ, которую buildMultiEstimate добавляет сама.
+// Экспортируется, чтобы редактор мог отличать её (не редактируется вручную).
+export const COMMON_SECTION_LABEL = 'Загальні роботи (супровід ремонту)'
+
 // Секция сметы — одна жалоба клиента и относящиеся к ней работы
 export interface ComplaintSection {
   complaint: string
@@ -420,7 +424,7 @@ export const buildMultiEstimate = (params: BuildMultiEstimateParams): Estimate =
   const existingIds = new Set(inputSections.flatMap((s) => s.works.map((w) => w.workId)))
   const commonInputs = commonWorkInputs(settings, catalog, existingIds)
   const sections: ComplaintSection[] = commonInputs.length
-    ? [...inputSections, { complaint: 'Загальні роботи (супровід ремонту)', serviceKind: 'repair', works: commonInputs }]
+    ? [...inputSections, { complaint: COMMON_SECTION_LABEL, serviceKind: 'repair', works: commonInputs }]
     : inputSections
 
   // Плоский список работ с индексом жалобы
