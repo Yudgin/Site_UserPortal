@@ -28,7 +28,9 @@ import { SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequest
 import type { EstimateOffer, Estimate } from '@/types/pricing'
 import type { PreliminaryEstimate } from '@/types/chat'
 import { NOTIFICATION_EVENT_LABELS, type ClientNotification } from '@/types/notification'
+import { cardVisibility, type ViewRole } from '@/types/access'
 import CreateTtnDialog from '@/components/CreateTtnDialog'
+import ViewAsButton from '@/components/ViewAsButton'
 
 const STATUSES = Object.keys(SERVICE_REQUEST_STATUS_LABELS) as ServiceRequestStatus[]
 
@@ -52,6 +54,7 @@ export default function ServiceRequestPage() {
   const [ttnDialog, setTtnDialog] = useState(false) // диалог создания ТТН на приём
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const [staff, setStaff] = useState<{ uid: string; name: string }[]>([]) // справочник специалистов центра
+  const [viewAs, setViewAs] = useState<ViewRole>('owner') // превью «Показати як…»
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
   const load = useCallback(async () => {
@@ -148,16 +151,21 @@ export default function ServiceRequestPage() {
   const selectedVariantId = offer?.selectedVariantId || null
   const offerLink = req.offerId ? `${window.location.origin}/offer/${req.offerId}` : ''
   const actualLink = req.actualEstimateId ? `${window.location.origin}/estimate/${req.actualEstimateId}` : ''
+  const vis = cardVisibility(viewAs) // видимость секций для превью «Показати як…»
 
   return (
     <Container maxWidth="md" sx={{ py: 4 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h4">Заявка на обслуговування</Typography>
         <Stack direction="row" spacing={1}>
+          <ViewAsButton value={viewAs} onChange={setViewAs} />
           {req.sessionId && <Button startIcon={<ChatIcon />} onClick={() => navigate('/manager-inbox')}>Обращення</Button>}
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
         </Stack>
       </Box>
+      {viewAs !== 'owner' && (
+        <Alert severity="warning" sx={{ mb: 2 }}>Прев'ю очима ролі «{viewAs === 'client' ? 'Клієнт' : viewAs === 'director' ? 'Директор' : viewAs === 'accountant' ? 'Бухгалтер' : 'Спеціаліст'}»: службові секції приховано.</Alert>
+      )}
 
       {/* Клиент + статус + жалоба */}
       <Paper sx={{ p: 2, mb: 3 }}>
@@ -227,7 +235,8 @@ export default function ServiceRequestPage() {
         </Stack>
       </Paper>
 
-      {/* Специалисты, выполняющие сервис (портальные пользователи центра) */}
+      {/* Специалисты, выполняющие сервис (портальные пользователи центра) — служебная секция */}
+      {vis.internal && (
       <Paper sx={{ p: 2, mb: 2 }}>
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
           <SpecialistsIcon fontSize="small" color="primary" />
@@ -248,6 +257,7 @@ export default function ServiceRequestPage() {
           noOptionsText={staff.length ? 'Усі додані' : 'Немає співробітників (додайте у «Доступ та центри»)'}
           renderInput={(p) => <TextField {...p} label="Додати спеціаліста" />} />
       </Paper>
+      )}
 
       {/* Крок 1: Предложение (предварительные калькуляции) */}
       <Paper sx={{ p: 2, mb: 2 }}>

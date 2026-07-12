@@ -25,6 +25,8 @@ import { secureId } from '@/utils/id'
 import { buildEstimate, tName, formatMoney, type EstimateWorkInput } from '@/utils/pricing'
 import { buildPriceContext } from '@/utils/aiContext'
 import AiWorkPicker from '@/components/AiWorkPicker'
+import ViewAsButton from '@/components/ViewAsButton'
+import { VIEW_ROLE_LABELS, type ViewRole } from '@/types/access'
 import type { Estimate, EstimateOffer, ServiceKind } from '@/types/pricing'
 
 interface WorkRow extends EstimateWorkInput { key: string }
@@ -41,6 +43,7 @@ export default function OfferEditorPage() {
   const serviceRequestId = params.get('request') || '' // привязка к нашей заявке на обслуживание
 
   const [offerId, setOfferId] = useState('')
+  const [viewAs, setViewAs] = useState<ViewRole>('owner') // превью «Показати як…»
   const [title, setTitle] = useState('')
   const [diagSeed, setDiagSeed] = useState('') // диагностика заявки → засев ИИ-подбора
   const [loadedSrId, setLoadedSrId] = useState('') // serviceRequestId, вычитанный из открытого оффера
@@ -213,8 +216,17 @@ export default function OfferEditorPage() {
     <Container maxWidth="lg" sx={{ py: 4 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h4">Пропозиція клієнту</Typography>
-        <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
+        <Stack direction="row" spacing={1}>
+          <ViewAsButton value={viewAs} onChange={setViewAs} />
+          <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
+        </Stack>
       </Box>
+      {viewAs !== 'owner' && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Прев'ю очима ролі «{VIEW_ROLE_LABELS[viewAs]}». Попередня калькуляція — це і є пропозиція клієнту:
+          усі ролі бачать варіанти та суми; внутрішня економіка зʼявляється лише у фактичній калькуляції.
+        </Alert>
+      )}
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         Зберіть один або кілька варіантів ремонту. Клієнт побачить усі та обере один шлях. За обраним
         варіантом далі складається фактична калькуляція, за якою відбувається оплата.

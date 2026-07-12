@@ -42,6 +42,44 @@ export interface CenterAccess {
   perms: CenterPermission[]
 }
 
+// ==== Видимость карточки заявки/калькуляции по ролям (для превью «Показати як…») ====
+// Роли просмотра: сотрудники + клиент. Определяют, что видно в карточке.
+export type ViewRole = Role | 'client'
+export const VIEW_ROLES: ViewRole[] = ['owner', 'director', 'accountant', 'master', 'client']
+export const VIEW_ROLE_LABELS: Record<ViewRole, string> = {
+  owner: 'Власник',
+  director: 'Директор сервісу',
+  accountant: 'Бухгалтер',
+  master: 'Спеціаліст',
+  client: 'Клієнт',
+}
+
+// Флаги видимости секций карточки. economics — полное распределение по специалистам + наценка
+// центра; ownPayoutOnly — специалист видит лишь свою сумму; payFop — привязка ФОП к способам;
+// payMethods — список способов оплаты; planFactDiff — сравнение план/факт; internal — прочие
+// служебные секции (диагностика, назначенные специалисты заявки).
+export interface CardVisibility {
+  economics: boolean
+  ownPayoutOnly: boolean
+  payFop: boolean
+  payMethods: boolean
+  planFactDiff: boolean
+  internal: boolean
+}
+export const cardVisibility = (role: ViewRole): CardVisibility => {
+  switch (role) {
+    case 'owner':
+    case 'director':
+      return { economics: true, ownPayoutOnly: false, payFop: true, payMethods: true, planFactDiff: true, internal: true }
+    case 'accountant':
+      return { economics: false, ownPayoutOnly: false, payFop: true, payMethods: true, planFactDiff: true, internal: true }
+    case 'master':
+      return { economics: false, ownPayoutOnly: true, payFop: false, payMethods: true, planFactDiff: true, internal: true }
+    case 'client':
+      return { economics: false, ownPayoutOnly: false, payFop: false, payMethods: true, planFactDiff: false, internal: false }
+  }
+}
+
 // Профиль сотрудника (роль-документ). Ключ документа = Firebase uid. Пишет только владелец.
 export interface UserProfile {
   uid: string

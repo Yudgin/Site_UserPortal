@@ -26,7 +26,8 @@ import { notificationApi } from '@/api/endpoints/notification'
 import { paymentsApi, FopPublic } from '@/api/endpoints/payments'
 import SpecialistPayoutsEditor from '@/components/SpecialistPayoutsEditor'
 import PayOptionsEditor from '@/components/PayOptionsEditor'
-import { PAY_METHOD_KEYS } from '@/types/pricing'
+import ViewAsButton from '@/components/ViewAsButton'
+import { PAY_METHOD_KEYS, PAY_METHOD_LABELS } from '@/types/pricing'
 import {
   buildEstimate, estimate2goods, compareEstimates, needsReapproval, tName, formatMoney,
   type EstimateWorkInput,
@@ -35,7 +36,7 @@ import { buildPriceContext } from '@/utils/aiContext'
 import AiWorkPicker from '@/components/AiWorkPicker'
 import type { Estimate, ServiceKind, SpecialistPayout, EstimatePayOption } from '@/types/pricing'
 import type { ServiceRequest } from '@/types/serviceRequest'
-import type { ServiceCenter } from '@/types/access'
+import { cardVisibility, type ServiceCenter, type ViewRole } from '@/types/access'
 
 interface WorkRow extends EstimateWorkInput {
   key: string // локальный ключ строки (работа может повторяться)
@@ -67,6 +68,7 @@ export default function ActualEstimateEditorPage() {
   const [payouts, setPayouts] = useState<SpecialistPayout[]>([])
   const [payOptions, setPayOptions] = useState<EstimatePayOption[]>([]) // способы оплаты + ФОП по каждому
 
+  const [viewAs, setViewAs] = useState<ViewRole>('owner') // превью «Показати як…»
   const [savedId, setSavedId] = useState('')
   const [saving, setSaving] = useState(false)
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' | 'info' }>({ open: false, msg: '', sev: 'success' })
@@ -293,12 +295,20 @@ export default function ActualEstimateEditorPage() {
     .map((o) => fops.find((f) => f.id === o.fopId))
     .filter((f): f is FopPublic => !!f && !f.receipts)
 
+  const vis = cardVisibility(viewAs) // видимость секций для превью «Показати як…»
+
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h4">Фактична калькуляція</Typography>
-        <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
+        <Stack direction="row" spacing={1}>
+          <ViewAsButton value={viewAs} onChange={setViewAs} />
+          <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
+        </Stack>
       </Box>
+      {viewAs !== 'owner' && (
+        <Alert severity="warning" sx={{ mb: 2 }}>Прев'ю очима ролі «{viewAs === 'client' ? 'Клієнт' : viewAs === 'director' ? 'Директор' : viewAs === 'accountant' ? 'Бухгалтер' : 'Спеціаліст'}»: частину полів приховано. Редагування працює у режимі власника.</Alert>
+      )}
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         Зберіть кошторис за реально виконаними роботами та матеріалами. З нього виб'ється фіскальний
         чек тим ФОП, який прийме оплату. Клієнт отримає посилання для погодження та оплати.
@@ -416,7 +426,7 @@ export default function ActualEstimateEditorPage() {
       )}
 
       {/* Diff план/факт */}
-      {comparison && reapproval && (
+      {comparison && reapproval && vis.planFactDiff && (
         <Paper sx={{ p: 2, mb: 3 }}>
           <Typography variant="subtitle1" sx={{ mb: 1 }}>Порівняння з попереднім кошторисом</Typography>
           <Stack direction="row" spacing={2} sx={{ mb: 1, flexWrap: 'wrap' }}>
@@ -446,13 +456,28 @@ export default function ActualEstimateEditorPage() {
         </Paper>
       )}
 
-      {/* Распределение по специалистам (внутренняя экономика; клиенту не видно) */}
-      {actual && (
+      {/* Распределение по специалистам (внутренняя экономика; видно владельцу/директору) */}
+      {actual && vis.economics && (
         <SpecialistPayoutsEditor value={payouts} onChange={setPayouts} staff={staff} total={actual.total} />
+      )}
+      {actual && !vis.economics && vis.ownPayoutOnly && (
+        <Paper sx={{ p: 2, mb: 3 }}>
+          <Typography variant="subtitle1" sx={{ mb: 1 }}>Розподіл між спеціалістами</Typography>
+          <Alert severity="info">Спеціаліст бачить лише власну винагороду; суми інших спеціалістів та наценку центру приховано.</Alert>
+        </Paper>
       )}
 
       {/* Способы оплаты + ФОП по каждому (дефолт из центра) */}
-      {actual && <PayOptionsEditor value={payOptions} onChange={setPayOptions} fops={fops} />}
+      {actual && vis.payFop && <PayOptionsEditor value={payOptions} onChange={setPayOptions} fops={fops} />}
+      {actual && !vis.payFop && vis.payMethods && (
+        <Paper sx={{ p: 2, mb: 3 }}>
+          <Typography variant="subtitle1" sx={{ mb: 1 }}>Способи оплати</Typography>
+          {payOptions.length === 0
+            ? <Typography variant="body2" color="text.secondary">Не задано.</Typography>
+            : <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 1 }}>{payOptions.map((o) => <Chip key={o.method} label={PAY_METHOD_LABELS[o.method]} />)}</Stack>}
+          <Alert severity="info" sx={{ mt: 1 }}>Прив'язку ФОП до способів видно бухгалтеру/директору/власнику.</Alert>
+        </Paper>
+      )}
 
       {/* Сохранение + ссылка клиенту */}
       <Paper sx={{ p: 2, mb: 3 }}>
