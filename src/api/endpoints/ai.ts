@@ -27,6 +27,7 @@ export interface ImproveTextParams {
   userPrompt: string
   history?: AiHistoryEntry[]
   context?: AiTextContext
+  reference?: string // доп. справочный контекст (напр. жалоба клиента + переписка)
   lang?: string
 }
 

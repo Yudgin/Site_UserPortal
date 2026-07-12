@@ -3,7 +3,7 @@
 // Центр всего потока: обращение → заявка → предложение (варианты) → факт → оплата.
 // Показывает клиента, жалобу, статус и связанные калькуляции; отсюда мастер запускает
 // составление предложения и фактической сметы (с привязкой к этой заявке).
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, CircularProgress, Chip, Stack, Divider,
@@ -26,7 +26,9 @@ import { pricingService } from '@/api/pricingService'
 import { formatMoney } from '@/utils/pricing'
 import { SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequestStatus } from '@/types/serviceRequest'
 import type { EstimateOffer, Estimate } from '@/types/pricing'
-import type { PreliminaryEstimate } from '@/types/chat'
+import type { PreliminaryEstimate, ChatMessage } from '@/types/chat'
+import type { AiHistoryEntry } from '@/api/endpoints/ai'
+import AiTextEditor from '@/components/common/AiTextEditor'
 import { NOTIFICATION_EVENT_LABELS, type ClientNotification } from '@/types/notification'
 import { cardVisibility, type ViewRole } from '@/types/access'
 import CreateTtnDialog from '@/components/CreateTtnDialog'
@@ -55,6 +57,8 @@ export default function ServiceRequestPage() {
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const [staff, setStaff] = useState<{ uid: string; name: string }[]>([]) // справочник специалистов центра
   const [viewAs, setViewAs] = useState<ViewRole>('owner') // превью «Показати як…»
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]) // переписка обращения (для ИИ-диагностики)
+  const [diagAiHistory, setDiagAiHistory] = useState<AiHistoryEntry[]>([]) // локальная история ИИ-правок диагностики
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
   const load = useCallback(async () => {
@@ -68,7 +72,7 @@ export default function ServiceRequestPage() {
       if (r.offerId) pricingService.loadOffer(r.offerId).then(setOffer)
       if (r.actualEstimateId) pricingService.loadEstimate(r.actualEstimateId).then(setActual)
       // Предварительная оценка ИИ — из связанного обращения (та, что ИИ показывал в переписке).
-      if (r.sessionId) chatSessionService.load(r.sessionId).then((s) => setAiEstimate(s?.estimate || null))
+      if (r.sessionId) chatSessionService.load(r.sessionId).then((s) => { setAiEstimate(s?.estimate || null); setChatMessages(s?.messages || []) })
       notificationService.listByRequest(id).then(setNotifs)
     }
     setLoading(false)
@@ -89,6 +93,19 @@ export default function ServiceRequestPage() {
   const removeSpecialist = (uid: string) => {
     patch({ specialists: specialists.filter((s) => s.uid !== uid) }).then((ok) => { if (ok) notify('Спеціаліста прибрано') })
   }
+
+  // Справочный контекст для ИИ-диагностики: жалоба + кораблик + переписка с клиентом (без внутренних заметок).
+  const diagReference = useMemo(() => {
+    const parts: string[] = []
+    if (complaint.trim()) parts.push(`Скарга клієнта: ${complaint.trim()}`)
+    if (boat.trim()) parts.push(`Кораблик: ${boat.trim()}`)
+    const conv = chatMessages
+      .filter((m) => !m.internal && m.text?.trim())
+      .slice(-30)
+      .map((m) => `${m.role === 'client' ? 'Клієнт' : m.role === 'ai' ? 'ІІ' : 'Менеджер'}: ${m.text.trim()}`)
+    if (conv.length) parts.push(`Переписка з клієнтом:\n${conv.join('\n')}`)
+    return parts.join('\n\n')
+  }, [complaint, boat, chatMessages])
 
   // Оптимистично обновляем req локально (без полной перезагрузки, чтобы не терять несохранённый
   // ввод в полях і не затирати статус, проставлений webhook). offer/actual не меняются при этом.
@@ -220,12 +237,14 @@ export default function ServiceRequestPage() {
           <Typography variant="subtitle1">Діагностика (виявлені несправності)</Typography>
         </Stack>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          Отримали кораблик — опишіть виявлені несправності. Це уточнює попередню калькуляцію:
-          ІІ-підбір позицій у пропозиції засівається цим текстом.
+          Отримали кораблик — опишіть виявлені несправності. Помічник ІІ бачить скаргу та переписку з
+          клієнтом і допоможе скласти акуратний текст (напр. «склади діагностику за скаргою та перепискою»).
+          Це уточнює попередню калькуляцію: ІІ-підбір позицій у пропозиції засівається цим текстом.
         </Typography>
-        <TextField value={diag} onChange={(e) => setDiag(e.target.value)} fullWidth multiline minRows={3}
+        <AiTextEditor value={diag} onChange={setDiag} label="Виявлені несправності" context="diagnostics"
+          reference={diagReference} history={diagAiHistory} onHistoryChange={setDiagAiHistory} minRows={3}
           placeholder="напр. люфт сервоприводу керма, окислені контакти, тріщина корпусу біля бункера" />
-        <Stack direction="row" spacing={2} sx={{ mt: 1, flexWrap: 'wrap' }} alignItems="center">
+        <Stack direction="row" spacing={2} sx={{ mt: 1.5, flexWrap: 'wrap' }} alignItems="center">
           <Button variant="outlined" startIcon={<SaveIcon />} disabled={saving} onClick={saveDiag}>Зберегти діагностику</Button>
           {req.diagnostics?.at && (
             <Typography variant="caption" color="text.secondary">

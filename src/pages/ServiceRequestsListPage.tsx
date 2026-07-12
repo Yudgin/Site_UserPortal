@@ -69,6 +69,7 @@ export default function ServiceRequestsListPage() {
                   <TableCell sx={{ maxWidth: 280, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.complaint || '—'}</TableCell>
                   <TableCell><Chip size="small" color={statusColor(r.status)} label={SERVICE_REQUEST_STATUS_LABELS[r.status]} /></TableCell>
                   <TableCell>
+                    {r.diagnostics?.text && <Chip size="small" color="info" variant="outlined" label="діагн." sx={{ mr: 0.5 }} />}
                     {r.offerId && <Chip size="small" variant="outlined" label="пропоз." sx={{ mr: 0.5 }} />}
                     {r.actualEstimateId && <Chip size="small" variant="outlined" label="факт" sx={{ mr: 0.5 }} />}
                     {r.paymentId && <Chip size="small" color="success" variant="outlined" label="оплата" />}

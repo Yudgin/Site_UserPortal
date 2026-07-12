@@ -17,6 +17,7 @@ interface AiTextEditorProps {
   lang?: string // язык редактируемого текста
   history?: AiHistoryEntry[]
   onHistoryChange?: (h: AiHistoryEntry[]) => void
+  reference?: string // доп. справочный контекст (жалоба + переписка) — ИИ опирается, не копирует
   minRows?: number
   placeholder?: string
 }
@@ -26,7 +27,7 @@ interface AiTextEditorProps {
 // и возвращает новую версию, которую можно принять или отклонить.
 export default function AiTextEditor({
   value, onChange, label, context, lang = 'uk', history = [], onHistoryChange,
-  minRows = 6, placeholder,
+  reference, minRows = 6, placeholder,
 }: AiTextEditorProps) {
   const [prompt, setPrompt] = useState('')
   const [loading, setLoading] = useState(false)
@@ -38,7 +39,7 @@ export default function AiTextEditor({
     setLoading(true)
     setError(null)
     setPreview(null)
-    const result = await aiApi.improveText({ currentText: value, userPrompt: prompt, history, context, lang })
+    const result = await aiApi.improveText({ currentText: value, userPrompt: prompt, history, context, reference, lang })
     setLoading(false)
     if (result.success && result.data) {
       setPreview(result.data.text)

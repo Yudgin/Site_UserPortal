@@ -552,6 +552,8 @@ const AI_CONTEXTS = {
 app.post('/api/ai/improve-text', aiPublicLimiter, async (req, res) => {
   try {
     const { currentText = '', userPrompt = '', history = [], context = 'generic', lang = 'uk' } = req.body
+    // Доп. справочный контекст (напр. скарга клієнта + переписка) — ИИ опирается, но не копирует дословно.
+    const reference = String(req.body.reference || '').slice(0, 8000)
 
     if (!anthropic) {
       return res.status(503).json({
@@ -584,6 +586,7 @@ app.post('/api/ai/improve-text', aiPublicLimiter, async (req, res) => {
 
     const userContent = [
       historyText ? `Історія попередніх правок (для наступності):\n${historyText}\n` : '',
+      reference ? `Довідкові матеріали (скарга клієнта та переписка) — спирайся на них, але НЕ копіюй дослівно:\n"""\n${reference}\n"""\n` : '',
       `Поточний текст:\n"""\n${currentText}\n"""\n`,
       `Що потрібно змінити:\n${userPrompt}`,
     ].filter(Boolean).join('\n')
