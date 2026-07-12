@@ -165,10 +165,12 @@ export function registerNpTtn(app, deps) {
       const payerType = senderTarget === 'client' ? 'Sender' : (tpl.payerType === 'sender' ? 'Sender' : 'Recipient')
 
       // ---- Наложенный платёж (COD) ---- (для отправки клиенту с флагом cod: сумма факта, снимаем если оплачено)
+      // ФОП должен принимать накладений платіж (переключатель методів у ФОП). Явно вимкнено → COD не додаємо.
+      const fopAcceptsCod = fop?.methods ? fop.methods.cod !== false : true
       let codAmount = Number(b.codAmount)
       if (!Number.isFinite(codAmount)) {
         codAmount = 0
-        if (tpl.cod && recipientTarget === 'client' && sr.actualEstimateId) {
+        if (tpl.cod && fopAcceptsCod && recipientTarget === 'client' && sr.actualEstimateId) {
           try {
             const est = await adminDb.collection('priceEstimates').doc(String(sr.actualEstimateId)).get()
             const e = est.exists ? est.data() : null

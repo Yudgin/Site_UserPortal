@@ -24,6 +24,8 @@ export interface FopPublic {
     liqpayPaypart: boolean
     monoChast: boolean
     monoAcquire: boolean
+    privatPaypart: boolean
+    cod: boolean // накладений платіж (Нова Пошта) — оплата при отриманні, не онлайн-метод
   }
   receipts: boolean // выбивает ли фискальные чеки (есть Checkbox)
 }

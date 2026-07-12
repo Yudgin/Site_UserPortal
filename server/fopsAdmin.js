@@ -86,6 +86,7 @@ export function registerFopsAdmin(app, deps) {
           monoChast: !!b.methods?.monoChast,
           monoAcquire: !!b.methods?.monoAcquire,
           privatPaypart: !!b.methods?.privatPaypart,
+          cod: !!b.methods?.cod, // накладений платіж (Нова Пошта)
         },
         novaPoshta: {
           senderRef: clip(b.novaPoshta?.senderRef, 64),

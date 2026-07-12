@@ -18,7 +18,7 @@ import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayloa
 
 const emptyEdit = () => ({
   id: '', name: '', active: true, isNew: true,
-  methods: { liqpayCard: false, liqpayPaypart: false, monoChast: false, monoAcquire: false, privatPaypart: false },
+  methods: { liqpayCard: false, liqpayPaypart: false, monoChast: false, monoAcquire: false, privatPaypart: false, cod: false },
   np: { senderRef: '', contactRef: '', senderPhone: '', cityRef: '', cityName: '', warehouseRef: '', warehouseName: '' },
   secretsSet: { liqpay: false, monoChast: false, monoAcquire: false, privatPaypart: false, checkbox: false, novaPoshtaApiKey: false },
   // секретные поля (write-only, пустые = не менять)
@@ -169,12 +169,17 @@ export default function FopsAdminPage() {
                   ['monoChast', 'monobank — Частинами'],
                   ['monoAcquire', 'monobank — еквайринг'],
                   ['privatPaypart', 'ПриватБанк — Оплата частинами'],
+                  ['cod', 'Накладений платіж (Нова Пошта)'],
                 ] as const).map(([k, label]) => (
                   <FormControlLabel key={k}
                     control={<Checkbox checked={!!edit.methods[k]} onChange={(e) => setEdit({ ...edit, methods: { ...edit.methods, [k]: e.target.checked } })} />}
                     label={label} />
                 ))}
               </FormGroup>
+              <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+                Накладений платіж — оплата клієнтом при отриманні через Нову Пошту (не онлайн). Працює лише
+                за наявності ключа НП у цього ФОП; при створенні ТТН сума береться з фактичного розрахунку.
+              </Typography>
 
               <Divider textAlign="left"><Typography variant="caption">Секретні ключі (write-only)</Typography></Divider>
               <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>LiqPay</Typography>

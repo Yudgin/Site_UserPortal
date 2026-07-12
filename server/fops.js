@@ -85,6 +85,8 @@ export const listFopsPublic = () =>
       monoChast: methodOn(f, 'monoChast', fopHas(f, 'monoChast.storeSecret')),
       monoAcquire: methodOn(f, 'monoAcquire', fopHas(f, 'monoAcquire.token')),
       privatPaypart: methodOn(f, 'privatPaypart', fopHas(f, 'privatPaypart.storeId')),
+      // Накладений платіж (COD) — клиент платит при получении через НП; требует ключ НП у ФОП.
+      cod: methodOn(f, 'cod', fopHas(f, 'novaPoshta.apiKey')),
     },
     novaPoshta: fopHas(f, 'novaPoshta.apiKey'), // может ли этот ФОП создавать ТТН
     receipts: fopHas(f, 'checkbox.licenseKey'), // может ли выдавать фискальные чеки
