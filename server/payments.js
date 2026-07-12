@@ -422,8 +422,56 @@ export function registerPayments(app, deps) {
     parentEstimateId: e.parentEstimateId || null,
     paid: e.status === 'paid' || !!e.paidAt,
     paidAt: e.paidAt || null,
+    updatedAt: e.updatedAt || null, // время последнего сохранения (для истории)
     taxUrl: e.taxUrl || null,
+    // История правок (снимки прежних версий) — без editedBy (внутреннее). Видно и клиенту.
+    history: Array.isArray(e.history) ? e.history.map((v) => ({
+      at: v.at || null,
+      total: v.total,
+      lines: (v.lines || []).map((l) => ({ type: l.type, refId: l.refId, name: l.name, qty: l.qty, unitPrice: l.unitPrice, lineTotal: l.lineTotal, complaintIndex: l.complaintIndex ?? null })),
+      sections: Array.isArray(v.sections) ? v.sections.map((s) => ({ complaint: s.complaint || '', serviceKind: s.serviceKind || null })) : null,
+    })) : [],
   }) : null
+
+  // Контекст сметы для клиента: обращение (канал), зафиксированная в заявке жалоба + кораблик,
+  // диагностика, предложения (варианты) и какой выбран. Всё — данные самого клиента (по id сметы).
+  const buildEstimateContext = async (e) => {
+    try {
+      const srId = e && e.serviceRequestId
+      if (!srId) return null
+      const rs = await adminDb.collection('serviceRequests').doc(String(srId)).get()
+      if (!rs.exists) return null
+      const r = rs.data()
+      let offer = null
+      if (r.offerId) {
+        const os = await adminDb.collection('estimateOffers').doc(String(r.offerId)).get()
+        if (os.exists) {
+          const o = os.data()
+          const variants = []
+          for (const vid of (o.variantIds || [])) {
+            const vs = await adminDb.collection('priceEstimates').doc(String(vid)).get()
+            if (vs.exists) { const vd = vs.data(); variants.push({ id: String(vid), label: vd.variantLabel || 'Варіант', total: vd.total, chosen: o.selectedVariantId === vid }) }
+          }
+          offer = { selectedVariantId: o.selectedVariantId || null, variants }
+        }
+      }
+      let channel = null
+      if (r.sessionId) {
+        const cs = await adminDb.collection('chatSessions').doc(String(r.sessionId)).get()
+        if (cs.exists) channel = cs.data().channel || null
+      }
+      return {
+        complaint: r.complaint || '',
+        boat: r.boat || '',
+        diagnostics: r.diagnostics && r.diagnostics.text ? { text: r.diagnostics.text, at: r.diagnostics.at || null } : null,
+        channel,
+        offer,
+      }
+    } catch (err) {
+      console.error('buildEstimateContext:', err.message)
+      return null
+    }
+  }
 
   app.get('/api/estimates/:id/public', async (req, res) => {
     if (!adminDb) return res.status(503).json({ success: false })
@@ -436,7 +484,10 @@ export function registerPayments(app, deps) {
         const p = await adminDb.collection('priceEstimates').doc(String(e.parentEstimateId)).get()
         parent = p.exists ? p.data() : null
       }
-      return res.json({ success: true, data: { estimate: safeEstimate(e), parent: safeEstimate(parent) } })
+      // Контекст для клиента: как обращался, что зафиксировано в заявке, диагностика, предложения.
+      // Безопасно по знанию id сметы (крипто-стойкий capability-token) — это данные самого клиента.
+      const context = await buildEstimateContext(e)
+      return res.json({ success: true, data: { estimate: safeEstimate(e), parent: safeEstimate(parent), context } })
     } catch (err) {
       console.error('estimate public:', err.message)
       res.status(500).json({ success: false })

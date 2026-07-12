@@ -86,11 +86,29 @@ export interface SafeEstimate {
   parentEstimateId: string | null
   paid: boolean
   paidAt: string | null
+  updatedAt?: string | null // время последнего сохранения (для истории)
   taxUrl: string | null
+  history?: SafeEstimateVersion[] // история правок (снимки прежних версий)
+}
+// Снимок прежней версии сметы (без внутреннего) — для истории правок.
+export interface SafeEstimateVersion {
+  at: string | null
+  total: number
+  lines: SafeEstimateLine[]
+  sections?: { complaint: string; serviceKind?: 'repair' | 'upgrade' | null }[] | null
+}
+// Контекст для клиента: как обращался, что зафиксировано в заявке, диагностика, предложения.
+export interface EstimateContext {
+  complaint: string
+  boat: string
+  diagnostics: { text: string; at: string | null } | null
+  channel: string | null
+  offer: { selectedVariantId: string | null; variants: { id: string; label: string; total: number; chosen: boolean }[] } | null
 }
 export interface EstimatePublic {
   estimate: SafeEstimate
   parent: SafeEstimate | null
+  context?: EstimateContext | null
 }
 
 // Публичный вид предложения (набора вариантов) для клиента

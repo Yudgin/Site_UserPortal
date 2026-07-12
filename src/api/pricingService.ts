@@ -1,6 +1,6 @@
 import { db, auth } from './firebase'
 import { doc, getDoc, setDoc, collection, query, where, getDocs, limit, orderBy } from 'firebase/firestore'
-import type { Estimate, EstimateOffer, WorkCategory, Work, Kit, Material, Addon, PricingSettings } from '@/types/pricing'
+import type { Estimate, EstimateVersion, EstimateOffer, WorkCategory, Work, Kit, Material, Addon, PricingSettings } from '@/types/pricing'
 import { priceListSeed, defaultPricingSettings } from '@/data/priceListSeed'
 import { isAdminEmail } from '@/config/access'
 import { secureId } from '@/utils/id'
@@ -126,17 +126,51 @@ export const pricingService = {
     }
   },
 
-  // Сохранить смету (история + обучающая база для AI-оценки)
+  // Сохранить смету. При повторном сохранении с ИЗМЕНЁННЫМ содержанием кладём прежнее состояние в
+  // history (видно мастеру и клиенту — что менялось). Сохраняем backend-поля оплаты (setDoc заменяет
+  // документ целиком, поэтому переносим их из существующего, чтобы не затереть чек/оплату).
   saveEstimate: async (estimate: Estimate): Promise<{ id: string } | null> => {
     if (!db || !auth?.currentUser) return null
     try {
       const id = estimate.id || generateId()
+      const ref = doc(db, ESTIMATES_COLLECTION, id)
+      const now = new Date().toISOString()
+      const existingSnap = await getDoc(ref)
+      const existing = existingSnap.exists() ? (existingSnap.data() as Estimate) : null
+
+      // Сигнатура содержания (позиции + сумма) — чтобы фиксировать версию только при реальном изменении.
+      const sig = (e: Pick<Estimate, 'lines' | 'total'>) =>
+        `${(e.lines || []).map((l) => `${l.refId}:${l.qty}:${l.lineTotal}`).sort().join('|')}#${e.total}`
+
+      let history: EstimateVersion[] = existing?.history || []
+      if (existing && sig(existing) !== sig(estimate)) {
+        history = [
+          ...history,
+          {
+            at: existing.updatedAt || existing.createdAt || now,
+            total: existing.total,
+            lines: existing.lines || [],
+            ...(existing.sections ? { sections: existing.sections } : {}),
+            editedBy: existing.createdBy || null,
+          },
+        ].slice(-20) // ограничиваем историю последними 20 версиями
+      }
+
       const payload: Estimate = {
         ...estimate,
         id,
-        createdBy: estimate.createdBy || auth.currentUser.email,
+        createdAt: estimate.createdAt || existing?.createdAt || now,
+        createdBy: estimate.createdBy || existing?.createdBy || auth.currentUser.email,
+        updatedAt: now,
+        history,
+        // backend-поля оплаты/чека — переносим из существующего, если новый payload их не задаёт.
+        paymentId: estimate.paymentId ?? existing?.paymentId ?? null,
+        paidAt: estimate.paidAt ?? existing?.paidAt ?? null,
+        taxUrl: estimate.taxUrl ?? existing?.taxUrl ?? null,
+        fiscalCode: estimate.fiscalCode ?? existing?.fiscalCode ?? null,
+        payInitiatedAt: estimate.payInitiatedAt ?? existing?.payInitiatedAt ?? null,
       }
-      await setDoc(doc(db, ESTIMATES_COLLECTION, id), payload)
+      await setDoc(ref, payload)
       return { id }
     } catch (error) {
       console.error('Error saving estimate:', error)

@@ -277,6 +277,17 @@ export interface SpecialistPayout {
   centerAdminAmount: number // грн центру за администрирование
 }
 
+// Снимок ПРЕДЫДУЩЕЙ версии сметы (для истории правок). При каждом сохранении с изменённым
+// содержанием старое состояние кладётся в history. Показывается всем (мастеру и клиенту) — чтобы
+// было видно, что калькуляция менялась и что именно. editedBy наружу (клиенту) НЕ отдаём.
+export interface EstimateVersion {
+  at: string // когда эта версия была актуальна (updatedAt/createdAt на момент снимка)
+  total: number
+  lines: EstimateLine[]
+  sections?: EstimateComplaintRef[]
+  editedBy?: string | null // внутреннее (кто правил) — в safeEstimate не попадает
+}
+
 // Смета целиком. Сохраняется в Firestore и служит обучающим примером для AI-оценки.
 export interface Estimate {
   id: string
@@ -296,7 +307,9 @@ export interface Estimate {
   currency: Currency
   source: 'manual' | 'kit' | 'ai' // как собрана смета
   createdAt: string
+  updatedAt?: string // время последнего сохранения (для истории версий)
   createdBy: string | null
+  history?: EstimateVersion[] // история правок (снимки прежних версий; видно мастеру и клиенту)
   // — Предварительная/фактическая калькуляция и связь с оплатой —
   kind?: EstimateKind // роль сметы (по умолчанию 'preliminary')
   stage?: EstimateStage // стадия: 'ai' | 'proposed' | 'actual' (уточняет kind)

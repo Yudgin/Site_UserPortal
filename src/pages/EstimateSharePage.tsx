@@ -12,9 +12,10 @@ import {
 import {
   Payment as PaymentIcon, Receipt as ReceiptIcon, CheckCircle as CheckIcon, Refresh as RefreshIcon,
 } from '@mui/icons-material'
-import { paymentsApi, submitLiqpayCheckout, FopPublic, PayMethod, SafeEstimate } from '@/api/endpoints/payments'
+import { paymentsApi, submitLiqpayCheckout, FopPublic, PayMethod, SafeEstimate, EstimateContext } from '@/api/endpoints/payments'
 import { compareEstimates, tName, formatMoney } from '@/utils/pricing'
 import EstimateSectionsView from '@/components/EstimateSectionsView'
+import EstimateHistory from '@/components/EstimateHistory'
 import type { Estimate } from '@/types/pricing'
 
 const ORDER_KEY = (id: string) => `rf_pay_order_${id}`
@@ -23,6 +24,7 @@ export default function EstimateSharePage() {
   const { id = '' } = useParams<{ id: string }>()
   const [est, setEst] = useState<SafeEstimate | null>(null)
   const [prelim, setPrelim] = useState<SafeEstimate | null>(null)
+  const [context, setContext] = useState<EstimateContext | null>(null)
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
   const [fop, setFop] = useState<FopPublic | null>(null)
@@ -34,9 +36,10 @@ export default function EstimateSharePage() {
   const load = useCallback(async () => {
     if (!id) return
     try {
-      const { estimate, parent } = await paymentsApi.getEstimatePublic(id)
+      const { estimate, parent, context: ctx } = await paymentsApi.getEstimatePublic(id)
       setEst(estimate)
       setPrelim(parent)
+      setContext(ctx || null)
     } catch {
       setNotFound(true)
     } finally {
@@ -142,6 +145,7 @@ export default function EstimateSharePage() {
   const rejected = est.status === 'rejected'
   const needsApproval = est.status === 'pending_approval'
   const canPay = !paid && !rejected && !needsApproval && est.status === 'approved'
+  const channelLabel = (c: string) => (({ telegram: 'Telegram', viber: 'Viber', web: 'Сайт', site: 'Сайт', sms: 'SMS' } as Record<string, string>)[c] || c)
 
   return (
     <Container maxWidth="md" sx={{ py: 4 }}>
@@ -160,11 +164,50 @@ export default function EstimateSharePage() {
       {rejected && <Alert severity="info" sx={{ mb: 3 }}>Ви відхилили цей кошторис. Зв'яжіться з майстром для уточнення.</Alert>}
       {needsApproval && <Alert severity="warning" sx={{ mb: 3 }}>Обсяг робіт змінився — перегляньте зміни та погодьте кошторис, щоб перейти до оплати.</Alert>}
 
+      {/* Історія звернення: як звертались, що зафіксовано в заявці, діагностика, попередні варіанти */}
+      {context && (context.complaint || context.boat || context.channel || context.diagnostics?.text || (context.offer && context.offer.variants.length > 0)) && (
+        <Paper sx={{ p: 2, mb: 3 }}>
+          <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Історія вашого звернення</Typography>
+          <Stack spacing={1.75}>
+            {(context.complaint || context.boat || context.channel) && (
+              <Box>
+                <Typography variant="subtitle2">Звернення{context.channel ? ` · ${channelLabel(context.channel)}` : ''}</Typography>
+                {context.boat && <Typography variant="body2" color="text.secondary">Кораблик: {context.boat}</Typography>}
+                {context.complaint && <Typography variant="body2">{context.complaint}</Typography>}
+              </Box>
+            )}
+            {context.diagnostics?.text && (
+              <Box>
+                <Typography variant="subtitle2">Діагностика{context.diagnostics.at ? ` · ${new Date(context.diagnostics.at).toLocaleDateString('uk-UA')}` : ''}</Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'pre-wrap' }}>{context.diagnostics.text}</Typography>
+              </Box>
+            )}
+            {context.offer && context.offer.variants.length > 0 && (
+              <Box>
+                <Typography variant="subtitle2">Попередні калькуляції (варіанти)</Typography>
+                <Stack spacing={0.5} sx={{ mt: 0.5 }}>
+                  {context.offer.variants.map((v) => (
+                    <Stack key={v.id} direction="row" spacing={1} alignItems="center">
+                      {v.chosen && <Chip size="small" color="success" label="обрано" />}
+                      <Typography variant="body2" sx={{ fontWeight: v.chosen ? 500 : 400 }}>{v.label}</Typography>
+                      <Typography variant="body2" sx={{ ml: 'auto' }}>{formatMoney(v.total)}</Typography>
+                    </Stack>
+                  ))}
+                </Stack>
+              </Box>
+            )}
+          </Stack>
+        </Paper>
+      )}
+
       {/* Позиции — разрезами по требованиям клиента */}
       <Paper sx={{ p: 2, mb: 3 }}>
         <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Склад робіт за вашими вимогами</Typography>
         <EstimateSectionsView lines={est.lines} sections={est.sections} total={est.total} currency={est.currency} />
       </Paper>
+
+      {/* Історія змін кошторису (що і коли редагували) */}
+      <EstimateHistory current={est} history={est.history || []} />
 
       {/* Что изменилось (diff) */}
       {comparison && (comparison.added.length > 0 || comparison.changed.length > 0 || comparison.removed.length > 0) && (
