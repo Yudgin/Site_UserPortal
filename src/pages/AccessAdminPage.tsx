@@ -21,7 +21,7 @@ import {
 
 // Назначаемые роли. 'owner' пока не назначается: делегированный владелец заработает на уровне
 // данных лише у фазі 1b (правила/сервер почнуть читати роль); власник — акаунт за email.
-const ROLES: Role[] = ['accountant', 'master']
+const ROLES: Role[] = ['director', 'accountant', 'master']
 
 export default function AccessAdminPage() {
   const navigate = useNavigate()
@@ -90,11 +90,22 @@ export default function AccessAdminPage() {
     })
   }
 
+  // Директору назначаем ЦЕНТРЫ (полный доступ внутри), мастеру — набор прав по центрам.
+  const toggleDirectorCenter = (centerId: string) => {
+    setUCenters((prev) => {
+      const has = (prev[centerId] || []).length > 0
+      return { ...prev, [centerId]: has ? [] : [...CENTER_PERMISSIONS] }
+    })
+  }
+
   const saveUser = async () => {
     if (!userEdit) return
+    // master — по флагам; director — назначенные центры с полным набором прав; иначе — без центров.
     const centersArr: CenterAccess[] = uRole === 'master'
       ? Object.entries(uCenters).filter(([, perms]) => perms.length).map(([centerId, perms]) => ({ centerId, perms }))
-      : []
+      : uRole === 'director'
+        ? Object.entries(uCenters).filter(([, perms]) => perms.length).map(([centerId]) => ({ centerId, perms: [...CENTER_PERMISSIONS] }))
+        : []
     const ok = await userProfileService.setAccess(userEdit.uid, { role: uRole, active: uActive, centers: centersArr })
     if (ok) { notify('Доступ збережено'); setUserEdit(null); await load() }
     else notify('Не вдалося зберегти', 'error')
@@ -186,6 +197,23 @@ export default function AccessAdminPage() {
             <FormControlLabel control={<Switch checked={uActive} onChange={(e) => setUActive(e.target.checked)} />} label="Доступ активний" />
             {uRole === 'accountant' && <Alert severity="info">Бухгалтер: перегляд + виставлення на оплату по всіх центрах.</Alert>}
             {uRole === 'owner' && <Alert severity="warning">Власник: повний доступ до всього.</Alert>}
+            {uRole === 'director' && (
+              <Box>
+                <Alert severity="info" sx={{ mb: 1 }}>Директор: повний доступ (усі права + економіка центру) у межах призначених центрів.</Alert>
+                {centers.length === 0 ? (
+                  <Alert severity="warning">Спочатку додайте сервісні центри.</Alert>
+                ) : (
+                  <Stack>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>Центри під керуванням:</Typography>
+                    {centers.filter((c) => c.active).map((c) => (
+                      <FormControlLabel key={c.id}
+                        control={<Checkbox size="small" checked={(uCenters[c.id] || []).length > 0} onChange={() => toggleDirectorCenter(c.id)} />}
+                        label={centerName.get(c.id)} />
+                    ))}
+                  </Stack>
+                )}
+              </Box>
+            )}
             {uRole === 'master' && (
               <Box>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>Права по центрах:</Typography>

@@ -50,6 +50,11 @@ export const useAccess = () => {
     if (isOwner) return true
     if (!profile || !profile.active) return false
     if (profile.role === 'accountant') return perm === 'view' || perm === 'payment'
+    // Директор: ВСЕ права в пределах назначенных ему центров (набор флагов игнорируем).
+    if (profile.role === 'director') {
+      if (!centerId) return (profile.centers || []).length > 0
+      return (profile.centers || []).some((c) => c.centerId === centerId)
+    }
     if (profile.role === 'master') {
       if (!centerId) return (profile.centers || []).some((c) => c.perms.includes(perm))
       const c = (profile.centers || []).find((x) => x.centerId === centerId)
@@ -61,12 +66,13 @@ export const useAccess = () => {
   // Центры, к которым у пользователя есть хотя бы просмотр (для фильтрации списков).
   const visibleCenterIds = (): string[] | 'all' => {
     if (isOwner || profile?.role === 'accountant') return 'all'
+    if (profile?.role === 'director') return (profile.centers || []).map((c) => c.centerId)
     if (profile?.role === 'master') return (profile.centers || []).filter((c) => c.perms.includes('view')).map((c) => c.centerId)
     return []
   }
 
   // Есть ли вообще доступ в служебную часть (не клиент).
-  const isStaff = isOwner || (!!profile?.active && (profile.role === 'accountant' || profile.role === 'master'))
+  const isStaff = isOwner || (!!profile?.active && (profile.role === 'accountant' || profile.role === 'director' || profile.role === 'master'))
 
   return { isOwner, role, can, visibleCenterIds, isStaff, centers, loaded, profile }
 }

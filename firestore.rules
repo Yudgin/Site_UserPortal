@@ -2,10 +2,9 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Users can only read and write their own data
-    match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
-    }
+    // users/{userId} — единый блок правил ниже (см. «Профили сотрудников»). Раньше здесь был
+    // отдельный блок `allow write: if uid==userId`, который позволял пользователю писать СВОЙ
+    // документ целиком, включая role/centers/active → self-escalation до owner. Убрано.
 
     // Pixel designs - public read, authenticated create, owner update/delete
     match /pixelDesigns/{designId} {
@@ -61,13 +60,25 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    // Профили сотрудников (роли/центры/права). Своё — читать можно; список — владелец.
-    // Запись роли/центров/активности — ТОЛЬКО владелец. Саморегистрацию identity делает backend
-    // (Admin SDK минует правила), чтобы клиент не мог сам себе выдать роль.
+    // Профили сотрудников (роли/центры/права) + легаси-персональные данные (boats/settings).
+    // Своё — читать можно; список — владелец. RBAC-поля (role/centers/active/createdBy) пишет
+    // ТОЛЬКО владелец (или backend Admin SDK, минуя правила). Пользователь может писать СВОЙ
+    // документ (легаси boats/settings/updatedAt), но НЕ трогая RBAC-поля — иначе self-escalation.
+    function touchesRbacKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasAny(['role', 'centers', 'active', 'createdBy']);
+    }
     match /users/{userId} {
       allow get: if isPriceAdmin() || (request.auth != null && request.auth.uid == userId);
       allow list: if isPriceAdmin();
-      allow write: if isPriceAdmin();
+      // Создание: владелец — что угодно; сам пользователь — только БЕЗ RBAC-полей.
+      allow create: if isPriceAdmin()
+        || (request.auth != null && request.auth.uid == userId
+            && !request.resource.data.keys().hasAny(['role', 'centers', 'active', 'createdBy']));
+      // Обновление: владелец — что угодно; сам пользователь — только не меняя RBAC-полей.
+      allow update: if isPriceAdmin()
+        || (request.auth != null && request.auth.uid == userId && !touchesRbacKeys());
+      allow delete: if isPriceAdmin();
     }
 
     // Реестр сервисных центров (зон). Читать — авторизованным (мастерам нужны назви);
