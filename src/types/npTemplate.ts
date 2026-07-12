@@ -10,12 +10,18 @@ export type NpServiceType = 'WarehouseWarehouse' | 'WarehouseDoors' | 'DoorsWare
 export type NpPartyTarget = 'service' | 'client'
 export type NpRecipientTarget = 'service' | 'client' | 'fixed'
 
-// Адрес отделения НП (для фикс. сторон в шаблоне).
+// Адрес НП (для фикс. сторон в шаблоне). Отделение → warehouseRef; адресная доставка (курьер) →
+// settlementRef (для поиска улиц) + streetRef + house + flat.
 export interface NpAddress {
-  cityRef?: string
+  cityRef?: string // DeliveryCity Ref (для поиска отделений)
   cityName?: string
-  warehouseRef?: string
+  settlementRef?: string // Settlement Ref (для поиска улиц при адресной доставке)
+  warehouseRef?: string // отделение (delivery=warehouse)
   warehouseName?: string
+  streetRef?: string // улица (delivery=address)
+  streetName?: string
+  house?: string // будинок
+  flat?: string // квартира
 }
 
 export interface NpTemplate {

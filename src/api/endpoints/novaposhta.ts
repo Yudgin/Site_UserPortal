@@ -9,11 +9,17 @@ const npClient = axios.create({
 })
 
 export interface NPCity {
-  Ref: string
+  Ref: string // DeliveryCity Ref (для отделений)
+  SettlementRef?: string // Settlement Ref (для поиска улиц)
   Description: string
   DescriptionRu: string
   Area: string
   AreaDescription: string
+}
+
+export interface NPStreet {
+  Ref: string
+  Description: string
 }
 
 export interface NPWarehouse {
@@ -34,6 +40,7 @@ export const searchCities = async (query: string): Promise<NPCity[]> => {
     if (response.data.success && response.data.data?.[0]?.Addresses) {
       return response.data.data[0].Addresses.map((addr: any) => ({
         Ref: addr.DeliveryCity,
+        SettlementRef: addr.Ref,
         Description: addr.Present,
         DescriptionRu: addr.Present,
         Area: addr.Area,
@@ -43,6 +50,21 @@ export const searchCities = async (query: string): Promise<NPCity[]> => {
     return []
   } catch (error) {
     console.error('Error searching cities:', error)
+    return []
+  }
+}
+
+// Поиск улиц населённого пункта (для адресной/курьерской доставки). settlementRef — Ref населённого
+// пункта (NPCity.SettlementRef), НЕ DeliveryCity.
+export const searchStreets = async (settlementRef: string, query: string): Promise<NPStreet[]> => {
+  try {
+    const response = await npClient.post('/streets', { settlementRef, query })
+    if (response.data.success && response.data.data?.[0]?.Addresses) {
+      return response.data.data[0].Addresses.map((s: any) => ({ Ref: s.SettlementStreetRef || s.Ref, Description: s.Present || s.Description }))
+    }
+    return []
+  } catch (error) {
+    console.error('Error searching streets:', error)
     return []
   }
 }

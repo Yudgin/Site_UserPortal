@@ -452,6 +452,23 @@ app.post('/api/novaposhta/warehouses', proxyLimiter, async (req, res) => {
   }
 })
 
+// Поиск улиц населённого пункта (для адресной доставки). settlementRef — Ref населённого пункта.
+app.post('/api/novaposhta/streets', proxyLimiter, async (req, res) => {
+  try {
+    const { settlementRef, query } = req.body
+    if (!settlementRef) return res.status(400).json({ success: false, error: { code: 'MISSING_SETTLEMENT_REF', message: 'settlementRef is required' } })
+    const data = await npRequest('Address', 'searchSettlementStreets', {
+      SettlementRef: settlementRef,
+      StreetName: query || '',
+      Limit: 30,
+    })
+    res.json(data)
+  } catch (error) {
+    console.error('Nova Poshta streets error:', error.message)
+    res.status(500).json({ success: false, error: { code: 'NP_FAILED', message: 'Failed to get streets' } })
+  }
+})
+
 // Track parcel by TTN
 app.post('/api/novaposhta/track', proxyLimiter, async (req, res) => {
   try {

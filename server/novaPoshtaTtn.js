@@ -55,6 +55,19 @@ const resolveRecipient = async (apiKey, { name, phone, cityRef }) => {
   return { ref: cp.Ref, contactRef }
 }
 
+// Создать адрес НП для counterparty (курьерская доставка) → возвращает address Ref.
+const resolveAddressRef = async (apiKey, counterpartyRef, addr) => {
+  if (!addr || !addr.streetRef) throw new Error('Для адресної доставки не задана вулиця')
+  const resp = await npCall(apiKey, 'Address', 'save', {
+    CounterpartyRef: counterpartyRef,
+    StreetRef: addr.streetRef,
+    BuildingNumber: String(addr.house || ''),
+    Flat: String(addr.flat || ''),
+  })
+  if (!resp || resp.success !== true || !resp.data || !resp.data[0]) throw new Error(npErr(resp, 'Не вдалося створити адресу НП'))
+  return resp.data[0].Ref
+}
+
 export function registerNpTtn(app, deps) {
   const { adminDb } = deps
 
@@ -99,14 +112,21 @@ export function registerNpTtn(app, deps) {
       const clientPhone = String(b.clientPhone || sr.clientPhone || '')
       const clientName = String(b.clientName || sr.clientName || 'Клієнт')
 
+      // Режим доставки по каждой стороне из serviceType (Warehouse=отделение, Doors=адрес/курьер).
+      const serviceType = tpl.serviceType || 'WarehouseWarehouse'
+      const senderDelivery = serviceType.startsWith('Warehouse') ? 'warehouse' : 'address'
+      const recipientDelivery = serviceType.endsWith('Warehouse') ? 'warehouse' : 'address'
+
       // ---- Отправитель ---- (counterparty всегда = ФОП; адрес — сервис из шаблона или клиент)
       let senderCity, senderAddr
       if (senderTarget === 'client') {
         if (!clientCityRef || !clientWarehouseRef) return res.status(400).json({ success: false, error: { code: 'NO_CLIENT_ADDR', message: 'Вкажіть місто та відділення клієнта (звідки надсилає)' } })
-        senderCity = clientCityRef; senderAddr = clientWarehouseRef
+        senderCity = clientCityRef; senderAddr = clientWarehouseRef // клиент — только отделение
       } else {
         senderCity = tpl.sender?.cityRef || np.cityRef
-        senderAddr = tpl.sender?.warehouseRef || np.warehouseRef
+        senderAddr = senderDelivery === 'address'
+          ? await resolveAddressRef(apiKey, np.senderRef, tpl.sender)
+          : (tpl.sender?.warehouseRef || np.warehouseRef)
       }
       const senderFields = {
         CitySender: senderCity, Sender: np.senderRef, SenderAddress: senderAddr,
@@ -117,16 +137,27 @@ export function registerNpTtn(app, deps) {
       let recipientFields
       if (recipientTarget === 'service') {
         const rCity = tpl.recipient?.cityRef || np.cityRef
-        const rAddr = tpl.recipient?.warehouseRef || np.warehouseRef
+        const rAddr = recipientDelivery === 'address'
+          ? await resolveAddressRef(apiKey, np.senderRef, tpl.recipient)
+          : (tpl.recipient?.warehouseRef || np.warehouseRef)
         recipientFields = { CityRecipient: rCity, Recipient: np.senderRef, RecipientAddress: rAddr, ContactRecipient: np.contactRef, RecipientsPhone: np.senderPhone || '' }
       } else {
         const isClient = recipientTarget === 'client'
         const rCity = isClient ? clientCityRef : (tpl.recipient?.cityRef || '')
-        const rAddr = isClient ? clientWarehouseRef : (tpl.recipient?.warehouseRef || '')
         const rName = isClient ? clientName : (tpl.recipientName || 'Отримувач')
         const rPhone = isClient ? clientPhone : (tpl.recipientPhone || '')
-        if (!rCity || !rAddr) return res.status(400).json({ success: false, error: { code: 'NO_RECIP_ADDR', message: isClient ? 'Вкажіть місто та відділення клієнта (куди надсилаємо)' : 'У шаблоні не задана адреса отримувача' } })
+        if (!rCity) return res.status(400).json({ success: false, error: { code: 'NO_RECIP_CITY', message: isClient ? 'Вкажіть місто клієнта (куди надсилаємо)' : 'У шаблоні не задане місто отримувача' } })
         const rec = await resolveRecipient(apiKey, { name: rName, phone: rPhone, cityRef: rCity })
+        let rAddr
+        if (isClient) {
+          if (!clientWarehouseRef) return res.status(400).json({ success: false, error: { code: 'NO_CLIENT_ADDR', message: 'Вкажіть відділення клієнта (куди надсилаємо)' } })
+          rAddr = clientWarehouseRef // клиент — только отделение (курьер клиенту — окремий крок)
+        } else if (recipientDelivery === 'address') {
+          rAddr = await resolveAddressRef(apiKey, rec.ref, tpl.recipient)
+        } else {
+          rAddr = tpl.recipient?.warehouseRef || ''
+          if (!rAddr) return res.status(400).json({ success: false, error: { code: 'NO_RECIP_ADDR', message: 'У шаблоні не задане відділення отримувача' } })
+        }
         recipientFields = { CityRecipient: rCity, Recipient: rec.ref, RecipientAddress: rAddr, ContactRecipient: rec.contactRef, RecipientsPhone: rPhone }
       }
 
