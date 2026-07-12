@@ -153,7 +153,8 @@ export default function ActualEstimateEditorPage() {
   }, [center, editId])
 
   const activeWorks = useMemo(() => Object.values(indexed.works).filter((w) => w.active), [indexed])
-  const activeKits = useMemo(() => Object.values(indexed.kits).filter((k) => k.active), [indexed])
+  // Наборы разделены по направлениям — показываем только для выбранного (Ремонт/Апгрейд).
+  const activeKits = useMemo(() => Object.values(indexed.kits).filter((k) => k.active && k.serviceKind === serviceKind), [indexed, serviceKind])
 
   // Живой расчёт фактической сметы
   const actual: Estimate | null = useMemo(() => {
