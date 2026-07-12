@@ -20,15 +20,18 @@ import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { pricingService } from '@/api/pricingService'
 import { serviceRequestService } from '@/api/serviceRequestService'
+import { userProfileService } from '@/api/userProfileService'
 import { notificationApi } from '@/api/endpoints/notification'
 import { paymentsApi, FopPublic } from '@/api/endpoints/payments'
+import SpecialistPayoutsEditor from '@/components/SpecialistPayoutsEditor'
 import {
   buildEstimate, estimate2goods, compareEstimates, needsReapproval, tName, formatMoney,
   type EstimateWorkInput,
 } from '@/utils/pricing'
 import { buildPriceContext } from '@/utils/aiContext'
 import AiWorkPicker from '@/components/AiWorkPicker'
-import type { Estimate, ServiceKind } from '@/types/pricing'
+import type { Estimate, ServiceKind, SpecialistPayout } from '@/types/pricing'
+import type { ServiceRequest } from '@/types/serviceRequest'
 
 interface WorkRow extends EstimateWorkInput {
   key: string // локальный ключ строки (работа может повторяться)
@@ -53,6 +56,11 @@ export default function ActualEstimateEditorPage() {
 
   const [fops, setFops] = useState<FopPublic[]>([])
   const [fopId, setFopId] = useState('')
+
+  // Заявка (для специалистов/центра) + справочник специалистов + распределение выплат.
+  const [request, setRequest] = useState<ServiceRequest | null>(null)
+  const [staff, setStaff] = useState<{ uid: string; name: string }[]>([])
+  const [payouts, setPayouts] = useState<SpecialistPayout[]>([])
 
   const [savedId, setSavedId] = useState('')
   const [saving, setSaving] = useState(false)
@@ -94,6 +102,7 @@ export default function ActualEstimateEditorPage() {
       setComplaint(act.complaint || '')
       setServiceKind((act.sections?.[0]?.serviceKind as ServiceKind) || 'repair')
       if (act.fopId) setFopId(act.fopId)
+      setPayouts(act.specialistPayouts || [])
       setRows(act.lines.filter((l) => l.type === 'labor').map((l, i) => ({ key: `e${i}`, workId: l.refId, qty: l.qty })))
       if (act.parentEstimateId) {
         setEditParentId(act.parentEstimateId) // помним связь, даже если родитель ещё грузится
@@ -101,6 +110,25 @@ export default function ActualEstimateEditorPage() {
       }
     })
   }, [editId])
+
+  // Заявка (для специалистов/центра). При СОЗДАНИИ факта (без ?edit=) авто-подставляем специалистов
+  // заявки в распределение (суммы 0 — мастер заполнит). При редактировании existing факта не трогаем.
+  const effRequestId = serviceRequestId || prelim?.serviceRequestId || ''
+  useEffect(() => {
+    if (!effRequestId) return
+    serviceRequestService.get(effRequestId).then((r) => {
+      if (!r) return
+      setRequest(r)
+      if (!editId) {
+        setPayouts((prev) => prev.length ? prev : (r.specialists || []).map((s) => ({ uid: s.uid, name: s.name, specialistAmount: 0, centerAdminAmount: 0 })))
+      }
+    }).catch(() => {})
+  }, [effRequestId, editId])
+
+  // Справочник специалистов центра (для добавления в распределение). Фильтр по центру заявки, если задан.
+  useEffect(() => {
+    userProfileService.listSpecialists(request?.serviceCenterId || null).then(setStaff).catch(() => setStaff([]))
+  }, [request?.serviceCenterId])
 
   const activeWorks = useMemo(() => Object.values(indexed.works).filter((w) => w.active), [indexed])
   const activeKits = useMemo(() => Object.values(indexed.kits).filter((k) => k.active), [indexed])
@@ -183,6 +211,7 @@ export default function ActualEstimateEditorPage() {
         parentEstimateId: prelim?.id ?? knownParentId,
         serviceRequestId: srId,
         receiptGoods: estimate2goods(actual, 'uk'),
+        specialistPayouts: payouts,
         fopId,
       }
       const res = await pricingService.saveEstimate(toSave)
@@ -387,6 +416,11 @@ export default function ActualEstimateEditorPage() {
             </Box>
           )}
         </Paper>
+      )}
+
+      {/* Распределение по специалистам (внутренняя экономика; клиенту не видно) */}
+      {actual && (
+        <SpecialistPayoutsEditor value={payouts} onChange={setPayouts} staff={staff} total={actual.total} />
       )}
 
       {/* ФОП + сохранение + ссылка клиенту */}

@@ -7,16 +7,18 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, CircularProgress, Chip, Stack, Divider,
-  TextField, MenuItem, Link, Snackbar,
+  TextField, MenuItem, Link, Snackbar, Autocomplete,
 } from '@mui/material'
 import {
   Home as HomeIcon, Forum as ChatIcon, LocalOffer as OfferIcon, Build as ActualIcon,
   Payments as PaymentsIcon, Save as SaveIcon, CheckCircle as CheckIcon, Psychology as AiIcon,
   Biotech as DiagIcon, NotificationsActive as NotifyIcon, LocalShipping as ShipIcon, Send as SendIcon,
+  Group as SpecialistsIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import { serviceRequestService } from '@/api/serviceRequestService'
+import { userProfileService } from '@/api/userProfileService'
 import { chatSessionService } from '@/api/chatSessionService'
 import { notificationService } from '@/api/notificationService'
 import { notificationApi } from '@/api/endpoints/notification'
@@ -49,6 +51,7 @@ export default function ServiceRequestPage() {
   const [sending, setSending] = useState(false)
   const [ttnDialog, setTtnDialog] = useState(false) // диалог создания ТТН на приём
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
+  const [staff, setStaff] = useState<{ uid: string; name: string }[]>([]) // справочник специалистов центра
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
   const load = useCallback(async () => {
@@ -69,6 +72,20 @@ export default function ServiceRequestPage() {
   }, [id])
 
   useEffect(() => { load() }, [load])
+
+  // Справочник специалистов (для назначения на заявку). Фильтр по центру заявки, если задан.
+  useEffect(() => {
+    userProfileService.listSpecialists(req?.serviceCenterId || null).then(setStaff).catch(() => setStaff([]))
+  }, [req?.serviceCenterId])
+
+  const specialists = req?.specialists || []
+  const addSpecialist = (opt: { uid: string; name: string } | null) => {
+    if (!opt || specialists.some((s) => s.uid === opt.uid)) return
+    patch({ specialists: [...specialists, { uid: opt.uid, name: opt.name }] }).then((ok) => { if (ok) notify('Спеціаліста додано') })
+  }
+  const removeSpecialist = (uid: string) => {
+    patch({ specialists: specialists.filter((s) => s.uid !== uid) }).then((ok) => { if (ok) notify('Спеціаліста прибрано') })
+  }
 
   // Оптимистично обновляем req локально (без полной перезагрузки, чтобы не терять несохранённый
   // ввод в полях і не затирати статус, проставлений webhook). offer/actual не меняются при этом.
@@ -208,6 +225,28 @@ export default function ServiceRequestPage() {
             </Typography>
           )}
         </Stack>
+      </Paper>
+
+      {/* Специалисты, выполняющие сервис (портальные пользователи центра) */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+          <SpecialistsIcon fontSize="small" color="primary" />
+          <Typography variant="subtitle1">Спеціалісти сервісу</Typography>
+        </Stack>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          Хто виконує сервіс за заявкою. Під час створення фактичної калькуляції їх буде підставлено для розподілу виплат.
+        </Typography>
+        <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 1, mb: 1.5 }}>
+          {specialists.length === 0
+            ? <Typography variant="body2" color="text.secondary">Ще не призначено.</Typography>
+            : specialists.map((s) => <Chip key={s.uid} label={s.name} onDelete={() => removeSpecialist(s.uid)} />)}
+        </Stack>
+        <Autocomplete size="small" sx={{ minWidth: 260, maxWidth: 360 }}
+          options={staff.filter((o) => !specialists.some((s) => s.uid === o.uid))}
+          getOptionLabel={(o) => o.name} isOptionEqualToValue={(a, b) => a.uid === b.uid}
+          value={null} onChange={(_, v) => addSpecialist(v)} disabled={saving}
+          noOptionsText={staff.length ? 'Усі додані' : 'Немає співробітників (додайте у «Доступ та центри»)'}
+          renderInput={(p) => <TextField {...p} label="Додати спеціаліста" />} />
       </Paper>
 
       {/* Крок 1: Предложение (предварительные калькуляции) */}

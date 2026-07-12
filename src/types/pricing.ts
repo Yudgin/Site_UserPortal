@@ -244,6 +244,17 @@ export interface ReceiptGood {
   code?: string // артикул (если нужен по требованиям чека)
 }
 
+// Распределение фактической сметы по специалистам (ВНУТРЕННЯЯ экономика — клиенту НЕ отдаётся:
+// serverный safeEstimate это поле не включает; priceEstimates читает только админ). Специалист —
+// портальный пользователь центра (role master/director). specialistAmount — сумма специалисту;
+// centerAdminAmount — центру за администрирование. Суммы задаются мастером вручную.
+export interface SpecialistPayout {
+  uid: string
+  name: string // ФИО (снимок, чтобы отображать без загрузки users)
+  specialistAmount: number // грн специалисту
+  centerAdminAmount: number // грн центру за администрирование
+}
+
 // Смета целиком. Сохраняется в Firestore и служит обучающим примером для AI-оценки.
 export interface Estimate {
   id: string
@@ -275,6 +286,7 @@ export interface Estimate {
   variantLabel?: string // «Повний ремонт» / «Бюджетний» и т.п.
   variantOrder?: number
   receiptGoods?: ReceiptGood[] // снимок позиций для чека (для фактической, на момент согласования)
+  specialistPayouts?: SpecialistPayout[] // распределение по специалистам (внутреннее; клиенту не видно)
   // Проставляются backend-ом после оплаты и фискализации (минуя клиентские правила):
   payInitiatedAt?: string | null // клиент начал оплату (claim на ~3 хв) — редактировать нельзя
   paymentId?: string | null // orderId в коллекции payments

@@ -40,6 +40,16 @@ export const userProfileService = {
     }
   },
 
+  // Специалисты сервиса (активные майстер/директор) — для назначения на заявку и распределения
+  // выплат. Опционально фильтруем по центру (кто закреплён за этим центром). Только владелец (list).
+  listSpecialists: async (centerId?: string | null): Promise<{ uid: string; name: string }[]> => {
+    const all = await userProfileService.list()
+    return all
+      .filter((u) => u.active && (u.role === 'master' || u.role === 'director'))
+      .filter((u) => !centerId || (u.centers || []).some((c) => c.centerId === centerId))
+      .map((u) => ({ uid: u.uid, name: u.displayName || u.email }))
+  },
+
   // Саморегистрация identity при входе (через backend; роль НЕ трогаем). Best-effort.
   registerSelf: async (): Promise<void> => {
     try {

@@ -22,11 +22,20 @@ export const SERVICE_REQUEST_STATUS_LABELS: Record<ServiceRequestStatus, string>
   cancelled: 'Скасовано',
 }
 
+// Специалист, назначенный на заявку (портальный пользователь центра). Снимок имени — чтобы
+// показывать без загрузки users. При создании финальной калькуляции список подставляется в неё.
+export interface RequestSpecialist {
+  uid: string
+  name: string
+}
+
 export interface ServiceRequest {
   id: string
   createdAt: string
   updatedAt: string
   createdBy: string | null
+  serviceCenterId?: string | null // сервисный центр (наш реестр) — для гейтинга/дефолтов ФОП
+  specialists?: RequestSpecialist[] // назначенные специалисты (несколько на заявку)
   sessionId: string | null // обращение (ChatSession), из которого создана заявка
   externalRequestId: string | null // ссылка на заявку 1С (выгрузка/связь позже)
   clientName?: string
