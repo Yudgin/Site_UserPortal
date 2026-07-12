@@ -321,9 +321,22 @@ export function registerPayments(app, deps) {
       // покрывают total (напр. знижкові/від'ємні рядки не потрапили в чек) — оплата будет
       // отклонена AMOUNT_MISMATCH, а не тихо спишет с клиента больше/меньше согласованного.
       const amount = est.total
+      // ФОП зависит от ВЫБРАННОГО клиентом способа: берём из payOptions сметы (дефолт из центра,
+      // выставлен мастером — «кто принял, тот и чек»). У старых смет без payOptions — единый est.fopId.
+      const chosenMethod = method || 'liqpay-card'
+      const methodKey = { 'liqpay-card': 'liqpayCard', 'liqpay-paypart': 'liqpayPaypart', 'liqpay-moment': 'liqpayPaypart', 'mono-chast': 'monoChast' }[chosenMethod]
+      let payFopId = est.fopId
+      if (Array.isArray(est.payOptions) && est.payOptions.length) {
+        const opt = est.payOptions.find((o) => o && o.method === methodKey && o.fopId)
+        if (!opt) {
+          await ref.set({ payInitiatedAt: null }, { merge: true }).catch(() => {}) // снять claim
+          return res.status(400).json({ success: false, error: { code: 'METHOD_NOT_ALLOWED', message: 'Цей спосіб оплати недоступний для кошторису' } })
+        }
+        payFopId = opt.fopId
+      }
       try {
         const r = await createPayment({
-          fopId: est.fopId, amount, goods, method: method || 'liqpay-card',
+          fopId: payFopId, amount, goods, method: chosenMethod,
           description: description || `Оплата RunFerry (кошторис ${estimateId})`,
           clientPhone, resultUrl, deliveryEmail: deliveryEmail || undefined, estimateId,
           serviceRequestId: est.serviceRequestId || null,
@@ -402,6 +415,8 @@ export function registerPayments(app, deps) {
     currency: e.currency || 'UAH',
     lines: (e.lines || []).map((l) => ({ type: l.type, refId: l.refId, name: l.name, qty: l.qty, unitPrice: l.unitPrice, lineTotal: l.lineTotal })),
     fopId: e.fopId || null,
+    // Разрешённые способы оплаты (только ключи, без fopId — сервер сам резолвит ФОП при оплате).
+    payMethods: Array.isArray(e.payOptions) ? e.payOptions.map((o) => o && o.method).filter(Boolean) : [],
     parentEstimateId: e.parentEstimateId || null,
     paid: e.status === 'paid' || !!e.paidAt,
     paidAt: e.paidAt || null,

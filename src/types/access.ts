@@ -1,5 +1,7 @@
 // Модель доступа: роли сотрудников + сервисные центры (зоны) + права мастеров по центрам.
 //
+import type { PayMethodKey } from '@/types/pricing'
+//
 // Роли:
 //  • owner      — владелец: полный доступ ко всему (по email admin@runferry.de ИЛИ role='owner').
 //  • director   — директор сервиса: полный доступ (все права) в ПРЕДЕЛАХ своих центров, включая
@@ -60,6 +62,9 @@ export interface ServiceCenter {
   name: string
   externalId?: string | null // ID сервисного центра в 1С (repair_ServoceList)
   zone?: string // регион/зона (метка), опционально
+  // Дефолтный ФОП по каждому способу оплаты (для этого центра). Ключ — PayMethodKey (см. pricing.ts),
+  // значение — fopId. Подставляется в фактическую калькуляцию как дефолт (мастер может переопределить).
+  defaultFopByMethod?: Partial<Record<PayMethodKey, string>>
   active: boolean
   createdAt: string
   updatedAt: string

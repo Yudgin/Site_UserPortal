@@ -244,6 +244,28 @@ export interface ReceiptGood {
   code?: string // артикул (если нужен по требованиям чека)
 }
 
+// Способы оплаты (ключи совпадают с fop.methods на бэкенде). cod — накладений платіж (при отриманні).
+export type PayMethodKey = 'liqpayCard' | 'liqpayPaypart' | 'monoChast' | 'monoAcquire' | 'privatPaypart' | 'cod'
+export const PAY_METHOD_KEYS: PayMethodKey[] = ['liqpayCard', 'liqpayPaypart', 'monoChast', 'monoAcquire', 'privatPaypart', 'cod']
+export const PAY_METHOD_LABELS: Record<PayMethodKey, string> = {
+  liqpayCard: 'Картою (LiqPay)',
+  liqpayPaypart: 'Частинами (LiqPay)',
+  monoChast: 'Частинами (monobank)',
+  monoAcquire: 'Картою (monobank еквайринг)',
+  privatPaypart: 'Оплата частинами (ПриватБанк)',
+  cod: 'Накладений платіж (Нова Пошта)',
+}
+// Онлайн-оплата идёт через /api/estimates/pay (LiqPay/monobank Частини). cod — оплата при получении
+// (не онлайн). Прочие (monoAcquire/privatPaypart) — потоки ещё не реализованы (только настройка ФОП).
+export const ONLINE_PAY_METHODS: PayMethodKey[] = ['liqpayCard', 'liqpayPaypart', 'monoChast']
+
+// Разрешённый способ оплаты фактической сметы + ФОП, которым он принимается (дефолт из центра,
+// переопределяемо мастером). Клиенту отдаётся только список method (без fopId) через safeEstimate.
+export interface EstimatePayOption {
+  method: PayMethodKey
+  fopId: string
+}
+
 // Распределение фактической сметы по специалистам (ВНУТРЕННЯЯ экономика — клиенту НЕ отдаётся:
 // serverный safeEstimate это поле не включает; priceEstimates читает только админ). Специалист —
 // портальный пользователь центра (role master/director). specialistAmount — сумма специалисту;
@@ -287,6 +309,7 @@ export interface Estimate {
   variantOrder?: number
   receiptGoods?: ReceiptGood[] // снимок позиций для чека (для фактической, на момент согласования)
   specialistPayouts?: SpecialistPayout[] // распределение по специалистам (внутреннее; клиенту не видно)
+  payOptions?: EstimatePayOption[] // разрешённые способы оплаты + ФОП по каждому (дефолт из центра)
   // Проставляются backend-ом после оплаты и фискализации (минуя клиентские правила):
   payInitiatedAt?: string | null // клиент начал оплату (claim на ~3 хв) — редактировать нельзя
   paymentId?: string | null // orderId в коллекции payments

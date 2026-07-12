@@ -14,6 +14,8 @@ import {
 import { useAccess, useAccessStore } from '@/store/accessStore'
 import { serviceCenterService } from '@/api/serviceCenterService'
 import { userProfileService } from '@/api/userProfileService'
+import { paymentsApi, type FopPublic } from '@/api/endpoints/payments'
+import { PAY_METHOD_KEYS, PAY_METHOD_LABELS, type PayMethodKey } from '@/types/pricing'
 import {
   CENTER_PERMISSIONS, CENTER_PERMISSION_LABELS, ROLE_LABELS,
   type ServiceCenter, type UserProfile, type Role, type CenterPermission, type CenterAccess,
@@ -31,6 +33,7 @@ export default function AccessAdminPage() {
   const [loading, setLoading] = useState(true)
   const [centers, setCenters] = useState<ServiceCenter[]>([])
   const [users, setUsers] = useState<UserProfile[]>([])
+  const [fops, setFops] = useState<FopPublic[]>([]) // для дефолтного ФОП по способам оплаты в центре
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
@@ -48,6 +51,12 @@ export default function AccessAdminPage() {
     setCenters(c); setUsers(u); setLoading(false)
   }, [])
   useEffect(() => { load() }, [load])
+  useEffect(() => { paymentsApi.listFops().then(setFops).catch(() => setFops([])) }, [])
+
+  // Задать дефолтный ФОП центра для способа оплаты (в редакторе центра).
+  const setCenterFop = (method: PayMethodKey, fopId: string) => {
+    setCenterEdit((c) => ({ ...c, defaultFopByMethod: { ...(c?.defaultFopByMethod || {}), [method]: fopId || undefined } }))
+  }
 
   const centerName = useMemo(() => new Map(centers.map((c) => [c.id, c.name])), [centers])
 
@@ -167,7 +176,7 @@ export default function AccessAdminPage() {
       </Paper>
 
       {/* Діалог центру */}
-      <Dialog open={!!centerEdit} onClose={() => setCenterEdit(null)} maxWidth="xs" fullWidth>
+      <Dialog open={!!centerEdit} onClose={() => setCenterEdit(null)} maxWidth="sm" fullWidth>
         <DialogTitle>{centerEdit?.id ? 'Центр' : 'Новий центр'}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 0.5 }}>
@@ -175,6 +184,24 @@ export default function AccessAdminPage() {
             <TextField label="Зона / регіон (опц.)" value={centerEdit?.zone || ''} onChange={(e) => setCenterEdit((c) => ({ ...c, zone: e.target.value }))} fullWidth />
             <TextField label="ID у 1С (опц.)" value={centerEdit?.externalId || ''} onChange={(e) => setCenterEdit((c) => ({ ...c, externalId: e.target.value }))} fullWidth helperText="Для звʼязку з довідником сервісних центрів 1С" />
             <FormControlLabel control={<Switch checked={centerEdit?.active !== false} onChange={(e) => setCenterEdit((c) => ({ ...c, active: e.target.checked }))} />} label="Активний" />
+
+            <Divider textAlign="left"><Typography variant="caption">ФОП за замовчуванням по способах оплати</Typography></Divider>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+              Який ФОП приймає кожен спосіб у цьому центрі. Підставляється у фактичну калькуляцію (майстер може змінити).
+            </Typography>
+            {fops.length === 0 ? (
+              <Alert severity="info">ФОПи не налаштовані. Додайте їх у «ФОПи та ключі».</Alert>
+            ) : PAY_METHOD_KEYS.map((m) => {
+              const eligible = fops.filter((f) => (f.methods as Record<string, boolean>)[m])
+              return (
+                <TextField key={m} select size="small" fullWidth label={PAY_METHOD_LABELS[m]}
+                  value={centerEdit?.defaultFopByMethod?.[m] || ''} onChange={(e) => setCenterFop(m, e.target.value)}
+                  helperText={eligible.length === 0 ? 'Жоден ФОП не підтримує цей спосіб' : undefined}>
+                  <MenuItem value=""><em>— не задано —</em></MenuItem>
+                  {eligible.map((f) => <MenuItem key={f.id} value={f.id}>{f.name}</MenuItem>)}
+                </TextField>
+              )
+            })}
           </Stack>
         </DialogContent>
         <DialogActions>

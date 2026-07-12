@@ -45,15 +45,12 @@ export default function EstimateSharePage() {
 
   useEffect(() => { load() }, [load])
 
-  // Определить методы оплаты у ФОП сметы
+  // ФОП сметы (для старых смет без payMethods — методы берём у него). Метод по умолчанию задаёт
+  // отдельный эффект по methodOptions (учитывает и новые payMethods, и старый fop.methods).
   useEffect(() => {
     if (!est?.fopId) return
     paymentsApi.listFops()
-      .then((list) => {
-        const f = list.find((x) => x.id === est.fopId) || null
-        setFop(f)
-        if (f) setMethod(f.methods.liqpayCard ? 'liqpay-card' : f.methods.monoChast ? 'mono-chast' : 'liqpay-card')
-      })
+      .then((list) => setFop(list.find((x) => x.id === est.fopId) || null))
       .catch(() => setFop(null))
   }, [est?.fopId])
 
@@ -79,15 +76,24 @@ export default function EstimateSharePage() {
     [prelim, est]
   )
 
+  // Онлайн-способы оплаты: из payMethods сметы (новые сметы — способы задал мастер), иначе — по
+  // методам единого ФОП (старые сметы). cod/прочие неонлайн способы сюда не попадают.
   const methodOptions = useMemo(() => {
-    if (!fop) return [] as { value: PayMethod; label: string }[]
     const opts: { value: PayMethod; label: string }[] = []
-    if (fop.methods.liqpayCard) opts.push({ value: 'liqpay-card', label: 'Картою (LiqPay)' })
-    if (fop.methods.liqpayPaypart) opts.push({ value: 'liqpay-paypart', label: 'Частинами (LiqPay)' })
-    if (fop.methods.liqpayPaypart) opts.push({ value: 'liqpay-moment', label: 'Миттєва розстрочка (LiqPay)' })
-    if (fop.methods.monoChast) opts.push({ value: 'mono-chast', label: 'Частинами (monobank)' })
+    const pm = est?.payMethods
+    const hasCard = pm && pm.length ? pm.includes('liqpayCard') : !!fop?.methods.liqpayCard
+    const hasPaypart = pm && pm.length ? pm.includes('liqpayPaypart') : !!fop?.methods.liqpayPaypart
+    const hasMono = pm && pm.length ? pm.includes('monoChast') : !!fop?.methods.monoChast
+    if (hasCard) opts.push({ value: 'liqpay-card', label: 'Картою (LiqPay)' })
+    if (hasPaypart) { opts.push({ value: 'liqpay-paypart', label: 'Частинами (LiqPay)' }); opts.push({ value: 'liqpay-moment', label: 'Миттєва розстрочка (LiqPay)' }) }
+    if (hasMono) opts.push({ value: 'mono-chast', label: 'Частинами (monobank)' })
     return opts
-  }, [fop])
+  }, [est?.payMethods, fop])
+
+  // Способ по умолчанию — первый доступный (для новых и старых смет).
+  useEffect(() => {
+    if (methodOptions.length && !methodOptions.some((o) => o.value === method)) setMethod(methodOptions[0].value)
+  }, [methodOptions, method])
 
   const approve = async () => {
     setBusy(true); setErr('')

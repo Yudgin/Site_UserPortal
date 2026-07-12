@@ -2,7 +2,7 @@
 // backend: он берёт позиции и сумму из persisted-сметы (priceEstimates) и создаёт оплату у
 // нужного ФОП, а после подтверждения выбивает чек Checkbox тем же ФОП.
 import axios from 'axios'
-import type { LocalizedText, EstimateLineType } from '@/types/pricing'
+import type { LocalizedText, EstimateLineType, PayMethodKey } from '@/types/pricing'
 import { auth } from '@/api/firebase'
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3002'
@@ -80,6 +80,7 @@ export interface SafeEstimate {
   currency: string
   lines: SafeEstimateLine[]
   fopId: string | null
+  payMethods?: PayMethodKey[] // разрешённые способы оплаты (ключи; ФОП резолвит сервер)
   parentEstimateId: string | null
   paid: boolean
   paidAt: string | null

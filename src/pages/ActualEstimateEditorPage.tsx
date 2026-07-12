@@ -9,7 +9,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, Snackbar, CircularProgress, Divider,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow, IconButton, TextField,
-  Autocomplete, MenuItem, Chip, Stack, ToggleButton, ToggleButtonGroup,
+  Autocomplete, Chip, Stack, ToggleButton, ToggleButtonGroup,
 } from '@mui/material'
 import {
   Delete as DeleteIcon, Home as HomeIcon, Save as SaveIcon,
@@ -20,18 +20,22 @@ import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { pricingService } from '@/api/pricingService'
 import { serviceRequestService } from '@/api/serviceRequestService'
+import { serviceCenterService } from '@/api/serviceCenterService'
 import { userProfileService } from '@/api/userProfileService'
 import { notificationApi } from '@/api/endpoints/notification'
 import { paymentsApi, FopPublic } from '@/api/endpoints/payments'
 import SpecialistPayoutsEditor from '@/components/SpecialistPayoutsEditor'
+import PayOptionsEditor from '@/components/PayOptionsEditor'
+import { PAY_METHOD_KEYS } from '@/types/pricing'
 import {
   buildEstimate, estimate2goods, compareEstimates, needsReapproval, tName, formatMoney,
   type EstimateWorkInput,
 } from '@/utils/pricing'
 import { buildPriceContext } from '@/utils/aiContext'
 import AiWorkPicker from '@/components/AiWorkPicker'
-import type { Estimate, ServiceKind, SpecialistPayout } from '@/types/pricing'
+import type { Estimate, ServiceKind, SpecialistPayout, EstimatePayOption } from '@/types/pricing'
 import type { ServiceRequest } from '@/types/serviceRequest'
+import type { ServiceCenter } from '@/types/access'
 
 interface WorkRow extends EstimateWorkInput {
   key: string // локальный ключ строки (работа может повторяться)
@@ -55,12 +59,13 @@ export default function ActualEstimateEditorPage() {
   const [complaint, setComplaint] = useState('')
 
   const [fops, setFops] = useState<FopPublic[]>([])
-  const [fopId, setFopId] = useState('')
 
   // Заявка (для специалистов/центра) + справочник специалистов + распределение выплат.
   const [request, setRequest] = useState<ServiceRequest | null>(null)
+  const [center, setCenter] = useState<ServiceCenter | null>(null) // центр заявки (дефолтные ФОП по способам)
   const [staff, setStaff] = useState<{ uid: string; name: string }[]>([])
   const [payouts, setPayouts] = useState<SpecialistPayout[]>([])
+  const [payOptions, setPayOptions] = useState<EstimatePayOption[]>([]) // способы оплаты + ФОП по каждому
 
   const [savedId, setSavedId] = useState('')
   const [saving, setSaving] = useState(false)
@@ -101,8 +106,8 @@ export default function ActualEstimateEditorPage() {
       setTitle(act.title || '')
       setComplaint(act.complaint || '')
       setServiceKind((act.sections?.[0]?.serviceKind as ServiceKind) || 'repair')
-      if (act.fopId) setFopId(act.fopId)
       setPayouts(act.specialistPayouts || [])
+      setPayOptions(act.payOptions || []) // старые сметы без payOptions — мастер выберет способы заново
       setRows(act.lines.filter((l) => l.type === 'labor').map((l, i) => ({ key: `e${i}`, workId: l.refId, qty: l.qty })))
       if (act.parentEstimateId) {
         setEditParentId(act.parentEstimateId) // помним связь, даже если родитель ещё грузится
@@ -129,6 +134,21 @@ export default function ActualEstimateEditorPage() {
   useEffect(() => {
     userProfileService.listSpecialists(request?.serviceCenterId || null).then(setStaff).catch(() => setStaff([]))
   }, [request?.serviceCenterId])
+
+  // Центр заявки — для дефолтных ФОП по способам оплаты.
+  useEffect(() => {
+    const cid = request?.serviceCenterId
+    if (!cid) { setCenter(null); return }
+    serviceCenterService.get(cid).then(setCenter).catch(() => setCenter(null))
+  }, [request?.serviceCenterId])
+
+  // Префилл способов оплаты из дефолтов центра (только при СОЗДАНИИ, если ещё не заданы).
+  useEffect(() => {
+    if (editId) return
+    const def = center?.defaultFopByMethod
+    if (!def) return
+    setPayOptions((prev) => prev.length ? prev : PAY_METHOD_KEYS.filter((m) => def[m]).map((m) => ({ method: m, fopId: def[m]! })))
+  }, [center, editId])
 
   const activeWorks = useMemo(() => Object.values(indexed.works).filter((w) => w.active), [indexed])
   const activeKits = useMemo(() => Object.values(indexed.kits).filter((k) => k.active), [indexed])
@@ -173,11 +193,12 @@ export default function ActualEstimateEditorPage() {
 
   const clientLink = savedId ? `${window.location.origin}/estimate/${savedId}` : ''
 
-  const canSave = !!actual && !!user && isAdminEmail(user.email)
+  const canSave = !!actual && !!user && isAdminEmail(user.email) && payOptions.length > 0 && payOptions.every((o) => o.fopId)
 
   const handleSave = async (): Promise<string | null> => {
     if (!actual) return null
-    if (!fopId) { notify('Оберіть ФОП, який прийме оплату та видасть чек', 'error'); return null }
+    if (!payOptions.length) { notify('Оберіть хоча б один спосіб оплати', 'error'); return null }
+    if (payOptions.some((o) => !o.fopId)) { notify('У кожного способу оплати має бути ФОП', 'error'); return null }
     setSaving(true)
     try {
       // Защита от затирания оплаченной сметы: если её уже оплатили, редактировать нельзя
@@ -203,6 +224,9 @@ export default function ActualEstimateEditorPage() {
       }
       const required = reapproval?.required ?? false
       const srId = serviceRequestId || prelim?.serviceRequestId || null
+      // Первичный ФОП (для чека по умолчанию/writeback) — ФОП первого способа. При оплате сервер
+      // выберет ФОП по конкретному способу из payOptions.
+      const primaryFopId = payOptions[0].fopId
       const toSave: Estimate = {
         ...actual,
         id: savedId || '', // повторное сохранение перезапишет ту же смету
@@ -212,7 +236,8 @@ export default function ActualEstimateEditorPage() {
         serviceRequestId: srId,
         receiptGoods: estimate2goods(actual, 'uk'),
         specialistPayouts: payouts,
-        fopId,
+        payOptions,
+        fopId: primaryFopId,
       }
       const res = await pricingService.saveEstimate(toSave)
       if (!res) { notify('Не вдалося зберегти кошторис', 'error'); return null }
@@ -263,7 +288,10 @@ export default function ActualEstimateEditorPage() {
     return <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress /></Box>
   }
 
-  const chosenFop = fops.find((f) => f.id === fopId)
+  // ФОПы выбранных способов, у которых не настроен Checkbox (оплата пройдёт, но чек не выбьется).
+  const noReceiptFops = payOptions
+    .map((o) => fops.find((f) => f.id === o.fopId))
+    .filter((f): f is FopPublic => !!f && !f.receipts)
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
@@ -423,25 +451,14 @@ export default function ActualEstimateEditorPage() {
         <SpecialistPayoutsEditor value={payouts} onChange={setPayouts} staff={staff} total={actual.total} />
       )}
 
-      {/* ФОП + сохранение + ссылка клиенту */}
+      {/* Способы оплаты + ФОП по каждому (дефолт из центра) */}
+      {actual && <PayOptionsEditor value={payOptions} onChange={setPayOptions} fops={fops} />}
+
+      {/* Сохранение + ссылка клиенту */}
       <Paper sx={{ p: 2, mb: 3 }}>
-        <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Оплата та чек</Typography>
-        {fops.length === 0 ? (
-          <Alert severity="warning">ФОП не налаштовані (FOPS_CONFIG). Оплату/чек буде увімкнено після налаштування.</Alert>
-        ) : (
-          <TextField
-            select size="small" label="ФОП (прийме оплату та видасть чек)" value={fopId}
-            onChange={(e) => setFopId(e.target.value)} sx={{ minWidth: 320, mb: 2 }}
-          >
-            {fops.map((f) => (
-              <MenuItem key={f.id} value={f.id}>
-                {f.name}{!f.receipts && ' (без чека!)'}
-              </MenuItem>
-            ))}
-          </TextField>
-        )}
-        {chosenFop && !chosenFop.receipts && (
-          <Alert severity="warning" sx={{ mb: 2 }}>У цього ФОП не налаштований Checkbox — оплата пройде, але фіскальний чек не виб'ється.</Alert>
+        <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Збереження та посилання для клієнта</Typography>
+        {noReceiptFops.length > 0 && (
+          <Alert severity="warning" sx={{ mb: 2 }}>Для деяких способів обрано ФОП без Checkbox — оплата пройде, але фіскальний чек не виб'ється.</Alert>
         )}
 
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
