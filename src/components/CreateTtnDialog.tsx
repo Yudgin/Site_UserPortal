@@ -35,7 +35,11 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, clien
 
   const tpl = useMemo(() => templates.find((t) => t.id === templateId) || null, [templates, templateId])
   const scenario = tpl?.scenario || 'incoming'
-  const incoming = scenario === 'incoming'
+  const recipientTarget = tpl?.recipientTarget ?? (scenario === 'incoming' ? 'service' : 'client')
+  const senderIsClient = tpl?.senderTarget === 'client'
+  const recipientIsClient = recipientTarget === 'client'
+  const needsClientAddr = senderIsClient || recipientIsClient
+  const addrLabel = senderIsClient ? 'звідки надсилає' : 'куди надсилаємо'
 
   useEffect(() => {
     if (!open) return
@@ -60,14 +64,18 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, clien
     getWarehouses(city.Ref).then(setWarehouses)
   }, [city])
 
-  const canCreate = useMemo(() => !!templateId && !!city?.Ref && !!warehouseRef && Number(cost) > 0, [templateId, city, warehouseRef, cost])
+  const canCreate = useMemo(
+    () => !!templateId && Number(cost) > 0 && (!needsClientAddr || (!!city?.Ref && !!warehouseRef)),
+    [templateId, cost, needsClientAddr, city, warehouseRef]
+  )
 
   const create = async () => {
-    if (!canCreate || !city) return
+    if (!canCreate) return
     setBusy(true); setErr('')
     const res = await npTtnApi.create({
-      serviceRequestId, templateId, clientCityRef: city.Ref, clientWarehouseRef: warehouseRef, cost: Number(cost),
-      ...(incoming ? {} : { clientName, clientPhone }),
+      serviceRequestId, templateId, cost: Number(cost),
+      ...(needsClientAddr && city ? { clientCityRef: city.Ref, clientWarehouseRef: warehouseRef } : {}),
+      ...(recipientIsClient ? { clientName, clientPhone } : {}),
     })
     setBusy(false)
     if (res.ok && res.data) { setDone(res.data.ttn); onCreated(res.data.ttn) }
@@ -92,23 +100,25 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, clien
               </TextField>
             )}
             <Typography variant="body2" color="text.secondary">
-              {incoming
-                ? 'Приймання: посилка оформлюється від сервісу; клієнт здає кораблик у своєму відділенні за цим номером і сплачує доставку готівкою при здачі.'
-                : `Відправлення клієнту (${SCENARIO_LABELS[scenario]}): отримувач — клієнт${scenario === 'return' && tpl?.cod ? '. Накладений платіж (сума факту) додається автоматично; якщо ремонт уже оплачено онлайн — не додається.' : '.'}`}
+              {tpl ? `${SCENARIO_LABELS[scenario]}. Адреси беруться з шаблону; ${needsClientAddr ? `сторону «клієнт заявки» вкажіть нижче (${addrLabel}).` : 'обидві сторони фіксовані в шаблоні.'}${recipientIsClient && tpl.cod ? ' Накладений платіж (сума факту) додається автоматично; якщо оплачено онлайн — ні.' : ''}` : 'Оберіть шаблон.'}
             </Typography>
-            <Autocomplete
-              options={cities} getOptionLabel={(o) => o.Description || ''} filterOptions={(x) => x}
-              value={city} onChange={(_, v) => setCity(v)} onInputChange={(_, v) => setCityQuery(v)}
-              isOptionEqualToValue={(a, b) => a.Ref === b.Ref}
-              renderInput={(p) => <TextField {...p} label={incoming ? 'Місто клієнта (звідки надсилає)' : 'Місто клієнта (куди надсилаємо)'} size="small" />}
-            />
-            <TextField select label={incoming ? 'Відділення клієнта (звідки)' : 'Відділення клієнта (куди)'} value={warehouseRef} onChange={(e) => setWarehouseRef(e.target.value)} size="small" fullWidth
-              disabled={!city} helperText={city && warehouses.length === 0 ? 'Завантаження відділень…' : undefined}>
-              {warehouses.map((w) => <MenuItem key={w.Ref} value={w.Ref}>{w.Description}</MenuItem>)}
-            </TextField>
+            {needsClientAddr && (
+              <>
+                <Autocomplete
+                  options={cities} getOptionLabel={(o) => o.Description || ''} filterOptions={(x) => x}
+                  value={city} onChange={(_, v) => setCity(v)} onInputChange={(_, v) => setCityQuery(v)}
+                  isOptionEqualToValue={(a, b) => a.Ref === b.Ref}
+                  renderInput={(p) => <TextField {...p} label={`Місто клієнта (${addrLabel})`} size="small" />}
+                />
+                <TextField select label={`Відділення клієнта (${addrLabel})`} value={warehouseRef} onChange={(e) => setWarehouseRef(e.target.value)} size="small" fullWidth
+                  disabled={!city} helperText={city && warehouses.length === 0 ? 'Завантаження відділень…' : undefined}>
+                  {warehouses.map((w) => <MenuItem key={w.Ref} value={w.Ref}>{w.Description}</MenuItem>)}
+                </TextField>
+              </>
+            )}
             <TextField label="Оголошена вартість, грн" type="number" value={cost} onChange={(e) => setCost(e.target.value)} size="small" fullWidth
               helperText="Оціночна вартість вмісту для НП" />
-            {!incoming && !clientPhone && <Alert severity="warning">У заявці немає телефону клієнта — отримувача НП може не вдатися створити.</Alert>}
+            {recipientIsClient && !clientPhone && <Alert severity="warning">У заявці немає телефону клієнта — отримувача НП може не вдатися створити.</Alert>}
             {err && <Alert severity="error"><Box sx={{ whiteSpace: 'pre-wrap' }}>{err}</Box></Alert>}
           </Stack>
         )}

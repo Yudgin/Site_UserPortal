@@ -90,64 +90,75 @@ export function registerNpTtn(app, deps) {
       const repairNo = sr.externalRequestId || sr.id || ''
       const description = `${tpl.description || 'Прикормочний кораблик'}${repairNo ? ` №${repairNo}` : ''}`.trim().slice(0, 500)
 
-      // Общие параметры посылки из шаблона.
-      const base = {
+      const senderTarget = tpl.senderTarget || 'service'
+      const recipientTarget = tpl.recipientTarget || (scenario === 'incoming' ? 'service' : 'client')
+
+      // Адрес клиента из диалога (нужен, когда какая-то сторона = клиент заявки)
+      const clientCityRef = String(b.clientCityRef || '')
+      const clientWarehouseRef = String(b.clientWarehouseRef || '')
+      const clientPhone = String(b.clientPhone || sr.clientPhone || '')
+      const clientName = String(b.clientName || sr.clientName || 'Клієнт')
+
+      // ---- Отправитель ---- (counterparty всегда = ФОП; адрес — сервис из шаблона или клиент)
+      let senderCity, senderAddr
+      if (senderTarget === 'client') {
+        if (!clientCityRef || !clientWarehouseRef) return res.status(400).json({ success: false, error: { code: 'NO_CLIENT_ADDR', message: 'Вкажіть місто та відділення клієнта (звідки надсилає)' } })
+        senderCity = clientCityRef; senderAddr = clientWarehouseRef
+      } else {
+        senderCity = tpl.sender?.cityRef || np.cityRef
+        senderAddr = tpl.sender?.warehouseRef || np.warehouseRef
+      }
+      const senderFields = {
+        CitySender: senderCity, Sender: np.senderRef, SenderAddress: senderAddr,
+        ContactSender: np.contactRef, SendersPhone: np.senderPhone || '',
+      }
+
+      // ---- Получатель ---- (сервис = ФОП; client/fixed = частное лицо через Counterparty.save)
+      let recipientFields
+      if (recipientTarget === 'service') {
+        const rCity = tpl.recipient?.cityRef || np.cityRef
+        const rAddr = tpl.recipient?.warehouseRef || np.warehouseRef
+        recipientFields = { CityRecipient: rCity, Recipient: np.senderRef, RecipientAddress: rAddr, ContactRecipient: np.contactRef, RecipientsPhone: np.senderPhone || '' }
+      } else {
+        const isClient = recipientTarget === 'client'
+        const rCity = isClient ? clientCityRef : (tpl.recipient?.cityRef || '')
+        const rAddr = isClient ? clientWarehouseRef : (tpl.recipient?.warehouseRef || '')
+        const rName = isClient ? clientName : (tpl.recipientName || 'Отримувач')
+        const rPhone = isClient ? clientPhone : (tpl.recipientPhone || '')
+        if (!rCity || !rAddr) return res.status(400).json({ success: false, error: { code: 'NO_RECIP_ADDR', message: isClient ? 'Вкажіть місто та відділення клієнта (куди надсилаємо)' : 'У шаблоні не задана адреса отримувача' } })
+        const rec = await resolveRecipient(apiKey, { name: rName, phone: rPhone, cityRef: rCity })
+        recipientFields = { CityRecipient: rCity, Recipient: rec.ref, RecipientAddress: rAddr, ContactRecipient: rec.contactRef, RecipientsPhone: rPhone }
+      }
+
+      // ---- Плательщик ---- (приём: платит клиент-отправитель; иначе по шаблону)
+      const payerType = senderTarget === 'client' ? 'Sender' : (tpl.payerType === 'sender' ? 'Sender' : 'Recipient')
+
+      // ---- Наложенный платёж (COD) ---- (для отправки клиенту с флагом cod: сумма факта, снимаем если оплачено)
+      let codAmount = Number(b.codAmount)
+      if (!Number.isFinite(codAmount)) {
+        codAmount = 0
+        if (tpl.cod && recipientTarget === 'client' && sr.actualEstimateId) {
+          try {
+            const est = await adminDb.collection('priceEstimates').doc(String(sr.actualEstimateId)).get()
+            const e = est.exists ? est.data() : null
+            if (e && e.status !== 'paid' && !e.paymentId) codAmount = Math.round(Number(e.total) || 0)
+          } catch { /* ignore */ }
+        }
+      }
+
+      const mp = {
         DateTime: npDate(),
         CargoType: tpl.cargoType || 'Parcel',
         Weight: String(tpl.weight || 1),
-        ServiceType: 'WarehouseWarehouse',
+        ServiceType: tpl.serviceType || 'WarehouseWarehouse',
         SeatsAmount: String(tpl.seatsAmount || 1),
         Description: description,
         Cost: String(Math.max(1, Math.round(Number(b.cost) || 300))),
         ...(tpl.volumeGeneral ? { VolumeGeneral: String(tpl.volumeGeneral) } : {}),
-      }
-
-      let mp
-      if (scenario === 'incoming') {
-        // Приём: город/отделение клиента как отправителя, но counterparty = ФОП; получатель = ФОП.
-        const clientCityRef = String(b.clientCityRef || '')
-        const clientWarehouseRef = String(b.clientWarehouseRef || '')
-        if (!clientCityRef || !clientWarehouseRef) return res.status(400).json({ success: false, error: { code: 'NO_CLIENT_ADDR', message: 'Вкажіть місто та відділення клієнта (звідки надсилає)' } })
-        mp = {
-          ...base,
-          PayerType: 'Sender', PaymentMethod: 'Cash',
-          CitySender: clientCityRef, Sender: np.senderRef, SenderAddress: clientWarehouseRef,
-          ContactSender: np.contactRef, SendersPhone: np.senderPhone || '',
-          CityRecipient: np.cityRef, Recipient: np.senderRef, RecipientAddress: np.warehouseRef,
-          ContactRecipient: np.contactRef, RecipientsPhone: np.senderPhone || '',
-        }
-      } else {
-        // Сервис → клиент (возврат/новый/мелочи): получатель = частное лицо (клиент).
-        const clientCityRef = String(b.clientCityRef || '')
-        const clientWarehouseRef = String(b.clientWarehouseRef || '')
-        if (!clientCityRef || !clientWarehouseRef) return res.status(400).json({ success: false, error: { code: 'NO_CLIENT_ADDR', message: 'Вкажіть місто та відділення клієнта (куди надсилаємо)' } })
-        const clientPhone = String(b.clientPhone || sr.clientPhone || '')
-        const clientName = String(b.clientName || sr.clientName || 'Клієнт')
-        const recipient = await resolveRecipient(apiKey, { name: clientName, phone: clientPhone, cityRef: clientCityRef })
-
-        // COD: для return по умолчанию = сумма факта, но если оплачено онлайн — снимаем.
-        let codAmount = Number(b.codAmount)
-        if (!Number.isFinite(codAmount)) {
-          codAmount = 0
-          if (scenario === 'return' && tpl.cod && sr.actualEstimateId) {
-            try {
-              const est = await adminDb.collection('priceEstimates').doc(String(sr.actualEstimateId)).get()
-              const e = est.exists ? est.data() : null
-              if (e && e.status !== 'paid' && !e.paymentId) codAmount = Math.round(Number(e.total) || 0)
-            } catch { /* ignore */ }
-          }
-        }
-        // Плательщик доставки: для наложенного обычно платит получатель (клиент); иначе по шаблону.
-        const payerType = tpl.payerType === 'sender' ? 'Sender' : 'Recipient'
-        mp = {
-          ...base,
-          PayerType: payerType, PaymentMethod: 'Cash',
-          CitySender: np.cityRef, Sender: np.senderRef, SenderAddress: np.warehouseRef,
-          ContactSender: np.contactRef, SendersPhone: np.senderPhone || '',
-          CityRecipient: clientCityRef, Recipient: recipient.ref, RecipientAddress: clientWarehouseRef,
-          ContactRecipient: recipient.contactRef, RecipientsPhone: clientPhone,
-          ...(codAmount > 0 ? { BackwardDeliveryData: [{ PayerType: 'Recipient', CargoType: 'Money', RedeliveryString: String(codAmount) }] } : {}),
-        }
+        PayerType: payerType, PaymentMethod: 'Cash',
+        ...senderFields,
+        ...recipientFields,
+        ...(codAmount > 0 ? { BackwardDeliveryData: [{ PayerType: 'Recipient', CargoType: 'Money', RedeliveryString: String(codAmount) }] } : {}),
       }
 
       const npResp = await npCall(apiKey, 'InternetDocument', 'save', mp)

@@ -11,8 +11,8 @@ const adminHeaders = async (): Promise<Record<string, string>> => {
 export interface CreateTtnParams {
   serviceRequestId: string
   templateId: string
-  clientCityRef: string
-  clientWarehouseRef: string
+  clientCityRef?: string // нужен, только когда сторона ТТН = «клієнт заявки»
+  clientWarehouseRef?: string
   cost: number
   codAmount?: number
   clientName?: string // для сценариев «сервис → клиент» (получатель)
