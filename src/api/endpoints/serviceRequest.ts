@@ -9,6 +9,10 @@ export interface CreateLocalRequestInput {
   externalRequestId?: string | null
   clientName?: string
   clientPhone?: string
+  clientCityRef?: string
+  clientCityName?: string
+  clientWarehouseRef?: string
+  clientWarehouseName?: string
   boat?: string
   complaint?: string
 }

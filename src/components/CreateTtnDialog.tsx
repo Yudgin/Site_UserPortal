@@ -13,12 +13,16 @@ import { npTtnApi } from '@/api/endpoints/npTtn'
 import { searchCities, getWarehouses, type NPCity, type NPWarehouse } from '@/api/endpoints/novaposhta'
 import { SIZE_LABELS, SCENARIO_LABELS, type NpTemplate } from '@/types/npTemplate'
 
-export default function CreateTtnDialog({ open, onClose, serviceRequestId, clientName, clientPhone, onCreated }: {
+export default function CreateTtnDialog({ open, onClose, serviceRequestId, clientName, clientPhone, clientCityRef, clientCityName, clientWarehouseRef, clientWarehouseName, onCreated }: {
   open: boolean
   onClose: () => void
   serviceRequestId: string
   clientName?: string
   clientPhone?: string
+  clientCityRef?: string
+  clientCityName?: string
+  clientWarehouseRef?: string
+  clientWarehouseName?: string
   onCreated: (ttn: string) => void
 }) {
   const [templates, setTemplates] = useState<NpTemplate[]>([])
@@ -43,13 +47,18 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, clien
 
   useEffect(() => {
     if (!open) return
-    setErr(''); setDone(null); setCity(null); setWarehouseRef('')
+    setErr(''); setDone(null)
+    // Префилл адреса клиента из заявки (если он там сохранён из формы /repair/new)
+    if (clientCityRef) {
+      setCity({ Ref: clientCityRef, Description: clientCityName || clientCityRef, DescriptionRu: '', Area: '', AreaDescription: '' })
+      setWarehouseRef(clientWarehouseRef || '')
+    } else { setCity(null); setWarehouseRef('') }
     npTemplateService.list().then((all) => {
       const act = all.filter((t) => t.active !== false)
       setTemplates(act)
       setTemplateId((id) => id || (act[0]?.id ?? ''))
     })
-  }, [open])
+  }, [open, clientCityRef, clientCityName, clientWarehouseRef])
 
   useEffect(() => {
     if (cityQuery.trim().length < 2) { setCities([]); return }
@@ -112,6 +121,9 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, clien
                 />
                 <TextField select label={`Відділення клієнта (${addrLabel})`} value={warehouseRef} onChange={(e) => setWarehouseRef(e.target.value)} size="small" fullWidth
                   disabled={!city} helperText={city && warehouses.length === 0 ? 'Завантаження відділень…' : undefined}>
+                  {warehouseRef && !warehouses.some((w) => w.Ref === warehouseRef) && (
+                    <MenuItem value={warehouseRef}>{clientWarehouseName || warehouseRef}</MenuItem>
+                  )}
                   {warehouses.map((w) => <MenuItem key={w.Ref} value={w.Ref}>{w.Description}</MenuItem>)}
                 </TextField>
               </>

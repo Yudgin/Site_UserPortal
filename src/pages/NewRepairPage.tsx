@@ -468,6 +468,11 @@ export default function NewRepairPage() {
         externalRequestId: requestId || null,
         clientName: `${lastName} ${firstName}`.trim(),
         clientPhone: formatPhoneForApi(phone),
+        // Адрес отправки клиента (НП) — чтобы потом подставился при создании ТТН.
+        clientCityRef: selectedCity?.Ref,
+        clientCityName: selectedCity?.Description,
+        clientWarehouseRef: selectedWarehouse?.Ref,
+        clientWarehouseName: selectedWarehouse?.Description,
         complaint,
       }).catch(() => {})
       setSuccess({ id: requestId })

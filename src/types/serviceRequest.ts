@@ -31,6 +31,11 @@ export interface ServiceRequest {
   externalRequestId: string | null // ссылка на заявку 1С (выгрузка/связь позже)
   clientName?: string
   clientPhone?: string // связь с clientProfiles (нормализованный телефон)
+  // Адрес отправки клиента (Нова Пошта) — из формы /repair/new; подставляется при создании ТТН.
+  clientCityRef?: string
+  clientCityName?: string
+  clientWarehouseRef?: string
+  clientWarehouseName?: string
   boat?: string // модель/название кораблика (если известно)
   complaint: string // сводная жалоба/описание
   status: ServiceRequestStatus

@@ -192,36 +192,32 @@ export default function NpTemplatesAdminPage() {
                 {(Object.keys(SERVICE_TYPE_LABELS) as NpServiceType[]).map((s) => <MenuItem key={s} value={s}>{SERVICE_TYPE_LABELS[s]}</MenuItem>)}
               </TextField>
 
-              {/* Отправитель */}
+              {/* Отправитель — адрес зберігаємо в шаблоні завжди (запасний + для іншого функціоналу) */}
               <TextField select label="Відправник" value={edit.senderTarget || 'service'} onChange={(e) => set({ senderTarget: e.target.value as NpPartyTarget })} size="small" fullWidth>
-                <MenuItem value="service">Сервіс (фіксована адреса)</MenuItem>
-                <MenuItem value="client">Клієнт заявки (підставиться)</MenuItem>
+                <MenuItem value="service">Сервіс (адреса з шаблону)</MenuItem>
+                <MenuItem value="client">Клієнт заявки (адреса з заявки, ця — запасна)</MenuItem>
               </TextField>
-              {edit.senderTarget === 'client'
-                ? <Alert severity="info" sx={{ py: 0 }}>Адреса відправника підставиться із заявки клієнта при створенні ТТН.</Alert>
-                : <NpAddressPicker value={(edit.sender || {}) as NpAddress} onChange={(v) => set({ sender: v })}
-                    delivery={senderDelivery} label="Місто відправника" warehouseLabel="Відділення відправника" />}
+              {edit.senderTarget === 'client' && (
+                <Alert severity="info" sx={{ py: 0 }}>Якщо в заявці заповнена адреса клієнта — підставиться вона; інакше ця адреса нижче.</Alert>
+              )}
+              <NpAddressPicker value={(edit.sender || {}) as NpAddress} onChange={(v) => set({ sender: v })}
+                delivery={senderDelivery} label="Місто відправника" warehouseLabel="Відділення відправника" />
 
-              {/* Получатель */}
+              {/* Получатель — поля зберігаємо завжди */}
               <TextField select label="Отримувач" value={edit.recipientTarget || 'client'} onChange={(e) => set({ recipientTarget: e.target.value as NpRecipientTarget })} size="small" fullWidth>
-                <MenuItem value="client">Клієнт заявки (підставиться)</MenuItem>
-                <MenuItem value="service">Сервіс (фіксована адреса)</MenuItem>
+                <MenuItem value="client">Клієнт заявки (дані з заявки, ці — запасні)</MenuItem>
+                <MenuItem value="service">Сервіс (адреса з шаблону)</MenuItem>
                 <MenuItem value="fixed">Інша фіксована особа</MenuItem>
               </TextField>
-              {edit.recipientTarget === 'client' ? (
-                <Alert severity="info" sx={{ py: 0 }}>ПІБ, телефон та адреса отримувача підставляться із заявки клієнта.</Alert>
-              ) : (
-                <>
-                  {edit.recipientTarget === 'fixed' && (
-                    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                      <TextField label="ПІБ отримувача" value={edit.recipientName || ''} onChange={(e) => set({ recipientName: e.target.value })} size="small" fullWidth />
-                      <TextField label="Телефон отримувача" value={edit.recipientPhone || ''} onChange={(e) => set({ recipientPhone: e.target.value })} size="small" fullWidth />
-                    </Stack>
-                  )}
-                  <NpAddressPicker value={(edit.recipient || {}) as NpAddress} onChange={(v) => set({ recipient: v })}
-                    delivery={recipientDelivery} label="Місто отримувача" warehouseLabel="Відділення отримувача" />
-                </>
+              {edit.recipientTarget === 'client' && (
+                <Alert severity="info" sx={{ py: 0 }}>Якщо в заявці є ПІБ/телефон/адреса клієнта — підставляються вони; інакше ці дані нижче.</Alert>
               )}
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                <TextField label="ПІБ отримувача" value={edit.recipientName || ''} onChange={(e) => set({ recipientName: e.target.value })} size="small" fullWidth />
+                <TextField label="Телефон отримувача" value={edit.recipientPhone || ''} onChange={(e) => set({ recipientPhone: e.target.value })} size="small" fullWidth />
+              </Stack>
+              <NpAddressPicker value={(edit.recipient || {}) as NpAddress} onChange={(v) => set({ recipient: v })}
+                delivery={recipientDelivery} label="Місто отримувача" warehouseLabel="Відділення отримувача" />
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
                 <TextField label="Вага, кг" type="number" value={edit.weight ?? ''} onChange={(e) => set({ weight: Number(e.target.value) })} size="small" fullWidth />
                 <TextField label="Місць" type="number" value={edit.seatsAmount ?? 1} onChange={(e) => set({ seatsAmount: Number(e.target.value) })} size="small" fullWidth />

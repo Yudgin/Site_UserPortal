@@ -315,6 +315,8 @@ export default function ServiceRequestPage() {
 
       <CreateTtnDialog open={ttnDialog} onClose={() => setTtnDialog(false)} serviceRequestId={id}
         clientName={req.clientName} clientPhone={req.clientPhone}
+        clientCityRef={req.clientCityRef} clientCityName={req.clientCityName}
+        clientWarehouseRef={req.clientWarehouseRef} clientWarehouseName={req.clientWarehouseName}
         onCreated={(ttn) => { setTtnInput(ttn); setReq((r) => (r ? { ...r, waybillNumber: ttn } : r)); notify(`ТТН створено: ${ttn}`) }} />
 
       <Snackbar open={snack.open} autoHideDuration={5000} onClose={() => setSnack({ ...snack, open: false })} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
