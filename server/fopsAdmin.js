@@ -90,10 +90,13 @@ export function registerFopsAdmin(app, deps) {
         },
         novaPoshta: {
           senderRef: clip(b.novaPoshta?.senderRef, 64),
+          senderName: clip(b.novaPoshta?.senderName, 200),
           contactRef: clip(b.novaPoshta?.contactRef, 64),
+          contactName: clip(b.novaPoshta?.contactName, 200),
           senderPhone: clip(b.novaPoshta?.senderPhone, 32),
           cityRef: clip(b.novaPoshta?.cityRef, 64),
           cityName: clip(b.novaPoshta?.cityName, 120),
+          settlementRef: clip(b.novaPoshta?.settlementRef, 64),
           warehouseRef: clip(b.novaPoshta?.warehouseRef, 64),
           warehouseName: clip(b.novaPoshta?.warehouseName, 200),
         },

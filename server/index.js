@@ -16,6 +16,7 @@ import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
 import { registerFopsAdmin } from './fopsAdmin.js'
 import { registerNpTtn } from './novaPoshtaTtn.js'
+import { registerNpAccount } from './novaPoshtaAccount.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
 import { registerUserProfiles } from './userProfiles.js'
@@ -1146,6 +1147,9 @@ registerPayments(app, { adminDb })
 registerFopsAdmin(app, { adminDb, refreshFops })
 // Создание ТТН Новой Почты (InternetDocument.save) по шаблону — сценарий «приём кораблика».
 registerNpTtn(app, { adminDb })
+
+// Справочники НП по ключу конкретного ФОП (отправители/контакты + добавление) — owner-gated.
+registerNpAccount(app)
 // Подгружаем ФОПы из Firestore на старте (перекрывают ENV-сид, если заданы).
 refreshFops(adminDb).catch((e) => console.error('initial refreshFops:', e?.message || e))
 // Периодический рефреш — чтобы ДРУГИЕ инстансы Cloud Run подхватили изменения ФОПов (кэш в памяти

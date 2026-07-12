@@ -14,12 +14,13 @@ import {
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
-import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload } from '@/api/endpoints/fopsAdmin'
+import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs } from '@/api/endpoints/fopsAdmin'
+import NpFopDirectory from '@/components/NpFopDirectory'
 
 const emptyEdit = () => ({
   id: '', name: '', active: true, isNew: true,
   methods: { liqpayCard: false, liqpayPaypart: false, monoChast: false, monoAcquire: false, privatPaypart: false, cod: false },
-  np: { senderRef: '', contactRef: '', senderPhone: '', cityRef: '', cityName: '', warehouseRef: '', warehouseName: '' },
+  np: { senderRef: '', senderName: '', contactRef: '', contactName: '', senderPhone: '', cityRef: '', cityName: '', settlementRef: '', warehouseRef: '', warehouseName: '' } as FopNovaPoshtaRefs,
   secretsSet: { liqpay: false, monoChast: false, monoAcquire: false, privatPaypart: false, checkbox: false, novaPoshtaApiKey: false },
   // секретные поля (write-only, пустые = не менять)
   s: {
@@ -205,15 +206,9 @@ export default function FopsAdminPage() {
 
               <Divider textAlign="left"><Typography variant="caption">Нова Пошта (відправник для ТТН)</Typography></Divider>
               {secretField('API-ключ Нової Пошти', edit.s.npApiKey, (v) => setEdit({ ...edit, s: { ...edit.s, npApiKey: v } }), edit.secretsSet.novaPoshtaApiKey)}
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                <TextField label="Sender Ref" value={edit.np.senderRef} onChange={(e) => setEdit({ ...edit, np: { ...edit.np, senderRef: e.target.value } })} size="small" fullWidth />
-                <TextField label="Contact Ref" value={edit.np.contactRef} onChange={(e) => setEdit({ ...edit, np: { ...edit.np, contactRef: e.target.value } })} size="small" fullWidth />
-              </Stack>
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                <TextField label="Телефон відправника" value={edit.np.senderPhone} onChange={(e) => setEdit({ ...edit, np: { ...edit.np, senderPhone: e.target.value } })} size="small" fullWidth />
-                <TextField label="City Ref" value={edit.np.cityRef} onChange={(e) => setEdit({ ...edit, np: { ...edit.np, cityRef: e.target.value } })} size="small" fullWidth />
-              </Stack>
-              <TextField label="Warehouse Ref (відділення відправника)" value={edit.np.warehouseRef} onChange={(e) => setEdit({ ...edit, np: { ...edit.np, warehouseRef: e.target.value } })} size="small" fullWidth />
+              <NpFopDirectory fopId={edit.id} np={edit.np}
+                onChange={(patch) => setEdit({ ...edit, np: { ...edit.np, ...patch } })}
+                apiKeySet={edit.secretsSet.novaPoshtaApiKey} typedApiKey={edit.s.npApiKey} />
             </Stack>
           )}
         </DialogContent>

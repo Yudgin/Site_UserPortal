@@ -19,10 +19,13 @@ export interface FopMethods {
 }
 export interface FopNovaPoshtaRefs {
   senderRef?: string
+  senderName?: string // человекочитаемое имя отправителя (для отображения без ре-синхронизации)
   contactRef?: string
+  contactName?: string
   senderPhone?: string
   cityRef?: string
   cityName?: string
+  settlementRef?: string // Ref населённого пункта (для адресной доставки)
   warehouseRef?: string
   warehouseName?: string
 }

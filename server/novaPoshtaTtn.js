@@ -19,12 +19,12 @@ const npDate = () => {
   return `${g('day')}.${g('month')}.${g('year')}`
 }
 
-const npCall = async (apiKey, modelName, calledMethod, methodProperties) => {
+export const npCall = async (apiKey, modelName, calledMethod, methodProperties) => {
   const { data } = await axios.post(NP_URL, { apiKey, modelName, calledMethod, methodProperties }, { timeout: 20000 })
   return data
 }
 
-const npErr = (resp, fallback) => {
+export const npErr = (resp, fallback) => {
   const errs = (resp && (resp.errors || resp.warnings)) || []
   return (Array.isArray(errs) && errs.length && errs.join('; ')) || fallback
 }
