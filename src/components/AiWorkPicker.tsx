@@ -4,13 +4,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Button, Dialog, DialogTitle, DialogContent, DialogActions, TextField, Alert, List, ListItem,
-  ListItemText, Checkbox, Box, Typography,
+  ListItemText, Checkbox, Box, Typography, Chip,
 } from '@mui/material'
 import { AutoAwesome as AiIcon } from '@mui/icons-material'
 import { aiApi } from '@/api/endpoints/ai'
 import { tName, type PriceCatalog, type EstimateWorkInput } from '@/utils/pricing'
 
-interface Picked { workId: string | null; code: string; name: string; qty: number; matched: boolean }
+// Позиция от ИИ: код может совпасть с РАБОТОЙ (workId) или с НАБОРОМ (kitId — разворачиваем в работы).
+interface Picked { workId: string | null; kitId: string | null; code: string; name: string; qty: number; matched: boolean; isKit: boolean }
 
 export default function AiWorkPicker({ priceContext, catalog, onAdd, initialDescription }: {
   priceContext: string
@@ -32,6 +33,7 @@ export default function AiWorkPicker({ priceContext, catalog, onAdd, initialDesc
   const [sel, setSel] = useState<Record<number, boolean>>({})
 
   const byCode = useMemo(() => new Map(Object.values(catalog.works).map((w) => [w.code, w])), [catalog])
+  const byKitCode = useMemo(() => new Map(Object.values(catalog.kits).map((k) => [k.code, k])), [catalog])
 
   const run = async () => {
     if (!desc.trim()) return
@@ -40,9 +42,13 @@ export default function AiWorkPicker({ priceContext, catalog, onAdd, initialDesc
     setLoading(false)
     if (!res.success || !res.data) { setErr(res.error?.message || 'Не вдалося підібрати'); return }
     const items: Picked[] = res.data.works.map((w) => {
+      const qty = w.qty || 1
       const work = byCode.get(w.workCode)
-      const matched = !!(work && work.active)
-      return { workId: matched ? work!.id : null, code: w.workCode, name: work ? tName(work.name, 'uk') : w.name, qty: w.qty || 1, matched }
+      if (work && work.active) return { workId: work.id, kitId: null, code: w.workCode, name: tName(work.name, 'uk'), qty, matched: true, isKit: false }
+      // Код может быть НАБОРОМ (ИИ иногда возвращает код набора вместо разбивки на работы).
+      const kit = byKitCode.get(w.workCode)
+      if (kit && kit.active) return { workId: null, kitId: kit.id, code: w.workCode, name: tName(kit.name, 'uk'), qty, matched: true, isKit: true }
+      return { workId: null, kitId: null, code: w.workCode, name: w.name, qty, matched: false, isKit: false }
     })
     setPicked(items)
     setNote(res.data.note || '')
@@ -55,10 +61,19 @@ export default function AiWorkPicker({ priceContext, catalog, onAdd, initialDesc
 
   const add = () => {
     if (!picked) return
-    const works: EstimateWorkInput[] = picked
-      .map((it, i) => ({ it, i }))
-      .filter(({ it, i }) => it.matched && sel[i])
-      .map(({ it }) => ({ workId: it.workId!, qty: it.qty }))
+    const works: EstimateWorkInput[] = []
+    picked.forEach((it, i) => {
+      if (!it.matched || !sel[i]) return
+      if (it.isKit && it.kitId) {
+        // Набор → разворачиваем в его активные работы (как ручное «Додати набір»).
+        const kit = catalog.kits[it.kitId]
+        kit?.items
+          .filter((k) => catalog.works[k.workId]?.active)
+          .forEach((k) => works.push({ workId: k.workId, qty: k.qty * it.qty }))
+      } else if (it.workId) {
+        works.push({ workId: it.workId, qty: it.qty })
+      }
+    })
     if (works.length) onAdd(works)
     close()
   }
@@ -93,8 +108,9 @@ export default function AiWorkPicker({ priceContext, catalog, onAdd, initialDesc
                     <ListItem key={i} disablePadding secondaryAction={<Typography variant="body2">×{it.qty}</Typography>}>
                       <Checkbox edge="start" checked={!!sel[i]} disabled={!it.matched}
                         onChange={(e) => setSel({ ...sel, [i]: e.target.checked })} />
-                      <ListItemText primary={it.name}
-                        secondary={it.matched ? it.code : 'немає в прайсі — додайте вручну'}
+                      <ListItemText
+                        primary={<>{it.name}{it.isKit && <Chip size="small" label="набір" sx={{ ml: 1 }} />}</>}
+                        secondary={it.matched ? (it.isKit ? `${it.code} · розкладеться на роботи` : it.code) : 'немає в прайсі — додайте вручну (кнопкою нижче)'}
                         secondaryTypographyProps={{ color: it.matched ? 'text.secondary' : 'warning.main' }} />
                     </ListItem>
                   ))}
