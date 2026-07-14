@@ -70,8 +70,10 @@ export const ensureShift = async (fop) => {
 
 // Собрать тело чека продажи. goods: [{name, price(грн), qty, code?}]. paymentLabel — подпись оплаты.
 export const buildSellPayload = (fop, { goods, paymentLabel, receiptId }) => {
-  const items = (goods || []).map((g) => ({
-    good: { code: g.code || undefined, name: String(g.name), price: toKop(g.price) },
+  // good.code (артикул) — у части касс Checkbox обязателен (валидация value_error.missing).
+  // Если у позиции нет своего кода — подставляем позиционный, чтобы чек не отклонялся.
+  const items = (goods || []).map((g, i) => ({
+    good: { code: String(g.code || `POS-${i + 1}`), name: String(g.name), price: toKop(g.price) },
     quantity: Math.round((g.qty || 1) * 1000),
   }))
   // ПОСТРОЧНОЕ округление в копейках (как валидирует Checkbox) → payments точно равны goods.

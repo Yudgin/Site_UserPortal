@@ -168,7 +168,7 @@ export function registerFopsAdmin(app, deps) {
       return res.status(400).json({ success: false, error: { code: 'NO_CHECKBOX', message: 'У ФОП не заданий Checkbox (ключ каси/PIN). Спочатку збережіть дані каси.' } })
     }
     try {
-      const r = await sellReceipt(fop, { goods: [{ name: 'Ремонт (тестовий чек)', price: 10, qty: 1 }], paymentLabel: 'Оплата (тест)' })
+      const r = await sellReceipt(fop, { goods: [{ name: 'Ремонт (тестовий чек)', price: 10, qty: 1, code: 'TEST-REPAIR' }], paymentLabel: 'Оплата (тест)' })
       return res.json({ success: true, data: r })
     } catch (e) {
       const detail = (e.response && e.response.data)
