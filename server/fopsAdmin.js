@@ -3,6 +3,8 @@
 // GET возвращает лишь флаги «задано/не задано», значения ключей наружу НЕ отдаются. PUT
 // перезаписывает только НЕПУСТЫЕ переданные ключи (пустые оставляют прежние).
 import { verifyFirebaseAdmin } from './adminAuth.js'
+import { getFop } from './fops.js'
+import { sellReceipt } from './checkbox.js'
 
 const nowIso = () => new Date().toISOString()
 const clip = (v, n = 200) => (v == null ? '' : String(v).slice(0, n))
@@ -151,6 +153,29 @@ export function registerFopsAdmin(app, deps) {
     } catch (e) {
       console.error('fops admin delete:', e.message)
       res.status(500).json({ success: false })
+    }
+  })
+
+  // Тестовый фискальный чек: РЕАЛЬНЫЙ чек продажи на 10 грн кредами ЭТОГО ФОП (Checkbox), чтобы
+  // проверить, что данные кассы внесены верно. Открывает реальную смену. Ошибку Checkbox отдаём
+  // текстом — по ней видно причину (неверный licenseKey/PIN, каса не активна и т.п.).
+  app.post('/api/fops/admin/:id/test-receipt', async (req, res) => {
+    if (!(await gate(req, res))) return
+    const id = clip(req.params.id, 64).replace(/[^\w-]/g, '')
+    const fop = getFop(id)
+    if (!fop) return res.status(404).json({ success: false, error: { code: 'NO_FOP', message: 'ФОП не знайдено' } })
+    if (!fop.checkbox || !fop.checkbox.licenseKey) {
+      return res.status(400).json({ success: false, error: { code: 'NO_CHECKBOX', message: 'У ФОП не заданий Checkbox (ключ каси/PIN). Спочатку збережіть дані каси.' } })
+    }
+    try {
+      const r = await sellReceipt(fop, { goods: [{ name: 'Ремонт (тестовий чек)', price: 10, qty: 1 }], paymentLabel: 'Оплата (тест)' })
+      return res.json({ success: true, data: r })
+    } catch (e) {
+      const detail = (e.response && e.response.data)
+        ? (typeof e.response.data === 'string' ? e.response.data : JSON.stringify(e.response.data))
+        : (e.message || 'невідома помилка')
+      console.error(`fops test-receipt ${id}:`, detail)
+      return res.status(502).json({ success: false, error: { code: 'CHECKBOX_ERROR', message: `Checkbox: ${detail}` } })
     }
   })
 }

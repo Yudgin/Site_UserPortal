@@ -11,6 +11,7 @@ import {
 } from '@mui/material'
 import {
   Home as HomeIcon, Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Payments as FopIcon,
+  Receipt as ReceiptIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
@@ -37,6 +38,8 @@ export default function FopsAdminPage() {
   const [loading, setLoading] = useState(true)
   const [edit, setEdit] = useState<EditState | null>(null)
   const [saving, setSaving] = useState(false)
+  const [receiptBusy, setReceiptBusy] = useState('') // id ФОПа, по которому выбивается тестовый чек
+  const [receipt, setReceipt] = useState<{ fopName: string; ok: boolean; fiscalCode?: string | null; taxUrl?: string | null; status?: string | null; error?: string } | null>(null)
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
@@ -75,6 +78,14 @@ export default function FopsAdminPage() {
     const ok = await fopsAdminApi.save(id, payload)
     setSaving(false)
     if (ok) { notify('ФОП збережено'); setEdit(null); load() } else notify('Не вдалося зберегти', 'error')
+  }
+
+  const testReceipt = async (f: FopAdmin) => {
+    if (!window.confirm(`Виписати РЕАЛЬНИЙ тестовий фіскальний чек на 10 грн для «${f.name}»?\n\nБуде відкрито реальну зміну на касі та створено справжній чек у ДПС (не пісочниця).`)) return
+    setReceiptBusy(f.id)
+    const r = await fopsAdminApi.testReceipt(f.id)
+    setReceiptBusy('')
+    setReceipt({ fopName: f.name, ok: r.ok, fiscalCode: r.data?.fiscalCode, taxUrl: r.data?.taxUrl, status: r.data?.status, error: r.error })
   }
 
   const remove = async (f: FopAdmin) => {
@@ -128,7 +139,13 @@ export default function FopsAdminPage() {
                   <Chip size="small" label={f.id} variant="outlined" />
                   {!f.active && <Chip size="small" color="default" label="вимкнено" />}
                 </Stack>
-                <Stack direction="row" spacing={0.5}>
+                <Stack direction="row" spacing={0.5} alignItems="center">
+                  {f.secretsSet.checkbox && (
+                    <Button size="small" variant="outlined" disabled={receiptBusy === f.id} onClick={() => testReceipt(f)}
+                      startIcon={receiptBusy === f.id ? <CircularProgress size={14} /> : <ReceiptIcon fontSize="small" />}>
+                      Тестовий чек
+                    </Button>
+                  )}
                   <IconButton size="small" onClick={() => openEdit(f)}><EditIcon fontSize="small" /></IconButton>
                   <IconButton size="small" color="error" onClick={() => remove(f)}><DeleteIcon fontSize="small" /></IconButton>
                 </Stack>
@@ -215,6 +232,27 @@ export default function FopsAdminPage() {
         <DialogActions>
           <Button onClick={() => setEdit(null)}>Скасувати</Button>
           <Button variant="contained" onClick={save} disabled={saving}>Зберегти</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Результат тестового чека Checkbox */}
+      <Dialog open={!!receipt} onClose={() => setReceipt(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>Тестовий чек · {receipt?.fopName}</DialogTitle>
+        <DialogContent dividers>
+          {receipt?.ok ? (
+            <Stack spacing={1}>
+              <Alert severity="success">Фіскальний чек виписано (реальний, на 10 грн).</Alert>
+              {receipt.fiscalCode && <Typography variant="body2">Фіскальний код: <b>{receipt.fiscalCode}</b></Typography>}
+              {receipt.status && <Typography variant="body2" color="text.secondary">Статус: {receipt.status}</Typography>}
+              {receipt.taxUrl && <Typography variant="body2"><a href={receipt.taxUrl} target="_blank" rel="noreferrer">Переглянути чек</a></Typography>}
+              <Typography variant="caption" color="text.secondary">Це реальна продажа на касі. За потреби зробіть чек повернення у кабінеті Checkbox.</Typography>
+            </Stack>
+          ) : (
+            <Alert severity="error"><Box sx={{ whiteSpace: 'pre-wrap' }}>{receipt?.error}</Box></Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setReceipt(null)}>Закрити</Button>
         </DialogActions>
       </Dialog>
 

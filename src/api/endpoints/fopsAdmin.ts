@@ -98,6 +98,16 @@ export const fopsAdminApi = {
       return false
     }
   },
+  // РЕАЛЬНЫЙ тестовый чек на 10 грн кредами этого ФОП (Checkbox) — проверка данных кассы.
+  testReceipt: async (id: string): Promise<{ ok: boolean; data?: { receiptId?: string; fiscalCode?: string | null; taxUrl?: string | null; status?: string | null }; error?: string }> => {
+    try {
+      const { data } = await axios.post(`${BACKEND_URL}/api/fops/admin/${encodeURIComponent(id)}/test-receipt`, {}, { headers: await adminHeaders() })
+      return data?.success ? { ok: true, data: data.data } : { ok: false, error: data?.error?.message || 'Помилка' }
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { error?: { message?: string } } } }
+      return { ok: false, error: err.response?.data?.error?.message || 'Не вдалося виконати запит' }
+    }
+  },
 }
 
 export default fopsAdminApi
