@@ -30,6 +30,7 @@ import {
   AccordionSummary,
   AccordionDetails,
   Snackbar,
+  Stack,
 } from '@mui/material'
 import {
   ExpandMore as ExpandMoreIcon,
@@ -47,7 +48,10 @@ import LoadingSpinner from '@/components/common/LoadingSpinner'
 import ClientInfoEditor from '@/components/common/ClientInfoEditor'
 import { serviceApi, ServiceRequestData, ClientInfo } from '@/api/endpoints/service'
 import { serviceContentService, SERVICE_CONTENT_KEYS } from '@/api/serviceContentService'
+import { serviceRequestService } from '@/api/serviceRequestService'
 import { useSettingsStore } from '@/store/settingsStore'
+import { useAuthStore } from '@/store/authStore'
+import { isAdminEmail } from '@/config/access'
 import { useNavigate } from 'react-router-dom'
 import { Home as HomeIcon } from '@mui/icons-material'
 
@@ -82,11 +86,50 @@ export default function ServiceSharePage() {
     severity: 'success',
   })
 
+  // Перенос ремонта 1С в нашу систему (только админ). Локальная заявка живёт под детерминированным
+  // id sr-ext-<1С-id>, связана с 1С через externalRequestId (тот же id, что в этой ссылке).
+  const { user } = useAuthStore()
+  const isAdmin = !!user && isAdminEmail(user.email)
+  const localReqId = requestId ? `sr-ext-${requestId}` : ''
+  const [localExists, setLocalExists] = useState<boolean | null>(null)
+  const [transferring, setTransferring] = useState(false)
+
   useEffect(() => {
     if (requestId) {
       loadData()
     }
   }, [requestId])
+
+  // Уже перенесена? (для админа — сменить надпись кнопки на «Відкрити заявку»)
+  useEffect(() => {
+    if (!isAdmin || !localReqId) { setLocalExists(null); return }
+    serviceRequestService.get(localReqId).then((r) => setLocalExists(!!r)).catch(() => setLocalExists(false))
+  }, [isAdmin, localReqId])
+
+  // Создать локальную заявку из 1С-ремонта (или открыть уже существующую) и перейти в её хаб.
+  const transferToLocal = async () => {
+    if (!requestId || !data) return
+    setTransferring(true)
+    try {
+      if (!localExists) {
+        const ci = data.clientInfo
+        const clientName = ci ? [ci.lastName, ci.firstName, ci.middleName].filter(Boolean).join(' ').trim() : ''
+        await serviceRequestService.save({
+          id: localReqId,
+          externalRequestId: requestId,
+          status: 'new',
+          ...(clientName ? { clientName } : {}),
+          ...(data.complaint ? { complaint: data.complaint } : {}),
+          ...(ci?.cityRef ? { clientCityRef: ci.cityRef, clientCityName: ci.city } : {}),
+          ...(ci?.warehouseRef ? { clientWarehouseRef: ci.warehouseRef, clientWarehouseName: ci.warehouse } : {}),
+        })
+      }
+      navigate(`/service-request/${localReqId}`)
+    } catch {
+      setSnackbar({ open: true, message: 'Не вдалося перенести заявку', severity: 'error' })
+      setTransferring(false)
+    }
+  }
 
   // Загрузить редактируемый текст соглашения (по текущему языку, с fallback на украинский)
   useEffect(() => {
@@ -305,6 +348,26 @@ export default function ServiceSharePage() {
       </Box>
 
       <Container maxWidth="md" sx={{ flex: 1, pb: 4 }}>
+        {/* Адмін: перенести ремонт 1С у нашу систему (видно лише адміністратору) */}
+        {isAdmin && (
+          <Paper sx={{ p: 2, mb: 3, border: '1px solid', borderColor: 'primary.main' }}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }} justifyContent="space-between">
+              <Box>
+                <Typography variant="subtitle2">Адміністратор</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {localExists
+                    ? 'Цей ремонт уже є у нашій системі як заявка.'
+                    : 'Перенести цей ремонт 1С у нашу систему — створиться заявка, звʼязана з 1С.'}
+                </Typography>
+              </Box>
+              <Button variant="contained" onClick={transferToLocal} disabled={transferring || localExists === null} sx={{ flexShrink: 0 }}
+                startIcon={transferring ? <CircularProgress size={18} color="inherit" /> : <BuildIcon />}>
+                {localExists ? 'Відкрити заявку' : 'Перенести в нашу систему'}
+              </Button>
+            </Stack>
+          </Paper>
+        )}
+
         {/* Terms Acceptance */}
         {!termsAccepted && (
           <Paper sx={{ p: 3, mb: 3 }}>
