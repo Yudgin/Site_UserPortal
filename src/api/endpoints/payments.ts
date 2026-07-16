@@ -30,7 +30,7 @@ export interface FopPublic {
   receipts: boolean // выбивает ли фискальные чеки (есть Checkbox)
 }
 
-export type PayMethod = 'liqpay-card' | 'liqpay-paypart' | 'liqpay-moment' | 'mono-chast'
+export type PayMethod = 'liqpay-card' | 'liqpay-paypart' | 'liqpay-moment' | 'mono-chast' | 'mono-acquire'
 
 export interface PayEstimateInput {
   estimateId: string
@@ -44,13 +44,15 @@ export interface PayEstimateInput {
 
 export interface PayCreateResult {
   orderId: string
-  provider: 'liqpay' | 'mono-chast'
+  provider: 'liqpay' | 'mono-chast' | 'mono-acquire'
   // LiqPay: данные для авто-сабмита формы Checkout
   checkoutUrl?: string
   data?: string
   signature?: string
   // monobank Частини: ответ банка
   bank?: unknown
+  // monobank Acquiring: ссылка на платёжную страницу (редирект клиента)
+  pageUrl?: string
 }
 
 export interface PayStatus {

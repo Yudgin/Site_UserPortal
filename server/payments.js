@@ -20,6 +20,7 @@ import { getAuth } from 'firebase-admin/auth'
 import { getFop, fopHas, listFopsPublic, hasAnyFop } from './fops.js'
 import * as liqpay from './liqpay.js'
 import * as monoChast from './monoChast.js'
+import * as monoAcquire from './monoAcquire.js'
 import * as checkbox from './checkbox.js'
 
 const nowIso = () => new Date().toISOString()
@@ -247,6 +248,24 @@ export function registerPayments(app, deps) {
       return { ok: true, data: { orderId, provider: 'mono-chast', bank } }
     }
 
+    if (method === 'mono-acquire') {
+      if (!fopHas(fop, 'monoAcquire.token')) return { ok: false, status: 400, code: 'NO_MONO_ACQUIRE', message: 'У ФОП немає monobank еквайрингу' }
+      // basketOrder в копейках; построчное округление КАК в Checkbox → Σ позиций == goodsKop == amount
+      // сметы (иначе monobank отклонит amount≠Σ, или спишет иначе, чем в чеке).
+      const lineKop = (priceUah, qty) => Math.round((Math.round(Number(priceUah) * 100) * Math.round((qty || 1) * 1000)) / 1000)
+      const basket = goods.map((g) => ({ name: String(g.name), qty: Number(g.qty) || 1, sumKop: lineKop(g.price, Number(g.qty) || 1), code: g.code }))
+      const amountKop = basket.reduce((s, b) => s + b.sumKop, 0)
+      const inv = await monoAcquire.createInvoice(fop, {
+        amountKop, reference: orderId, destination: description || `Оплата RunFerry #${orderId}`, goods: basket,
+        redirectUrl: resultUrl, webHookUrl: PUBLIC ? `${PUBLIC}/api/mono/acquire/callback` : undefined,
+      })
+      order.provider = 'mono-acquire'
+      order.providerOrderId = String(inv.invoiceId || orderId)
+      order.status = 'pending'
+      await saveOrder(order)
+      return { ok: true, data: { orderId, provider: 'mono-acquire', pageUrl: inv.pageUrl } }
+    }
+
     return { ok: false, status: 400, code: 'BAD_METHOD', message: 'Невідомий метод' }
   }
 
@@ -324,7 +343,7 @@ export function registerPayments(app, deps) {
       // ФОП зависит от ВЫБРАННОГО клиентом способа: берём из payOptions сметы (дефолт из центра,
       // выставлен мастером — «кто принял, тот и чек»). У старых смет без payOptions — единый est.fopId.
       const chosenMethod = method || 'liqpay-card'
-      const methodKey = { 'liqpay-card': 'liqpayCard', 'liqpay-paypart': 'liqpayPaypart', 'liqpay-moment': 'liqpayPaypart', 'mono-chast': 'monoChast' }[chosenMethod]
+      const methodKey = { 'liqpay-card': 'liqpayCard', 'liqpay-paypart': 'liqpayPaypart', 'liqpay-moment': 'liqpayPaypart', 'mono-chast': 'monoChast', 'mono-acquire': 'monoAcquire' }[chosenMethod]
       let payFopId = est.fopId
       if (Array.isArray(est.payOptions) && est.payOptions.length) {
         const opt = est.payOptions.find((o) => o && o.method === methodKey && o.fopId)
@@ -641,6 +660,31 @@ export function registerPayments(app, deps) {
     }
   })
 
+  // Вебхук monobank Acquiring (JSON, ECDSA-подпись в X-Sign, ключ — pubkey мерчанта).
+  app.post('/api/mono/acquire/callback', async (req, res) => {
+    res.sendStatus(200)
+    try {
+      if (!adminDb) return
+      const body = req.body || {}
+      const invoiceId = body.invoiceId
+      if (!invoiceId) return
+      const order = await findByProviderOrderId(invoiceId)
+      if (!order) return console.warn('mono acquire callback: заказ не найден', invoiceId)
+      const fop = getFop(order.fopId)
+      if (!(await monoAcquire.verifyWebhook(fop, req.rawBody, req.get('X-Sign')))) return console.warn('mono acquire callback: неверная подпись', order.orderId)
+
+      const status = body.status
+      if (status === 'success') {
+        if (order.status !== 'paid') await saveOrder({ orderId: order.orderId, status: 'paid', paytype: 'mono-acquire' })
+        await fiscalize({ ...order, status: 'paid' }, 'Оплата карткою (monobank)')
+      } else if (order.status !== 'paid' && (status === 'failure' || status === 'expired' || status === 'reversed')) {
+        await saveOrder({ orderId: order.orderId, status }) // терминальный не-paid не откатываем
+      }
+    } catch (e) {
+      console.error('mono acquire callback error:', e.message)
+    }
+  })
+
   // Реконсиляция: колбэки банков не гарантированы → добиваем застрявшие monobank-заявки опросом
   // order/state и повторяем непробитые чеки (paid без receiptId). Транзакционный claim делает это
   // безопасным даже при нескольких инстансах Cloud Run.
@@ -677,7 +721,8 @@ export function registerPayments(app, deps) {
         const o = doc.data()
         if (o.status !== 'paid' || o.receiptId) continue
         checked++
-        await fiscalize(o, o.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : 'Оплата частинами (monobank)')
+        const lbl = o.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : o.provider === 'mono-acquire' ? 'Оплата карткою (monobank)' : 'Оплата частинами (monobank)'
+        await fiscalize(o, lbl)
       }
     } catch (e) { console.error('reconcile failed query:', e.message) }
     // 3) LiqPay «pending» дольше 5 минут — спросить статус напрямую (потерянный success-колбэк:
@@ -687,28 +732,42 @@ export function registerPayments(app, deps) {
       const pend = await col().where('status', '==', 'pending').limit(50).get()
       for (const doc of pend.docs) {
         const o = doc.data()
-        if (o.provider !== 'liqpay') continue
         if (o.createdAt && Date.parse(o.createdAt) > cutoff) continue
         const fop = getFop(o.fopId)
         if (!fop) continue
-        checked++
-        try {
-          const st = await liqpay.queryStatus(fop, o.orderId)
-          const s = st && st.status
-          if (s === 'success' || s === 'wait_compensation') {
-            // Оплачено. Сверяем сумму (как вебхук) прежде чем помечать paid и бить чек.
-            const paidAmt = Number(st.amount)
-            if (Number.isFinite(paidAmt) && Math.abs(paidAmt - Number(o.amount)) < 0.01) {
-              await saveOrder({ orderId: o.orderId, status: 'paid', paytype: st.paytype || o.method, providerOrderId: st.payment_id ? String(st.payment_id) : o.providerOrderId })
-              await fiscalize({ ...o, status: 'paid' }, 'Оплата частинами (LiqPay)')
-            } else {
-              console.warn('reconcile liqpay: сумма не совпала, чек НЕ бьём', o.orderId, paidAmt, o.amount)
+        if (o.provider === 'liqpay') {
+          checked++
+          try {
+            const st = await liqpay.queryStatus(fop, o.orderId)
+            const s = st && st.status
+            if (s === 'success' || s === 'wait_compensation') {
+              // Оплачено. Сверяем сумму (как вебхук) прежде чем помечать paid и бить чек.
+              const paidAmt = Number(st.amount)
+              if (Number.isFinite(paidAmt) && Math.abs(paidAmt - Number(o.amount)) < 0.01) {
+                await saveOrder({ orderId: o.orderId, status: 'paid', paytype: st.paytype || o.method, providerOrderId: st.payment_id ? String(st.payment_id) : o.providerOrderId })
+                await fiscalize({ ...o, status: 'paid' }, 'Оплата частинами (LiqPay)')
+              } else {
+                console.warn('reconcile liqpay: сумма не совпала, чек НЕ бьём', o.orderId, paidAmt, o.amount)
+              }
+            } else if (s === 'failure' || s === 'error' || s === 'reversed') {
+              await saveOrder({ orderId: o.orderId, status: s }) // окончательно не прошёл
             }
-          } else if (s === 'failure' || s === 'error' || s === 'reversed') {
-            await saveOrder({ orderId: o.orderId, status: s }) // окончательно не прошёл
-          }
-          // processing/wait_accept/wait_secure и т.п. — оставляем pending, проверим позже
-        } catch (e) { console.error('reconcile liqpay', o.orderId, e.message) }
+            // processing/wait_accept/wait_secure и т.п. — оставляем pending, проверим позже
+          } catch (e) { console.error('reconcile liqpay', o.orderId, e.message) }
+        } else if (o.provider === 'mono-acquire' && o.providerOrderId) {
+          checked++
+          try {
+            const st = await monoAcquire.invoiceStatus(fop, o.providerOrderId)
+            const s = st && st.status
+            if (s === 'success') {
+              await saveOrder({ orderId: o.orderId, status: 'paid', paytype: 'mono-acquire' })
+              await fiscalize({ ...o, status: 'paid' }, 'Оплата карткою (monobank)')
+            } else if (s === 'failure' || s === 'expired' || s === 'reversed') {
+              await saveOrder({ orderId: o.orderId, status: s })
+            }
+            // created/processing/hold — оставляем pending
+          } catch (e) { console.error('reconcile mono-acquire', o.orderId, e.message) }
+        }
       }
     } catch (e) { console.error('reconcile liqpay pending query:', e.message) }
     return { checked }

@@ -255,9 +255,9 @@ export const PAY_METHOD_LABELS: Record<PayMethodKey, string> = {
   privatPaypart: 'Оплата частинами (ПриватБанк)',
   cod: 'Накладений платіж (Нова Пошта)',
 }
-// Онлайн-оплата идёт через /api/estimates/pay (LiqPay/monobank Частини). cod — оплата при получении
-// (не онлайн). Прочие (monoAcquire/privatPaypart) — потоки ещё не реализованы (только настройка ФОП).
-export const ONLINE_PAY_METHODS: PayMethodKey[] = ['liqpayCard', 'liqpayPaypart', 'monoChast']
+// Онлайн-оплата идёт через /api/estimates/pay (LiqPay / monobank Частини / monobank еквайринг).
+// cod — оплата при получении (не онлайн). privatPaypart — поток ещё не реализован (только настройка ФОП).
+export const ONLINE_PAY_METHODS: PayMethodKey[] = ['liqpayCard', 'liqpayPaypart', 'monoChast', 'monoAcquire']
 
 // Разрешённый способ оплаты фактической сметы + ФОП, которым он принимается (дефолт из центра,
 // переопределяемо мастером). Клиенту отдаётся только список method (без fopId) через safeEstimate.

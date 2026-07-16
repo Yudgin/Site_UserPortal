@@ -88,9 +88,11 @@ export default function EstimateSharePage() {
     const hasCard = pm && pm.length ? pm.includes('liqpayCard') : !!fop?.methods.liqpayCard
     const hasPaypart = pm && pm.length ? pm.includes('liqpayPaypart') : !!fop?.methods.liqpayPaypart
     const hasMono = pm && pm.length ? pm.includes('monoChast') : !!fop?.methods.monoChast
+    const hasAcquire = pm && pm.length ? pm.includes('monoAcquire') : !!fop?.methods.monoAcquire
     if (hasCard) opts.push({ value: 'liqpay-card', label: 'Картою (LiqPay)' })
     if (hasPaypart) { opts.push({ value: 'liqpay-paypart', label: 'Частинами (LiqPay)' }); opts.push({ value: 'liqpay-moment', label: 'Миттєва розстрочка (LiqPay)' }) }
     if (hasMono) opts.push({ value: 'mono-chast', label: 'Частинами (monobank)' })
+    if (hasAcquire) opts.push({ value: 'mono-acquire', label: 'Картою (monobank)' })
     return opts
   }, [est?.payMethods, fop])
 
@@ -124,6 +126,8 @@ export default function EstimateSharePage() {
       localStorage.setItem(ORDER_KEY(id), res.orderId)
       if (res.provider === 'liqpay') {
         submitLiqpayCheckout(res, '_self') // редирект на LiqPay Checkout
+      } else if (res.provider === 'mono-acquire' && res.pageUrl) {
+        window.location.href = res.pageUrl // редирект на платёжную страницу monobank
       } else {
         // monobank Частини — клиент подтверждает рассрочку в приложении; статус придёт по webhook
         setErr('')
