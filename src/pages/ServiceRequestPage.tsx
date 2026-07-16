@@ -48,6 +48,8 @@ export default function ServiceRequestPage() {
   const [saving, setSaving] = useState(false)
   const [complaint, setComplaint] = useState('')
   const [boat, setBoat] = useState('')
+  const [clientName, setClientName] = useState('')
+  const [clientPhone, setClientPhone] = useState('') // нужен для SMS-фолбэка оповещений
   const [diag, setDiag] = useState('') // текст диагностики (выявленные неисправности)
   const [notifs, setNotifs] = useState<ClientNotification[]>([]) // журнал оповещений
   const [notifText, setNotifText] = useState('') // произвольное сообщение клиенту
@@ -68,6 +70,8 @@ export default function ServiceRequestPage() {
     if (r) {
       setComplaint(r.complaint || '')
       setBoat(r.boat || '')
+      setClientName(r.clientName || '')
+      setClientPhone(r.clientPhone || '')
       setDiag(r.diagnostics?.text || '')
       if (r.offerId) pricingService.loadOffer(r.offerId).then(setOffer)
       if (r.actualEstimateId) pricingService.loadEstimate(r.actualEstimateId).then(setActual)
@@ -186,10 +190,10 @@ export default function ServiceRequestPage() {
 
       {/* Клиент + статус + жалоба */}
       <Paper sx={{ p: 2, mb: 3 }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 2 }} alignItems={{ sm: 'center' }}>
-          <Typography variant="subtitle1" sx={{ flex: 1 }}>
-            {req.clientName || 'Клієнт'} {req.clientPhone && <>· 📱 {req.clientPhone}</>}
-          </Typography>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 2, flexWrap: 'wrap' }} alignItems={{ sm: 'center' }}>
+          <TextField label="Клієнт (ПІБ)" value={clientName} onChange={(e) => setClientName(e.target.value)} size="small" sx={{ flex: 1, minWidth: 180 }} />
+          <TextField label="Телефон" value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} size="small" sx={{ minWidth: 170 }}
+            placeholder="+380…" helperText={!clientPhone.trim() ? 'потрібен для SMS-оповіщень' : undefined} />
           <TextField select size="small" label="Статус" value={req.status} disabled={!!req.paymentId || saving}
             helperText={req.paymentId ? 'оплачено — статус зафіксовано' : undefined}
             onChange={(e) => patch({ status: e.target.value as ServiceRequestStatus })} sx={{ minWidth: 180 }}>
@@ -199,7 +203,8 @@ export default function ServiceRequestPage() {
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
           <TextField label="Кораблик" value={boat} onChange={(e) => setBoat(e.target.value)} size="small" sx={{ minWidth: 200 }} />
           <TextField label="Скарга / опис" value={complaint} onChange={(e) => setComplaint(e.target.value)} size="small" fullWidth multiline />
-          <Button variant="outlined" startIcon={<SaveIcon />} disabled={saving} onClick={() => patch({ complaint, boat })}>Зберегти</Button>
+          <Button variant="outlined" startIcon={<SaveIcon />} disabled={saving}
+            onClick={() => patch({ complaint, boat, clientName: clientName.trim(), clientPhone: clientPhone.trim() }).then((ok) => { if (ok) notify('Збережено') })}>Зберегти</Button>
         </Stack>
         {req.externalRequestId && <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>Заявка 1С: {req.externalRequestId}</Typography>}
       </Paper>
