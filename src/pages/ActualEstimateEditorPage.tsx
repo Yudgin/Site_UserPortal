@@ -11,7 +11,7 @@ import {
   TextField, Chip, Stack,
 } from '@mui/material'
 import {
-  Home as HomeIcon, Save as SaveIcon,
+  Home as HomeIcon, Save as SaveIcon, ArrowBack as BackIcon,
   ContentCopy as CopyIcon, Payment as PaymentIcon, Receipt as ReceiptIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
@@ -273,6 +273,9 @@ export default function ActualEstimateEditorPage() {
         <Typography variant="h4">Фактична калькуляція</Typography>
         <Stack direction="row" spacing={1}>
           <ViewAsButton value={viewAs} onChange={setViewAs} />
+          {(serviceRequestId || prelim?.serviceRequestId) && (
+            <Button startIcon={<BackIcon />} onClick={() => navigate(`/service-request/${serviceRequestId || prelim?.serviceRequestId}`)}>До заявки</Button>
+          )}
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
         </Stack>
       </Box>

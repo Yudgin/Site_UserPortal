@@ -12,7 +12,7 @@ import {
 } from '@mui/material'
 import {
   Home as HomeIcon, ContentCopy as CopyIcon, AddCircle as AddVariantIcon,
-  Build as ActualIcon, CheckCircle as CheckIcon,
+  Build as ActualIcon, CheckCircle as CheckIcon, ArrowBack as BackIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { usePricingStore } from '@/store/pricingStore'
@@ -205,6 +205,9 @@ export default function OfferEditorPage() {
         <Typography variant="h4">Пропозиція клієнту</Typography>
         <Stack direction="row" spacing={1}>
           <ViewAsButton value={viewAs} onChange={setViewAs} />
+          {(serviceRequestId || loadedSrId) && (
+            <Button startIcon={<BackIcon />} onClick={() => navigate(`/service-request/${serviceRequestId || loadedSrId}`)}>До заявки</Button>
+          )}
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
         </Stack>
       </Box>
