@@ -308,13 +308,19 @@ export default function ServiceRequestPage() {
             {actualLink && <Button size="small" onClick={() => { navigator.clipboard.writeText(actualLink); notify('Посилання скопійовано') }}>Посилання на оплату</Button>}
           </Stack>
         ) : selectedVariantId ? (
-          <Button variant="contained" startIcon={<ActualIcon />} onClick={() => navigate(`/actual-estimate?request=${id}&parent=${selectedVariantId}`)}>
-            Скласти факт (за обраним варіантом)
-          </Button>
-        ) : req.offerId ? (
-          <Alert severity="info">Клієнт ще не обрав варіант — факт складається після вибору.</Alert>
+          <Stack spacing={1.5} alignItems="flex-start">
+            <Button variant="contained" startIcon={<ActualIcon />} onClick={() => navigate(`/actual-estimate?request=${id}&parent=${selectedVariantId}`)}>
+              Скласти факт (за обраним варіантом)
+            </Button>
+            <Button size="small" onClick={() => navigate(`/actual-estimate?request=${id}`)}>Скласти факт напряму (без варіанта)</Button>
+          </Stack>
         ) : (
-          <Alert severity="info">Спочатку складіть пропозицію і дочекайтесь вибору клієнта.</Alert>
+          <Stack spacing={1.5} alignItems="flex-start">
+            {req.offerId && <Alert severity="info" sx={{ width: '100%' }}>Пропозицію виставлено, але клієнт ще не обрав варіант. Можна скласти факт напряму.</Alert>}
+            <Button variant="contained" startIcon={<ActualIcon />} onClick={() => navigate(`/actual-estimate?request=${id}`)}>
+              Скласти факт{req.offerId ? ' напряму' : ' (без пропозиції)'}
+            </Button>
+          </Stack>
         )}
       </Paper>
 
