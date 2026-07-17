@@ -103,6 +103,9 @@ export interface ServiceCenter {
   // Дефолтный ФОП по каждому способу оплаты (для этого центра). Ключ — PayMethodKey (см. pricing.ts),
   // значение — fopId. Подставляется в фактическую калькуляцию как дефолт (мастер может переопределить).
   defaultFopByMethod?: Partial<Record<PayMethodKey, string>>
+  // Шаблоны ТТН Новой Почты для этого центра по направлениям (id из npTemplates):
+  incomingTtnTemplateId?: string | null // клиент → сервіс («на ремонт»)
+  returnTtnTemplateId?: string | null // сервіс → клієнт («з ремонту»)
   active: boolean
   createdAt: string
   updatedAt: string

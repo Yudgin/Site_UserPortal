@@ -13,7 +13,7 @@ import { npTtnApi } from '@/api/endpoints/npTtn'
 import { searchCities, getWarehouses, type NPCity, type NPWarehouse } from '@/api/endpoints/novaposhta'
 import { SIZE_LABELS, SCENARIO_LABELS, type NpTemplate } from '@/types/npTemplate'
 
-export default function CreateTtnDialog({ open, onClose, serviceRequestId, clientName, clientPhone, clientCityRef, clientCityName, clientWarehouseRef, clientWarehouseName, onCreated }: {
+export default function CreateTtnDialog({ open, onClose, serviceRequestId, clientName, clientPhone, clientCityRef, clientCityName, clientWarehouseRef, clientWarehouseName, presetTemplateId, onCreated }: {
   open: boolean
   onClose: () => void
   serviceRequestId: string
@@ -23,6 +23,7 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, clien
   clientCityName?: string
   clientWarehouseRef?: string
   clientWarehouseName?: string
+  presetTemplateId?: string // предвыбранный шаблон (из центра); селект блокируется
   onCreated: (ttn: string) => void
 }) {
   const [templates, setTemplates] = useState<NpTemplate[]>([])
@@ -56,9 +57,10 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, clien
     npTemplateService.list().then((all) => {
       const act = all.filter((t) => t.active !== false)
       setTemplates(act)
-      setTemplateId((id) => id || (act[0]?.id ?? ''))
+      // Предвыбранный шаблон из центра (если задан и активен) — иначе прежний/первый.
+      setTemplateId((id) => (presetTemplateId && act.some((t) => t.id === presetTemplateId) ? presetTemplateId : id || (act[0]?.id ?? '')))
     })
-  }, [open, clientCityRef, clientCityName, clientWarehouseRef])
+  }, [open, clientCityRef, clientCityName, clientWarehouseRef, presetTemplateId])
 
   useEffect(() => {
     if (cityQuery.trim().length < 2) { setCities([]); return }
@@ -104,7 +106,7 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, clien
             {templates.length === 0 ? (
               <Alert severity="info">Немає шаблонів посилок. Створіть їх на сторінці «Шаблони посилок».</Alert>
             ) : (
-              <TextField select label="Шаблон посилки" value={templateId} onChange={(e) => setTemplateId(e.target.value)} size="small" fullWidth>
+              <TextField select label="Шаблон посилки" value={templateId} onChange={(e) => setTemplateId(e.target.value)} size="small" fullWidth disabled={!!presetTemplateId}>
                 {templates.map((t) => <MenuItem key={t.id} value={t.id}>{SCENARIO_LABELS[t.scenario]} · {t.name} · {SIZE_LABELS[t.size]}</MenuItem>)}
               </TextField>
             )}

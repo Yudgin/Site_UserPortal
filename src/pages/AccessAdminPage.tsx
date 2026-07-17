@@ -15,6 +15,8 @@ import { useAccess, useAccessStore } from '@/store/accessStore'
 import { serviceCenterService } from '@/api/serviceCenterService'
 import { userProfileService } from '@/api/userProfileService'
 import { paymentsApi, type FopPublic } from '@/api/endpoints/payments'
+import { npTemplateService } from '@/api/npTemplateService'
+import { SCENARIO_LABELS, type NpTemplate } from '@/types/npTemplate'
 import { PAY_METHOD_KEYS, PAY_METHOD_LABELS, type PayMethodKey } from '@/types/pricing'
 import {
   CENTER_PERMISSIONS, CENTER_PERMISSION_LABELS, ROLE_LABELS,
@@ -34,6 +36,7 @@ export default function AccessAdminPage() {
   const [centers, setCenters] = useState<ServiceCenter[]>([])
   const [users, setUsers] = useState<UserProfile[]>([])
   const [fops, setFops] = useState<FopPublic[]>([]) // для дефолтного ФОП по способам оплаты в центре
+  const [npTemplates, setNpTemplates] = useState<NpTemplate[]>([]) // шаблоны ТТН для привязки к центру
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
@@ -52,6 +55,7 @@ export default function AccessAdminPage() {
   }, [])
   useEffect(() => { load() }, [load])
   useEffect(() => { paymentsApi.listFops().then(setFops).catch(() => setFops([])) }, [])
+  useEffect(() => { npTemplateService.list().then((t) => setNpTemplates(t.filter((x) => x.active !== false))).catch(() => setNpTemplates([])) }, [])
 
   // Задать дефолтный ФОП центра для способа оплаты (в редакторе центра).
   const setCenterFop = (method: PayMethodKey, fopId: string) => {
@@ -202,6 +206,27 @@ export default function AccessAdminPage() {
                 </TextField>
               )
             })}
+
+            <Divider textAlign="left"><Typography variant="caption">Шаблони ТТН Нової Пошти</Typography></Divider>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+              Який шаблон посилки використовувати із заявки цього центру. «На ремонт» — клієнт надсилає кораблик нам; «З ремонту» — ми надсилаємо клієнту.
+            </Typography>
+            {npTemplates.length === 0 ? (
+              <Alert severity="info">Немає шаблонів посилок. Створіть їх на сторінці «Шаблони посилок».</Alert>
+            ) : (
+              <>
+                <TextField select size="small" fullWidth label="ТТН на ремонт (клієнт → сервіс)"
+                  value={centerEdit?.incomingTtnTemplateId || ''} onChange={(e) => setCenterEdit((c) => ({ ...c, incomingTtnTemplateId: e.target.value || null }))}>
+                  <MenuItem value=""><em>— не задано —</em></MenuItem>
+                  {npTemplates.map((t) => <MenuItem key={t.id} value={t.id}>{SCENARIO_LABELS[t.scenario]} · {t.name}</MenuItem>)}
+                </TextField>
+                <TextField select size="small" fullWidth label="ТТН з ремонту (сервіс → клієнт)"
+                  value={centerEdit?.returnTtnTemplateId || ''} onChange={(e) => setCenterEdit((c) => ({ ...c, returnTtnTemplateId: e.target.value || null }))}>
+                  <MenuItem value=""><em>— не задано —</em></MenuItem>
+                  {npTemplates.map((t) => <MenuItem key={t.id} value={t.id}>{SCENARIO_LABELS[t.scenario]} · {t.name}</MenuItem>)}
+                </TextField>
+              </>
+            )}
           </Stack>
         </DialogContent>
         <DialogActions>

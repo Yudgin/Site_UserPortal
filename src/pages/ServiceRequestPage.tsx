@@ -30,7 +30,8 @@ import type { PreliminaryEstimate, ChatMessage } from '@/types/chat'
 import type { AiHistoryEntry } from '@/api/endpoints/ai'
 import AiTextEditor from '@/components/common/AiTextEditor'
 import { NOTIFICATION_EVENT_LABELS, type ClientNotification } from '@/types/notification'
-import { cardVisibility, type ViewRole } from '@/types/access'
+import { cardVisibility, type ViewRole, type ServiceCenter } from '@/types/access'
+import { serviceCenterService } from '@/api/serviceCenterService'
 import CreateTtnDialog from '@/components/CreateTtnDialog'
 import ViewAsButton from '@/components/ViewAsButton'
 
@@ -55,7 +56,9 @@ export default function ServiceRequestPage() {
   const [notifText, setNotifText] = useState('') // произвольное сообщение клиенту
   const [ttnInput, setTtnInput] = useState('') // номер ТТН для оповещения об отправке
   const [sending, setSending] = useState(false)
-  const [ttnDialog, setTtnDialog] = useState(false) // диалог создания ТТН на приём
+  const [ttnDialog, setTtnDialog] = useState(false) // диалог создания ТТН
+  const [ttnTemplateId, setTtnTemplateId] = useState<string | undefined>(undefined) // предвыбранный шаблон (из центра)
+  const [centers, setCenters] = useState<ServiceCenter[]>([]) // реестр сервисных центров
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const [staff, setStaff] = useState<{ uid: string; name: string }[]>([]) // справочник специалистов центра
   const [viewAs, setViewAs] = useState<ViewRole>('owner') // превью «Показати як…»
@@ -110,6 +113,11 @@ export default function ServiceRequestPage() {
     if (conv.length) parts.push(`Переписка з клієнтом:\n${conv.join('\n')}`)
     return parts.join('\n\n')
   }, [complaint, boat, chatMessages])
+
+  // Реестр сервисных центров (для выбора центра заявки и его шаблонов ТТН).
+  useEffect(() => { serviceCenterService.list().then(setCenters).catch(() => setCenters([])) }, [])
+  const center = centers.find((c) => c.id === req?.serviceCenterId) || null
+  const openTtn = (templateId?: string) => { setTtnTemplateId(templateId); setTtnDialog(true) }
 
   // Оптимистично обновляем req локально (без полной перезагрузки, чтобы не терять несохранённый
   // ввод в полях і не затирати статус, проставлений webhook). offer/actual не меняются при этом.
@@ -198,6 +206,12 @@ export default function ServiceRequestPage() {
             helperText={req.paymentId ? 'оплачено — статус зафіксовано' : undefined}
             onChange={(e) => patch({ status: e.target.value as ServiceRequestStatus })} sx={{ minWidth: 180 }}>
             {STATUSES.map((st) => <MenuItem key={st} value={st}>{SERVICE_REQUEST_STATUS_LABELS[st]}</MenuItem>)}
+          </TextField>
+          <TextField select size="small" label="Сервісний центр" value={req.serviceCenterId || ''} disabled={saving} sx={{ minWidth: 180 }}
+            helperText={!req.serviceCenterId ? 'потрібен для ТТН/ФОП/спеціалістів' : undefined}
+            onChange={(e) => patch({ serviceCenterId: e.target.value || null })}>
+            <MenuItem value=""><em>— не задано —</em></MenuItem>
+            {centers.filter((c) => c.active).map((c) => <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>)}
           </TextField>
         </Stack>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
@@ -362,9 +376,20 @@ export default function ServiceRequestPage() {
           <Button variant="contained" startIcon={<SendIcon />} disabled={sending || !notifText.trim()} onClick={sendCustom}>Надіслати</Button>
         </Stack>
 
-        {/* Создание ТТН на приём + оповещение об отправке */}
+        {/* Создание ТТН по направлениям (шаблон центра) + оповещение об отправке */}
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1 }} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
+          <Button variant="contained" startIcon={<ShipIcon />} disabled={!center?.incomingTtnTemplateId}
+            onClick={() => openTtn(center?.incomingTtnTemplateId || undefined)}>ТТН: на ремонт</Button>
+          <Button variant="contained" startIcon={<ShipIcon />} disabled={!center?.returnTtnTemplateId}
+            onClick={() => openTtn(center?.returnTtnTemplateId || undefined)}>ТТН: з ремонту</Button>
+          <Button variant="text" startIcon={<ShipIcon />} onClick={() => openTtn(undefined)}>Інший шаблон…</Button>
+        </Stack>
+        {!req.serviceCenterId ? (
+          <Alert severity="info" sx={{ mb: 1.5 }}>Оберіть сервісний центр вище — тоді підтягнуться його шаблони ТТН («на ремонт» / «з ремонту»).</Alert>
+        ) : (!center?.incomingTtnTemplateId && !center?.returnTtnTemplateId) ? (
+          <Alert severity="info" sx={{ mb: 1.5 }}>У центру не задані шаблони ТТН — налаштуйте їх у «Доступ та центри» → центр.</Alert>
+        ) : null}
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
-          <Button variant="contained" startIcon={<ShipIcon />} onClick={() => setTtnDialog(true)}>Створити ТТН</Button>
           <TextField value={ttnInput} onChange={(e) => setTtnInput(e.target.value)} size="small"
             label="ТТН (номер накладної)" placeholder={req.waybillNumber || 'напр. 20450…'} sx={{ minWidth: 220 }} />
           <Button variant="outlined" startIcon={<ShipIcon />} disabled={sending} onClick={sendTtn}>Повідомити про відправку</Button>
@@ -396,6 +421,7 @@ export default function ServiceRequestPage() {
         clientName={req.clientName} clientPhone={req.clientPhone}
         clientCityRef={req.clientCityRef} clientCityName={req.clientCityName}
         clientWarehouseRef={req.clientWarehouseRef} clientWarehouseName={req.clientWarehouseName}
+        presetTemplateId={ttnTemplateId}
         onCreated={(ttn) => { setTtnInput(ttn); setReq((r) => (r ? { ...r, waybillNumber: ttn } : r)); notify(`ТТН створено: ${ttn}`) }} />
 
       <Snackbar open={snack.open} autoHideDuration={5000} onClose={() => setSnack({ ...snack, open: false })} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
