@@ -48,6 +48,7 @@ export interface ClientInfo {
   lastName: string
   firstName: string
   middleName: string
+  phone: string // телефон клиента (1С может класть его в поля ПІБ — вытягиваем при нормализации)
 }
 
 export interface ServiceCenter {
@@ -119,17 +120,36 @@ const normalizeResponse = (raw: any): ServiceRequestData => {
     }))
   }
 
+  // 1С иногда кладёт телефон(ы) клиента прямо в поля ПІБ (LastName/MiddleName),
+  // а не в отдельное поле. «Телефон» — строка без букв с ≥9 цифрами.
+  const looksLikePhone = (s: string) => !!s && !/[a-zа-яґєіїʼ']/i.test(s) && s.replace(/\D/g, '').length >= 9
+  const normalizePhone = (s: string) => {
+    const d = s.replace(/\D/g, '')
+    if (d.length === 10 && d.startsWith('0')) return '+38' + d
+    if (d.length === 12 && d.startsWith('380')) return '+' + d
+    return d ? '+' + d : ''
+  }
+
   // Normalize client info
   const normalizeClientInfo = (info: any): ClientInfo | null => {
     if (!info) return null
+    const parts = [
+      String(info.LastName ?? info.lastName ?? ''),
+      String(info.FirstName ?? info.firstName ?? ''),
+      String(info.MiddleName ?? info.middleName ?? ''),
+    ]
+    const phoneFromName = parts.filter(looksLikePhone).map(normalizePhone)[0] || ''
+    const [lastName, firstName, middleName] = parts.map((p) => (looksLikePhone(p) ? '' : p))
+    const explicitPhone = info.Phone || info.phone || ''
     return {
       city: info.CityDescription || info.City || info.city || '',
       cityRef: info.CityRef || info.cityRef || null,
       warehouse: info.WarehouseDescription || info.tWarehouse || info.warehouse || '',
       warehouseRef: info.WarehouseRef || info.warehouseRef || null,
-      lastName: info.LastName || info.lastName || '',
-      firstName: info.FirstName || info.firstName || '',
-      middleName: info.MiddleName || info.middleName || '',
+      lastName,
+      firstName,
+      middleName,
+      phone: explicitPhone ? normalizePhone(String(explicitPhone)) : phoneFromName,
     }
   }
 

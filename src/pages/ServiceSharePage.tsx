@@ -119,6 +119,7 @@ export default function ServiceSharePage() {
           externalRequestId: requestId,
           status: 'new',
           ...(clientName ? { clientName } : {}),
+          ...(ci?.phone ? { clientPhone: ci.phone } : {}),
           ...(data.complaint ? { complaint: data.complaint } : {}),
           ...(ci?.cityRef ? { clientCityRef: ci.cityRef, clientCityName: ci.city } : {}),
           ...(ci?.warehouseRef ? { clientWarehouseRef: ci.warehouseRef, clientWarehouseName: ci.warehouse } : {}),
@@ -431,6 +432,9 @@ export default function ServiceSharePage() {
                     <Typography variant="body1">
                       <strong>{t('service.clientName', 'ПІБ')}:</strong>{' '}
                       {`${data.clientInfo.lastName} ${data.clientInfo.firstName} ${data.clientInfo.middleName}`.trim() || '—'}
+                    </Typography>
+                    <Typography variant="body1">
+                      <strong>{t('service.clientPhone', 'Телефон')}:</strong> {data.clientInfo.phone || '—'}
                     </Typography>
                     <Typography variant="body1">
                       <strong>{t('service.clientCity', 'Місто')}:</strong> {data.clientInfo.city || '—'}

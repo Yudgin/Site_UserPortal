@@ -120,6 +120,7 @@ export default function ClientInfoEditor({ requestId, clientInfo, onSave }: Clie
         lastName,
         firstName,
         middleName,
+        phone: clientInfo?.phone || '',
         city: selectedCity.Description,
         cityRef: selectedCity.Ref,
         warehouse: selectedWarehouse.Description,
