@@ -138,6 +138,7 @@ export default function Layout() {
       { text: 'Шаблони посилок', icon: <ShippingIcon />, path: '/np-templates' },
     ] })
     nav.push({ group: 'Продажі корабликів', icon: <BoatSalesIcon />, items: [
+      { text: 'Замовлення', icon: <BoatSalesIcon />, path: '/boat-orders' },
       { text: 'Каталог корабликів', icon: <BoatSalesIcon />, path: '/boats-catalog' },
     ] })
     nav.push({ group: 'Клієнти', icon: <ClientsIcon />, items: [

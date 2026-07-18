@@ -39,6 +39,8 @@ import OfferEditorPage from '@/pages/OfferEditorPage'
 import OfferSharePage from '@/pages/OfferSharePage'
 import PaymentsAdminPage from '@/pages/PaymentsAdminPage'
 import BoatCatalogPage from '@/pages/BoatCatalogPage'
+import BoatOrdersPage from '@/pages/BoatOrdersPage'
+import BoatOrderPage from '@/pages/BoatOrderPage'
 import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
 import MasterPage from '@/pages/MasterPage'
 import FirmwareAccessAdminPage from '@/pages/FirmwareAccessAdminPage'
@@ -236,6 +238,24 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <BoatCatalogPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Boat sales orders (card index) - owner only (email-gated inside) */}
+      <Route
+        path="/boat-orders"
+        element={
+          <AuthenticatedRoute>
+            <BoatOrdersPage />
+          </AuthenticatedRoute>
+        }
+      />
+      <Route
+        path="/boat-orders/:id"
+        element={
+          <AuthenticatedRoute>
+            <BoatOrderPage />
           </AuthenticatedRoute>
         }
       />

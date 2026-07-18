@@ -92,3 +92,58 @@ export const BOAT_ORDER_STATUS_LABELS: Record<BoatOrderStatus, string> = {
   done: 'Завершено',
   cancelled: 'Скасовано',
 }
+
+// Рядок вартості замовлення. Автозбирається з каталогу (базова ціна ряду + опції),
+// але зберігається явно і його можна правити вручну (рішення власника: ціни з каталогу
+// як дефолт + ручні корективи в замовленні).
+export interface BoatOrderLine {
+  id: string
+  label: string
+  price: number
+  qty: number
+}
+
+export interface BoatOrderStatusChange {
+  status: BoatOrderStatus
+  at: string
+  by?: string | null
+}
+
+// Замовлення кораблика (картотека продажів).
+export interface BoatOrder {
+  id: string
+  // Клієнт
+  clientName: string
+  clientPhone: string
+  clientCityRef?: string | null
+  clientCityName?: string | null
+  clientWarehouseRef?: string | null
+  clientWarehouseName?: string | null
+  // Конфігурація кораблика
+  modelId?: string | null
+  rowId?: string | null // модельний ряд (рік)
+  color?: string | null
+  needDepthGauge?: boolean // ознака «потрібен глибиномір»
+  depthGaugeOptionId?: string | null
+  bagOptionId?: string | null // null/порожньо = без сумки
+  echoOptionId?: string | null
+  accessories?: { optionId: string; qty: number }[]
+  // Вартість
+  lines: BoatOrderLine[]
+  total: number
+  // Хід виконання
+  status: BoatOrderStatus
+  statusHistory: BoatOrderStatusChange[]
+  // Дропшипінг: хто посередник і куди йде оплата. Чек видає отримувач грошей:
+  // payTo='dropshipper' ⇒ без наших посилань на оплату і чеків (лише фіксація суми).
+  dropshipperId?: string | null
+  payTo?: 'us' | 'dropshipper'
+  // Доставка / оплата (фаза 3)
+  ttn?: string | null
+  // Дата продажу (для внесення раніше проданих і для гарантії/допродажів)
+  soldAt?: string | null
+  note?: string
+  createdAt: string
+  updatedAt: string
+  createdBy?: string | null
+}
