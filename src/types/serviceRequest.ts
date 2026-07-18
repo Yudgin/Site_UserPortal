@@ -52,6 +52,7 @@ export interface ServiceRequest {
   // предварительную калькуляцию (мастер точнее определил неисправность).
   diagnostics?: { text: string; at: string; by: string | null } | null
   waybillNumber?: string | null // номер транспортной накладной (ТТН) — для оповещения об отправке
+  returnTtn?: string | null // ТТН відправлення клієнту (з ремонту) — импорт 1С6 и исходящие ТТН
   // Привязанные калькуляции и оплата:
   aiEstimateId?: string | null // материализованная предварительная оценка ИИ (stage='ai')
   offerId?: string | null // предложение с вариантами (предварительные калькуляции)

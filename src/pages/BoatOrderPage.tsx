@@ -278,6 +278,10 @@ export default function BoatOrderPage() {
             </TextField>
           </Stack>
 
+          <TextField label="Серійний номер кораблика" value={order.serialNumber || ''} size="small" sx={{ maxWidth: 260 }}
+            onChange={(e) => patch({ serialNumber: e.target.value || null })}
+            helperText="Для гарантії та зв'язку з ремонтами" />
+
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }}>
             <FormControlLabel control={<Switch checked={!!order.needDepthGauge} onChange={(e) => patch({ needDepthGauge: e.target.checked, ...(e.target.checked ? {} : { depthGaugeOptionId: null }) })} />}
               label="Потрібен глибиномір" />

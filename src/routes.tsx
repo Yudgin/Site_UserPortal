@@ -41,6 +41,7 @@ import PaymentsAdminPage from '@/pages/PaymentsAdminPage'
 import BoatCatalogPage from '@/pages/BoatCatalogPage'
 import BoatOrdersPage from '@/pages/BoatOrdersPage'
 import BoatOrderPage from '@/pages/BoatOrderPage'
+import BoatImportPage from '@/pages/BoatImportPage'
 import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
 import MasterPage from '@/pages/MasterPage'
 import FirmwareAccessAdminPage from '@/pages/FirmwareAccessAdminPage'
@@ -256,6 +257,14 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <BoatOrderPage />
+          </AuthenticatedRoute>
+        }
+      />
+      <Route
+        path="/boats-import"
+        element={
+          <AuthenticatedRoute>
+            <BoatImportPage />
           </AuthenticatedRoute>
         }
       />

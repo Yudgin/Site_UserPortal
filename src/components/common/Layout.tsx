@@ -140,6 +140,7 @@ export default function Layout() {
     nav.push({ group: 'Продажі корабликів', icon: <BoatSalesIcon />, items: [
       { text: 'Замовлення', icon: <BoatSalesIcon />, path: '/boat-orders' },
       { text: 'Каталог корабликів', icon: <BoatSalesIcon />, path: '/boats-catalog' },
+      { text: 'Імпорт з 1С6', icon: <BoatSalesIcon />, path: '/boats-import' },
     ] })
     nav.push({ group: 'Клієнти', icon: <ClientsIcon />, items: [
       { text: 'Клиенты', icon: <ClientsIcon />, path: '/clients-admin' },

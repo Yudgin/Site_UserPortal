@@ -123,6 +123,7 @@ export interface BoatOrder {
   modelId?: string | null
   rowId?: string | null // модельний ряд (рік)
   color?: string | null
+  serialNumber?: string | null // серійний номер кораблика (гарантія, зв'язок із ремонтами)
   needDepthGauge?: boolean // ознака «потрібен глибиномір»
   depthGaugeOptionId?: string | null
   bagOptionId?: string | null // null/порожньо = без сумки
