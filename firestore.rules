@@ -229,6 +229,21 @@ service cloud.firestore {
       allow write: if isPriceAdmin();
     }
 
+    // Продажі корабликів: каталог (моделі/опції/дропшипери) + замовлення (картотека).
+    // Внутрішня картотека без публічної вітрини — тільки власник.
+    match /boatModels/{id} {
+      allow read, list, write: if isPriceAdmin();
+    }
+    match /boatOptions/{id} {
+      allow read, list, write: if isPriceAdmin();
+    }
+    match /dropshippers/{id} {
+      allow read, list, write: if isPriceAdmin();
+    }
+    match /boatOrders/{id} {
+      allow read, list, write: if isPriceAdmin();
+    }
+
     // Deny all other access by default
     match /{document=**} {
       allow read, write: if false;

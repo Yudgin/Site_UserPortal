@@ -49,6 +49,7 @@ import {
   ManageAccounts as AccessIcon,
   Memory as FirmwareMenuIcon,
   LocalShipping as ShippingIcon,
+  Sailing as BoatSalesIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
 } from '@mui/icons-material'
@@ -135,6 +136,9 @@ export default function Layout() {
     ] })
     nav.push({ group: 'Доставка (Нова Пошта)', icon: <ShippingIcon />, items: [
       { text: 'Шаблони посилок', icon: <ShippingIcon />, path: '/np-templates' },
+    ] })
+    nav.push({ group: 'Продажі корабликів', icon: <BoatSalesIcon />, items: [
+      { text: 'Каталог корабликів', icon: <BoatSalesIcon />, path: '/boats-catalog' },
     ] })
     nav.push({ group: 'Клієнти', icon: <ClientsIcon />, items: [
       { text: 'Клиенты', icon: <ClientsIcon />, path: '/clients-admin' },

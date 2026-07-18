@@ -38,6 +38,7 @@ import EstimateSharePage from '@/pages/EstimateSharePage'
 import OfferEditorPage from '@/pages/OfferEditorPage'
 import OfferSharePage from '@/pages/OfferSharePage'
 import PaymentsAdminPage from '@/pages/PaymentsAdminPage'
+import BoatCatalogPage from '@/pages/BoatCatalogPage'
 import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
 import MasterPage from '@/pages/MasterPage'
 import FirmwareAccessAdminPage from '@/pages/FirmwareAccessAdminPage'
@@ -225,6 +226,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <NpTemplatesAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Boat sales catalog (models/options/dropshippers) - owner only (email-gated inside) */}
+      <Route
+        path="/boats-catalog"
+        element={
+          <AuthenticatedRoute>
+            <BoatCatalogPage />
           </AuthenticatedRoute>
         }
       />
