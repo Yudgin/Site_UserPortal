@@ -116,21 +116,28 @@ export function registerPayments(app, deps) {
     await notifyOwner(`⚠️ RunFerry: оплата ${order.orderId} на ${order.amount} грн пройшла, але ЧЕК НЕ ВИБИТО (${reason}). ФОП ${order.fopId}. Перевірте в адмінці оплат.`)
   }
 
-  // Обратная запись в фактическую смету (priceEstimates), из которой создана оплата.
-  // Деньги пришли → смета 'paid' + ссылки на платёж/чек. Пишем backend-ом (минуя правила).
+  // Обратная запись «деньги пришли» в документ-источник оплаты: фактическую смету
+  // (priceEstimates + связанная заявка) и/или замовлення кораблика (boatOrders).
+  // Пишем backend-ом (минуя правила). Блоки независимы: ошибка одного не валит другой.
   const markEstimatePaid = async (order, receipt) => {
-    if (!order || !order.estimateId) return
-    try {
-      await adminDb.collection('priceEstimates').doc(String(order.estimateId)).set({
-        status: 'paid',
-        paymentId: order.orderId,
-        fopId: order.fopId,
-        paidAt: nowIso(),
-        ...(receipt ? { taxUrl: receipt.taxUrl || null, fiscalCode: receipt.fiscalCode || null } : {}),
-        updatedAt: nowIso(),
-      }, { merge: true })
-      // Привязываем оплату к нашей заявке. Статус → 'done', но НЕ «воскрешаем» скасовану заявку.
-      if (order.serviceRequestId) {
+    if (!order) return
+    if (order.estimateId) {
+      try {
+        await adminDb.collection('priceEstimates').doc(String(order.estimateId)).set({
+          status: 'paid',
+          paymentId: order.orderId,
+          fopId: order.fopId,
+          paidAt: nowIso(),
+          ...(receipt ? { taxUrl: receipt.taxUrl || null, fiscalCode: receipt.fiscalCode || null } : {}),
+          updatedAt: nowIso(),
+        }, { merge: true })
+      } catch (e) {
+        console.error('estimate writeback:', e.message)
+      }
+    }
+    // Привязываем оплату к нашей заявке. Статус → 'done', но НЕ «воскрешаем» скасовану заявку.
+    if (order.serviceRequestId) {
+      try {
         const srRef = adminDb.collection('serviceRequests').doc(String(order.serviceRequestId))
         await adminDb.runTransaction(async (tx) => {
           const s = await tx.get(srRef)
@@ -138,9 +145,22 @@ export function registerPayments(app, deps) {
           if (!s.exists || s.data().status !== 'cancelled') p.status = 'done'
           tx.set(srRef, p, { merge: true })
         })
+      } catch (e) {
+        console.error('serviceRequest writeback:', e.message)
       }
-    } catch (e) {
-      console.error('estimate writeback:', e.message)
+    }
+    // Замовлення кораблика: фиксируем оплату/чек (статус НЕ трогаем — ход выполнения ведёт админ).
+    if (order.boatOrderId) {
+      try {
+        await adminDb.collection('boatOrders').doc(String(order.boatOrderId)).set({
+          paidAt: nowIso(),
+          paymentId: order.orderId,
+          ...(receipt ? { taxUrl: receipt.taxUrl || null, fiscalCode: receipt.fiscalCode || null } : {}),
+          updatedAt: nowIso(),
+        }, { merge: true })
+      } catch (e) {
+        console.error('boatOrder writeback:', e.message)
+      }
     }
   }
 
@@ -195,7 +215,7 @@ export function registerPayments(app, deps) {
   // Ядро создания оплаты (переиспользуется HTTP-роутом и оплатой из сметы).
   // Возвращает { ok:true, data } или { ok:false, status, code, message }. Деньги — server-authoritative:
   // amount обязан точно совпадать с суммой позиций (в копейках), иначе чек и списание разойдутся.
-  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId, serviceRequestId }) => {
+  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId, serviceRequestId, boatOrderId }) => {
     const fop = getFop(fopId)
     if (!fop) return { ok: false, status: 400, code: 'BAD_FOP', message: 'Невідомий ФОП' }
     // Новую оплату НЕ принимаем на выключенный ФОП (но getFop его резолвит для старых заказов).
@@ -216,6 +236,7 @@ export function registerPayments(app, deps) {
       orderId, fopId, amount: amountKop / 100, goods, method, status: 'pending', createdAt: nowIso(),
       ...(deliveryEmail ? { deliveryEmail } : {}), ...(estimateId ? { estimateId: String(estimateId) } : {}),
       ...(serviceRequestId ? { serviceRequestId: String(serviceRequestId) } : {}),
+      ...(boatOrderId ? { boatOrderId: String(boatOrderId) } : {}),
     }
 
     if (method.startsWith('liqpay')) {
@@ -371,6 +392,70 @@ export function registerPayments(app, deps) {
       }
     } catch (e) {
       console.error('estimates/pay error:', (e.response && e.response.data) || e.message)
+      res.status(500).json({ success: false, error: { code: 'PAY_FAILED', message: 'Не вдалося створити оплату' } })
+    }
+  })
+
+  // Оплата ЗАМОВЛЕННЯ КОРАБЛИКА (boatOrders): сумма и позиции берутся из документа замовлення
+  // (server-authoritative), метод и ФОП выбирает админ. Только админ: замовлення создаёт он же.
+  // Правило дропшипа: payTo='dropshipper' ⇒ гроші отримує дропшипер — посилання/чек не наші (409).
+  // body: { boatOrderId, fopId, method, deliveryEmail?, resultUrl? }
+  app.post('/api/boat-orders/pay', async (req, res) => {
+    if (!(await isAdminReq(req))) return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для адміністратора' } })
+    if (!adminDb) return res.status(503).json({ success: false, error: { code: 'NO_DB', message: 'Firestore не настроен' } })
+    if (!hasAnyFop()) return res.status(503).json({ success: false, error: { code: 'NO_FOPS', message: 'ФОП не настроены (FOPS_CONFIG)' } })
+    try {
+      const { boatOrderId, fopId, method, deliveryEmail, resultUrl } = req.body || {}
+      if (!boatOrderId || !fopId || !method) {
+        return res.status(400).json({ success: false, error: { code: 'BAD_REQ', message: 'Потрібні boatOrderId, fopId і method' } })
+      }
+      const ref = adminDb.collection('boatOrders').doc(String(boatOrderId))
+
+      // Транзакционно проверяем состояние и «застолбляем» инициацию (защита от двойной оплаты).
+      const claim = await adminDb.runTransaction(async (tx) => {
+        const s = await tx.get(ref)
+        if (!s.exists) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Замовлення не знайдено' }
+        const o = s.data()
+        if (o.payTo === 'dropshipper') return { ok: false, status: 409, code: 'DROPSHIP_PAY', message: 'Гроші отримує дропшипер — посилання на оплату і чек на його стороні' }
+        // Оплачене — блок; НЕоплачений існуючий лінк можна перевиставити (інший метод/ФОП):
+        // повторний вебхук старого лінка все одно припишеться до цього ж замовлення.
+        if (o.paidAt) return { ok: false, status: 409, code: 'ALREADY_PAID', message: 'Замовлення вже оплачено' }
+        if (o.status === 'cancelled') return { ok: false, status: 409, code: 'CANCELLED', message: 'Замовлення скасовано' }
+        if (!Array.isArray(o.lines) || !o.lines.length) return { ok: false, status: 400, code: 'NO_LINES', message: 'У замовленні немає рядків вартості' }
+        const recent = o.payInitiatedAt && Date.now() - Date.parse(o.payInitiatedAt) < 3 * 60 * 1000
+        if (recent) return { ok: false, status: 409, code: 'PAY_IN_PROGRESS', message: 'Оплата вже створюється — спробуйте за хвилину' }
+        tx.set(ref, { payInitiatedAt: nowIso() }, { merge: true })
+        return { ok: true, bo: o }
+      })
+      if (!claim.ok) return res.status(claim.status).json({ success: false, error: { code: claim.code, message: claim.message } })
+
+      const bo = claim.bo
+      // Чек — построчно (назва+вартість, кількість при qty≠1); код позиції обов'язковий для каси.
+      const goods = bo.lines.map((l, i) => ({ name: String(l.label || `Позиція ${i + 1}`), price: Number(l.price) || 0, qty: Number(l.qty) || 1, code: `POS-${i + 1}` }))
+      try {
+        const r = await createPayment({
+          fopId, amount: bo.total, goods, method,
+          description: `Оплата кораблика (замовлення ${boatOrderId})`,
+          clientPhone: bo.clientPhone || undefined, resultUrl, deliveryEmail: deliveryEmail || undefined,
+          boatOrderId,
+        })
+        if (!r.ok) {
+          await ref.set({ payInitiatedAt: null }, { merge: true }).catch(() => {}) // снять claim → можно повторить
+          return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
+        }
+        // Ссылку/платёж фиксируем на замовленні — для UI и повторного показа.
+        await ref.set({
+          paymentId: r.data.orderId, payMethod: method,
+          payUrl: r.data.pageUrl || r.data.checkoutUrl || null,
+          payCreatedAt: nowIso(), payInitiatedAt: null, updatedAt: nowIso(),
+        }, { merge: true }).catch(() => {})
+        return res.json({ success: true, data: r.data })
+      } catch (err) {
+        await ref.set({ payInitiatedAt: null }, { merge: true }).catch(() => {})
+        throw err
+      }
+    } catch (e) {
+      console.error('boat-orders/pay error:', (e.response && e.response.data) || e.message)
       res.status(500).json({ success: false, error: { code: 'PAY_FAILED', message: 'Не вдалося створити оплату' } })
     }
   })

@@ -9,7 +9,8 @@ const adminHeaders = async (): Promise<Record<string, string>> => {
 }
 
 export interface CreateTtnParams {
-  serviceRequestId: string
+  serviceRequestId?: string // ТТН для сервисной заявки…
+  boatOrderId?: string // …или для замовлення кораблика (рівно одне з двох)
   templateId: string
   clientCityRef?: string // нужен, только когда сторона ТТН = «клієнт заявки»
   clientWarehouseRef?: string

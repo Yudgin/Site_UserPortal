@@ -7,11 +7,15 @@ import { useNavigate, useParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, CircularProgress, Stack, Chip, Divider,
   TextField, MenuItem, Switch, FormControlLabel, IconButton, Snackbar, ToggleButtonGroup, ToggleButton,
+  Dialog, DialogTitle, DialogContent, DialogActions,
 } from '@mui/material'
 import {
   ArrowBack as BackIcon, Add as AddIcon, Delete as DeleteIcon, Sailing as BoatIcon,
-  Refresh as RecalcIcon, Save as SaveIcon,
+  Refresh as RecalcIcon, Save as SaveIcon, LocalShipping as TtnIcon, Payments as PayIcon,
+  ContentCopy as CopyIcon, ReceiptLong as ReceiptIcon,
 } from '@mui/icons-material'
+import CreateTtnDialog from '@/components/CreateTtnDialog'
+import { boatPayApi, BOAT_PAY_METHODS, type FopPublic } from '@/api/endpoints/boatPay'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import { boatOrderService } from '@/api/boatOrderService'
@@ -41,6 +45,15 @@ export default function BoatOrderPage() {
   const [dirty, setDirty] = useState(false)
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
+
+  // Дії: ТТН і посилання на оплату
+  const [ttnDialog, setTtnDialog] = useState(false)
+  const [payDialog, setPayDialog] = useState(false)
+  const [fops, setFops] = useState<FopPublic[]>([])
+  const [payFopId, setPayFopId] = useState('')
+  const [payMethod, setPayMethod] = useState('')
+  const [payBusy, setPayBusy] = useState(false)
+  const [payErr, setPayErr] = useState('')
 
   const load = useCallback(async () => {
     if (!id) return
@@ -131,6 +144,48 @@ export default function BoatOrderPage() {
     warehouseRef: order?.clientWarehouseRef || undefined,
     warehouseName: order?.clientWarehouseName || undefined,
   }), [order?.clientCityRef, order?.clientCityName, order?.clientWarehouseRef, order?.clientWarehouseName])
+
+  // Онлайн-способи, доступні обраному ФОП (переключатели методів у ФОП + наявність ключів).
+  const availableMethods = useMemo(() => {
+    const fop = fops.find((f) => f.id === payFopId)
+    return fop ? BOAT_PAY_METHODS.filter((m) => fop.methods?.[m.fopKey]) : []
+  }, [fops, payFopId])
+
+  const openPayDialog = async () => {
+    setPayErr('')
+    setPayDialog(true)
+    let list = fops
+    if (!list.length) {
+      list = await boatPayApi.listFops()
+      setFops(list)
+    }
+    if (!payFopId && list.length) {
+      const f = list[0]
+      setPayFopId(f.id)
+      setPayMethod(BOAT_PAY_METHODS.filter((x) => f.methods?.[x.fopKey])[0]?.value || '')
+    }
+  }
+  const pickFop = (id: string) => {
+    setPayFopId(id)
+    const f = fops.find((x) => x.id === id)
+    setPayMethod(f ? BOAT_PAY_METHODS.filter((x) => f.methods?.[x.fopKey])[0]?.value || '' : '')
+  }
+
+  const createPayLink = async () => {
+    if (!order || !payFopId || !payMethod) return
+    setPayBusy(true); setPayErr('')
+    const r = await boatPayApi.create({ boatOrderId: order.id, fopId: payFopId, method: payMethod })
+    setPayBusy(false)
+    if (r.ok && r.data) {
+      const url = r.data.pageUrl || r.data.checkoutUrl || null
+      // Сервер уже записал paymentId/payUrl на замовлення — синхронизируем локально (без dirty).
+      setOrder((o) => (o ? { ...o, paymentId: r.data!.orderId, payMethod, payUrl: url } : o))
+      notify(url ? 'Посилання на оплату створено' : 'Оплату створено — банк сповістить клієнта')
+      setPayDialog(false)
+    } else setPayErr(r.error || 'Помилка')
+  }
+
+  const copy = (text: string) => navigator.clipboard?.writeText(text).then(() => notify('Скопійовано'))
 
   if (!user || !isAdminEmail(user.email)) {
     return (
@@ -302,6 +357,51 @@ export default function BoatOrderPage() {
         </Stack>
       </Paper>
 
+      {/* Дії: доставка та оплата */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Дії</Typography>
+        <Stack spacing={1.5}>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Button variant="outlined" startIcon={<TtnIcon />} onClick={() => setTtnDialog(true)} disabled={dirty}>
+              Створити ТТН
+            </Button>
+            {order.ttn && (
+              <Chip size="small" color="info" label={`ТТН: ${order.ttn}`} onDelete={() => copy(String(order.ttn))} deleteIcon={<CopyIcon />} />
+            )}
+          </Stack>
+          {order.payTo === 'dropshipper' ? (
+            <Alert severity="info">Гроші отримує дропшипер — посилання на оплату і чек на його стороні; тут лише фіксуємо суму.</Alert>
+          ) : (
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+              {order.paidAt ? (
+                <>
+                  <Chip color="success" label={`Оплачено ${new Date(order.paidAt).toLocaleString('uk-UA')}`} />
+                  {order.taxUrl && <Button size="small" startIcon={<ReceiptIcon />} href={order.taxUrl} target="_blank">Фіскальний чек</Button>}
+                </>
+              ) : (
+                <>
+                  <Button variant="outlined" startIcon={<PayIcon />} onClick={openPayDialog} disabled={dirty || !order.lines.length}>
+                    Посилання на оплату
+                  </Button>
+                  {order.payUrl && (
+                    <Chip size="small" variant="outlined" label={order.payUrl.replace(/^https?:\/\//, '').slice(0, 44) + '…'}
+                      onDelete={() => copy(order.payUrl!)} deleteIcon={<CopyIcon />} />
+                  )}
+                  {order.paymentId && !order.payUrl && (
+                    <Chip size="small" variant="outlined" label="Оплату створено — банк сповіщає клієнта (Частини)" />
+                  )}
+                </>
+              )}
+            </Stack>
+          )}
+          {dirty && (
+            <Typography variant="caption" color="text.secondary">
+              Спочатку натисніть «Зберегти» — ТТН і оплата беруть дані із збереженого замовлення.
+            </Typography>
+          )}
+        </Stack>
+      </Paper>
+
       {/* Дропшипінг */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Дропшипінг</Typography>
@@ -339,6 +439,56 @@ export default function BoatOrderPage() {
           Зберегти
         </Button>
       </Stack>
+
+      {/* Діалог ТТН (шаблони НП; адреса клієнта підставляється із замовлення) */}
+      <CreateTtnDialog
+        open={ttnDialog}
+        onClose={() => setTtnDialog(false)}
+        boatOrderId={order.id}
+        clientName={order.clientName}
+        clientPhone={order.clientPhone}
+        clientCityRef={order.clientCityRef || undefined}
+        clientCityName={order.clientCityName || undefined}
+        clientWarehouseRef={order.clientWarehouseRef || undefined}
+        clientWarehouseName={order.clientWarehouseName || undefined}
+        onCreated={(ttn) => setOrder((o) => (o ? { ...o, ttn } : o))}
+      />
+
+      {/* Діалог посилання на оплату */}
+      <Dialog open={payDialog} onClose={() => setPayDialog(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Посилання на оплату</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <Typography variant="body2" color="text.secondary">
+              Сума: <b>{fmtUah(order.total)}</b> (рядки замовлення). Після оплати фіскальний чек буде видано автоматично.
+            </Typography>
+            <TextField select label="ФОП (хто приймає гроші та видає чек)" value={payFopId} onChange={(e) => pickFop(e.target.value)} size="small" fullWidth>
+              {fops.map((f) => <MenuItem key={f.id} value={f.id}>{f.name}{f.receipts ? '' : ' — без ПРРО!'}</MenuItem>)}
+            </TextField>
+            <TextField select label="Спосіб оплати" value={payMethod} onChange={(e) => setPayMethod(e.target.value)} size="small" fullWidth disabled={!payFopId}>
+              {availableMethods.map((m) => <MenuItem key={m.value} value={m.value}>{m.label}</MenuItem>)}
+            </TextField>
+            {payFopId && availableMethods.length === 0 && (
+              <Alert severity="warning">У цього ФОП не ввімкнено жодного онлайн-способу («ФОПи та ключі»).</Alert>
+            )}
+            {payMethod === 'mono-chast' && !order.clientPhone && (
+              <Alert severity="warning">Для «Покупки частинами» потрібен телефон клієнта в замовленні.</Alert>
+            )}
+            {order.paymentId && !order.paidAt && (
+              <Alert severity="info">Посилання вже створювалося — нове замінить його на замовленні (клієнту надішліть актуальне).</Alert>
+            )}
+            {payErr && <Alert severity="error">{payErr}</Alert>}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPayDialog(false)}>Скасувати</Button>
+          <Button variant="contained" onClick={createPayLink}
+            disabled={payBusy || !payFopId || !payMethod || (payMethod === 'mono-chast' && !order.clientPhone)}
+            startIcon={payBusy ? <CircularProgress size={16} /> : <PayIcon />}>
+            Створити
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Snackbar open={snack.open} autoHideDuration={3000} onClose={() => setSnack((s) => ({ ...s, open: false }))}>
         <Alert severity={snack.sev} onClose={() => setSnack((s) => ({ ...s, open: false }))}>{snack.msg}</Alert>

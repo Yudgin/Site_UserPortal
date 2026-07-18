@@ -13,10 +13,11 @@ import { npTtnApi } from '@/api/endpoints/npTtn'
 import { searchCities, getWarehouses, type NPCity, type NPWarehouse } from '@/api/endpoints/novaposhta'
 import { SIZE_LABELS, SCENARIO_LABELS, type NpTemplate } from '@/types/npTemplate'
 
-export default function CreateTtnDialog({ open, onClose, serviceRequestId, clientName, clientPhone, clientCityRef, clientCityName, clientWarehouseRef, clientWarehouseName, presetTemplateId, onCreated }: {
+export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatOrderId, clientName, clientPhone, clientCityRef, clientCityName, clientWarehouseRef, clientWarehouseName, presetTemplateId, onCreated }: {
   open: boolean
   onClose: () => void
-  serviceRequestId: string
+  serviceRequestId?: string // ТТН для сервисной заявки…
+  boatOrderId?: string // …или для замовлення кораблика (рівно одне з двох)
   clientName?: string
   clientPhone?: string
   clientCityRef?: string
@@ -84,7 +85,8 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, clien
     if (!canCreate) return
     setBusy(true); setErr('')
     const res = await npTtnApi.create({
-      serviceRequestId, templateId, cost: Number(cost),
+      ...(serviceRequestId ? { serviceRequestId } : {}), ...(boatOrderId ? { boatOrderId } : {}),
+      templateId, cost: Number(cost),
       ...(needsClientAddr && city ? { clientCityRef: city.Ref, clientWarehouseRef: warehouseRef } : {}),
       ...(recipientIsClient ? { clientName, clientPhone } : {}),
     })

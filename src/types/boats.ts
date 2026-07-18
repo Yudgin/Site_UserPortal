@@ -138,8 +138,19 @@ export interface BoatOrder {
   // payTo='dropshipper' ⇒ без наших посилань на оплату і чеків (лише фіксація суми).
   dropshipperId?: string | null
   payTo?: 'us' | 'dropshipper'
-  // Доставка / оплата (фаза 3)
+  // Доставка (пишет сервер при создании ТТН)
   ttn?: string | null
+  npDocRef?: string | null
+  npCostOnSite?: string | null
+  npEstimatedDelivery?: string | null
+  // Оплата (пишет сервер: створення посилання і вебхук «оплачено»)
+  paymentId?: string | null
+  payMethod?: string | null
+  payUrl?: string | null
+  payCreatedAt?: string | null
+  paidAt?: string | null
+  taxUrl?: string | null // фискальный чек Checkbox
+  fiscalCode?: string | null
   // Дата продажу (для внесення раніше проданих і для гарантії/допродажів)
   soldAt?: string | null
   note?: string

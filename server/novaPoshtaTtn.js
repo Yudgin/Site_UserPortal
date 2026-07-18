@@ -78,17 +78,22 @@ export function registerNpTtn(app, deps) {
     if (!adminDb) return res.status(503).json({ success: false })
     try {
       const b = req.body || {}
+      // Субъект ТТН: сервисная заявка (serviceRequestId) ИЛИ замовлення кораблика (boatOrderId).
       const srId = String(b.serviceRequestId || '')
+      const boId = String(b.boatOrderId || '')
       const tplId = String(b.templateId || '')
-      if (!srId || !tplId) return res.status(400).json({ success: false, error: { code: 'BAD_REQ', message: 'serviceRequestId і templateId обовʼязкові' } })
+      if ((!srId && !boId) || !tplId) return res.status(400).json({ success: false, error: { code: 'BAD_REQ', message: 'serviceRequestId (або boatOrderId) і templateId обовʼязкові' } })
 
+      const subjRef = srId
+        ? adminDb.collection('serviceRequests').doc(srId)
+        : adminDb.collection('boatOrders').doc(boId)
       const [srSnap, tplSnap] = await Promise.all([
-        adminDb.collection('serviceRequests').doc(srId).get(),
+        subjRef.get(),
         adminDb.collection('npTemplates').doc(tplId).get(),
       ])
-      if (!srSnap.exists) return res.status(404).json({ success: false, error: { code: 'NO_SR', message: 'Заявку не знайдено' } })
+      if (!srSnap.exists) return res.status(404).json({ success: false, error: { code: 'NO_SR', message: srId ? 'Заявку не знайдено' : 'Замовлення не знайдено' } })
       if (!tplSnap.exists) return res.status(404).json({ success: false, error: { code: 'NO_TPL', message: 'Шаблон не знайдено' } })
-      const sr = srSnap.data()
+      const sr = srSnap.data() // заявка або замовлення: clientName/clientPhone — однакові поля
       const tpl = tplSnap.data()
       const scenario = tpl.scenario || 'incoming'
 
@@ -100,7 +105,9 @@ export function registerNpTtn(app, deps) {
       }
 
       const apiKey = np.apiKey
-      const repairNo = sr.externalRequestId || sr.id || ''
+      // Номер у описі: для заявки — номер ремонту; для замовлення кораблика номер не додаємо
+      // (випадковий id у описі посилки ні до чого).
+      const repairNo = srId ? (sr.externalRequestId || sr.id || '') : ''
       const description = `${tpl.description || 'Прикормочний кораблик'}${repairNo ? ` №${repairNo}` : ''}`.trim().slice(0, 500)
 
       const senderTarget = tpl.senderTarget || 'service'
@@ -170,12 +177,17 @@ export function registerNpTtn(app, deps) {
       let codAmount = Number(b.codAmount)
       if (!Number.isFinite(codAmount)) {
         codAmount = 0
-        if (tpl.cod && fopAcceptsCod && recipientTarget === 'client' && sr.actualEstimateId) {
-          try {
-            const est = await adminDb.collection('priceEstimates').doc(String(sr.actualEstimateId)).get()
-            const e = est.exists ? est.data() : null
-            if (e && e.status !== 'paid' && !e.paymentId) codAmount = Math.round(Number(e.total) || 0)
-          } catch { /* ignore */ }
+        if (tpl.cod && fopAcceptsCod && recipientTarget === 'client') {
+          if (srId && sr.actualEstimateId) {
+            try {
+              const est = await adminDb.collection('priceEstimates').doc(String(sr.actualEstimateId)).get()
+              const e = est.exists ? est.data() : null
+              if (e && e.status !== 'paid' && !e.paymentId) codAmount = Math.round(Number(e.total) || 0)
+            } catch { /* ignore */ }
+          } else if (boId && !sr.paidAt) {
+            // Замовлення кораблика: наложка = сума замовлення, якщо воно ще не оплачене онлайн.
+            codAmount = Math.round(Number(sr.total) || 0)
+          }
         }
       }
 
@@ -201,12 +213,20 @@ export function registerNpTtn(app, deps) {
       const doc = npResp.data[0]
       const ttn = doc.IntDocNumber || doc.Number || ''
 
-      // Куда писать номер: приём/возврат — waybillNumber (входящая/связь с заявкой); иначе тоже сохраняем.
-      await adminDb.collection('serviceRequests').doc(srId).set({
-        waybillNumber: ttn, npDocRef: doc.Ref || null, npScenario: scenario,
-        npCostOnSite: doc.CostOnSite || null, npEstimatedDelivery: doc.EstimatedDeliveryDate || null,
-        updatedAt: nowIso(),
-      }, { merge: true })
+      // Куда писать номер: заявка — waybillNumber; замовлення кораблика — ttn.
+      if (srId) {
+        await adminDb.collection('serviceRequests').doc(srId).set({
+          waybillNumber: ttn, npDocRef: doc.Ref || null, npScenario: scenario,
+          npCostOnSite: doc.CostOnSite || null, npEstimatedDelivery: doc.EstimatedDeliveryDate || null,
+          updatedAt: nowIso(),
+        }, { merge: true })
+      } else {
+        await adminDb.collection('boatOrders').doc(boId).set({
+          ttn, npDocRef: doc.Ref || null, npScenario: scenario,
+          npCostOnSite: doc.CostOnSite || null, npEstimatedDelivery: doc.EstimatedDeliveryDate || null,
+          updatedAt: nowIso(),
+        }, { merge: true })
+      }
 
       return res.json({ success: true, data: { ttn, ref: doc.Ref || null, scenario, cost: doc.CostOnSite || null, estimatedDelivery: doc.EstimatedDeliveryDate || null } })
     } catch (e) {
