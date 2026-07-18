@@ -123,29 +123,36 @@ const normalizeResponse = (raw: any): ServiceRequestData => {
   // 1С иногда кладёт телефон(ы) клиента прямо в поля ПІБ (LastName/MiddleName),
   // а не в отдельное поле. «Телефон» — строка без букв с ≥9 цифрами.
   const looksLikePhone = (s: string) => !!s && !/[a-zа-яґєіїʼ']/i.test(s) && s.replace(/\D/g, '').length >= 9
+  // Приводим украинский номер к виду +380XXXXXXXXX. 1С может отдавать его как
+  // «677512301» (9 цифр, без 0 и коду країни), «0677512301» (10, з 0) или «380…» (12).
   const normalizePhone = (s: string) => {
     const d = s.replace(/\D/g, '')
+    if (d.length === 9) return '+380' + d
     if (d.length === 10 && d.startsWith('0')) return '+38' + d
+    if (d.length === 11 && d.startsWith('80')) return '+3' + d
     if (d.length === 12 && d.startsWith('380')) return '+' + d
     return d ? '+' + d : ''
   }
 
-  // Normalize client info
-  const normalizeClientInfo = (info: any): ClientInfo | null => {
-    if (!info) return null
+  // Normalize client info. topPhone — телефон верхнего уровня ответа 1С (поле Telephone),
+  // если оно есть: приоритетный источник над номерами, «зашитыми» в поля ПІБ.
+  const normalizeClientInfo = (info: any, topPhone?: any): ClientInfo | null => {
+    const hasTop = topPhone != null && String(topPhone).trim() !== ''
+    if (!info && !hasTop) return null
+    const src = info || {}
     const parts = [
-      String(info.LastName ?? info.lastName ?? ''),
-      String(info.FirstName ?? info.firstName ?? ''),
-      String(info.MiddleName ?? info.middleName ?? ''),
+      String(src.LastName ?? src.lastName ?? ''),
+      String(src.FirstName ?? src.firstName ?? ''),
+      String(src.MiddleName ?? src.middleName ?? ''),
     ]
     const phoneFromName = parts.filter(looksLikePhone).map(normalizePhone)[0] || ''
     const [lastName, firstName, middleName] = parts.map((p) => (looksLikePhone(p) ? '' : p))
-    const explicitPhone = info.Phone || info.phone || ''
+    const explicitPhone = src.Phone || src.phone || (hasTop ? String(topPhone) : '')
     return {
-      city: info.CityDescription || info.City || info.city || '',
-      cityRef: info.CityRef || info.cityRef || null,
-      warehouse: info.WarehouseDescription || info.tWarehouse || info.warehouse || '',
-      warehouseRef: info.WarehouseRef || info.warehouseRef || null,
+      city: src.CityDescription || src.City || src.city || '',
+      cityRef: src.CityRef || src.cityRef || null,
+      warehouse: src.WarehouseDescription || src.tWarehouse || src.warehouse || '',
+      warehouseRef: src.WarehouseRef || src.warehouseRef || null,
       lastName,
       firstName,
       middleName,
@@ -167,7 +174,7 @@ const normalizeResponse = (raw: any): ServiceRequestData => {
 
   return {
     requestId: raw.requestId || raw.FixNumber || raw.request_id || '',
-    clientInfo: normalizeClientInfo(raw.ClientInfo || raw.clientInfo),
+    clientInfo: normalizeClientInfo(raw.ClientInfo || raw.clientInfo, raw.Telephone ?? raw.telephone ?? raw.Phone ?? raw.phone),
     clientAcceptedTerms: {
       accepted: raw.clientAcceptedTerms?.accepted ?? raw.agreement_at != null,
       acceptedAt: raw.clientAcceptedTerms?.acceptedAt || raw.agreement_at || null,
