@@ -13,6 +13,7 @@ import {
   Home as HomeIcon, Forum as ChatIcon, LocalOffer as OfferIcon, Build as ActualIcon,
   Payments as PaymentsIcon, Save as SaveIcon, CheckCircle as CheckIcon, Psychology as AiIcon,
   Biotech as DiagIcon, NotificationsActive as NotifyIcon, LocalShipping as ShipIcon, Send as SendIcon,
+  Telegram as TelegramIcon,
   Group as SpecialistsIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
@@ -32,6 +33,7 @@ import AiTextEditor from '@/components/common/AiTextEditor'
 import { NOTIFICATION_EVENT_LABELS, type ClientNotification } from '@/types/notification'
 import { cardVisibility, type ViewRole, type ServiceCenter } from '@/types/access'
 import { serviceCenterService } from '@/api/serviceCenterService'
+import { telegramLinkApi } from '@/api/endpoints/telegramLink'
 import CreateTtnDialog from '@/components/CreateTtnDialog'
 import ViewAsButton from '@/components/ViewAsButton'
 
@@ -65,6 +67,20 @@ export default function ServiceRequestPage() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]) // переписка обращения (для ИИ-диагностики)
   const [diagAiHistory, setDiagAiHistory] = useState<AiHistoryEntry[]>([]) // локальная история ИИ-правок диагностики
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
+
+  // Telegram deep-link: получить (стабильную) ссылку и скопировать в буфер — отправить клиенту.
+  const copyTgLink = async () => {
+    if (!req) return
+    const r = await telegramLinkApi.create(req.id)
+    if (r.ok && r.url) {
+      try {
+        await navigator.clipboard.writeText(r.url)
+        notify('Telegram-посилання скопійовано — надішліть клієнту')
+      } catch {
+        notify(r.url) // буфер недоступен — покажем ссылку текстом
+      }
+    } else notify(r.error || 'Не вдалося створити посилання', 'error')
+  }
 
   const load = useCallback(async () => {
     if (!id) return
@@ -368,6 +384,18 @@ export default function ServiceRequestPage() {
           останнього повідомлення клієнта) або SMS. Попередня/фактична калькуляція та відправлення
           повідомляються автоматично; тут можна надіслати й довільне повідомлення.
         </Typography>
+
+        {/* Telegram deep-link: клієнт відкриває посилання → бот привʼязує чат до заявки */}
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
+          <Button variant="outlined" startIcon={<TelegramIcon />} onClick={copyTgLink}>Telegram-посилання</Button>
+          {req.tgSessionId ? (
+            <Chip size="small" color="success" label="Telegram підключено" />
+          ) : (
+            <Typography variant="caption" color="text.secondary">
+              Клієнт відкриє посилання і натисне Start — бот привʼяже його до заявки, сповіщення підуть у Telegram (безкоштовно, без вікна).
+            </Typography>
+          )}
+        </Stack>
 
         {/* Произвольное сообщение клиенту */}
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} alignItems={{ sm: 'flex-start' }}>

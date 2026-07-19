@@ -16,6 +16,7 @@ import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
 import { registerFopsAdmin } from './fopsAdmin.js'
 import { registerNpTtn } from './novaPoshtaTtn.js'
+import { registerTelegramLinks } from './telegramLinks.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
@@ -1150,6 +1151,8 @@ registerPayments(app, { adminDb })
 registerFopsAdmin(app, { adminDb, refreshFops })
 // Создание ТТН Новой Почты (InternetDocument.save) по шаблону — сценарий «приём кораблика».
 registerNpTtn(app, { adminDb })
+// Deep-link Telegram: генерация ссылки t.me/<бот>?start=<токен> из заявки (владелец).
+registerTelegramLinks(app, { adminDb })
 
 // Справочники НП по ключу конкретного ФОП (отправители/контакты + добавление) — owner-gated.
 registerNpAccount(app)

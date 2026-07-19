@@ -125,6 +125,36 @@ export function registerTelegramBot(app, deps) {
       const channelUserId = String(chatId)
       const fromName = [m.from && m.from.first_name, m.from && m.from.last_name].filter(Boolean).join(' ') || null
 
+      // /start <токен> — deep-link із заявки (див. telegramLinks.js): бот ОДРАЗУ знає клієнта.
+      // Привʼязуємо чат до заявки (tgSessionId) і телефону (clientProfiles) → авто-сповіщення
+      // підуть у Telegram без вікна. Невідомий токен → звичайне привітання нижче.
+      if (m.text && m.text.trim().startsWith('/start ')) {
+        const token = m.text.trim().split(/\s+/)[1] || ''
+        const linkSnap = token ? await adminDb.collection('tgLinks').doc(token).get() : null
+        if (linkSnap && linkSnap.exists) {
+          const L = linkSnap.data()
+          const session = (await core.findSession('telegram', channelUserId)) || core.newSession('telegram', channelUserId, fromName)
+          const cname = L.clientName || (session.contact && session.contact.name) || fromName || undefined
+          session.contact = { ...(session.contact || {}), ...(L.phone ? { phone: L.phone } : {}), ...(cname ? { name: cname } : {}) }
+          // Хоча б одне «клієнтське» повідомлення — умова проактивної відправки (messengerOpen).
+          session.messages.push({ id: genMsgId(), role: 'client', text: '/start — підключення сповіщень із заявки', at: nowIso() })
+          await core.saveSession(session)
+          if (L.phone) await core.upsertProfile(L.phone, { name: cname, sessionId: session.id })
+          if (L.serviceRequestId) {
+            await adminDb.collection('serviceRequests').doc(String(L.serviceRequestId))
+              .set({ tgSessionId: session.id, updatedAt: nowIso() }, { merge: true }).catch(() => {})
+          }
+          await adminDb.collection('tgLinks').doc(token).set({ usedAt: nowIso(), chatId: channelUserId }, { merge: true }).catch(() => {})
+          const firstName = String(cname || '').split(/\s+/).filter(Boolean).find((w) => !/^\+?\d/.test(w)) || ''
+          await send(
+            chatId,
+            `Вітаємо${firstName ? `, ${firstName}` : ''}! ✅ Ваш Telegram підключено до заявки №${L.requestNo || ''}.\n\nСюди надходитимуть сповіщення про ремонт: калькуляції, відправлення, ТТН. Якщо є питання — просто напишіть тут.`,
+            { reply_markup: { remove_keyboard: true } }
+          )
+          return
+        }
+      }
+
       // /start — приветствие + запрос контакта
       if (m.text && m.text.trim() === '/start') {
         await send(

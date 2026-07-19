@@ -74,7 +74,9 @@ export function registerNotifications(app, deps) {
       const snap = await adminDb.collection('serviceRequests').doc(serviceRequestId).get()
       req = snap.exists ? snap.data() : null
     }
-    const sid = sessionId || req?.sessionId || null
+    // Пріоритет: явна сесія → Telegram-привʼязка із deep-link (tgSessionId, безкоштовний канал
+    // без вікна) → сесія-джерело заявки. Історія чату заявки при цьому не змінюється.
+    const sid = sessionId || req?.tgSessionId || req?.sessionId || null
     const toPhone = phone || req?.clientPhone || null
 
     // Ссылка по событию (если не передана явно).

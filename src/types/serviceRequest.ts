@@ -53,6 +53,10 @@ export interface ServiceRequest {
   diagnostics?: { text: string; at: string; by: string | null } | null
   waybillNumber?: string | null // номер транспортной накладной (ТТН) — для оповещения об отправке
   returnTtn?: string | null // ТТН відправлення клієнту (з ремонту) — импорт 1С6 и исходящие ТТН
+  // Telegram deep-link: стабильный токен ссылки t.me/<бот>?start=<токен> и привязанная
+  // Telegram-сессия клиента (пишет бот при клике; оповещения идут в неё приоритетно).
+  tgLinkToken?: string | null
+  tgSessionId?: string | null
   // Привязанные калькуляции и оплата:
   aiEstimateId?: string | null // материализованная предварительная оценка ИИ (stage='ai')
   offerId?: string | null // предложение с вариантами (предварительные калькуляции)
