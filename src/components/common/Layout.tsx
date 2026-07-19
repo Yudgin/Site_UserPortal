@@ -119,6 +119,8 @@ export default function Layout() {
       { text: 'Обращения', icon: <InboxIcon />, path: '/manager-inbox' },
       { text: 'Заявки', icon: <RequestIcon />, path: '/service-requests' },
       { text: 'Задачи', icon: <TaskIcon />, path: '/tasks-admin' },
+      // Та же страница, что в «Продажі корабликів»: импорт и продаж, и ремонтов из 1С6.
+      { text: 'Імпорт з 1С6', icon: <RequestIcon />, path: '/boats-import' },
     ] })
     nav.push({ group: 'Калькуляції та оплати', icon: <PaymentsIcon />, items: [
       { text: 'Пропозиція клієнту', icon: <EstimateIcon />, path: '/offer-editor' },
