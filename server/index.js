@@ -18,6 +18,7 @@ import { registerFopsAdmin } from './fopsAdmin.js'
 import { registerNpTtn } from './novaPoshtaTtn.js'
 import { registerTelegramLinks } from './telegramLinks.js'
 import { registerOperatorBot } from './operatorBot.js'
+import { registerCalls } from './calls.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
@@ -1156,6 +1157,8 @@ registerNpTtn(app, { adminDb })
 registerTelegramLinks(app, { adminDb })
 // Операторский бот (поглощение TelegramBot): спит без TELEGRAM_OPERATOR_BOT_TOKEN (фазы Б1-Б4).
 registerOperatorBot(app, { adminDb })
+// Журнал дзвінків: зеркальные события/результаты от операторского бота (X-Calls-Token).
+registerCalls(app, { adminDb })
 
 // Справочники НП по ключу конкретного ФОП (отправители/контакты + добавление) — owner-gated.
 registerNpAccount(app)

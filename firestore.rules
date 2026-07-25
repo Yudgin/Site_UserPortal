@@ -244,6 +244,17 @@ service cloud.firestore {
       allow read, list, write: if isPriceAdmin();
     }
 
+    // Журнал дзвінків (зеркало операторского бота): пишет ТОЛЬКО backend (Admin SDK),
+    // читает владелец на странице «Дзвінки».
+    match /callEvents/{id} {
+      allow read, list: if isPriceAdmin();
+      allow write: if false;
+    }
+    match /callResults/{id} {
+      allow read, list: if isPriceAdmin();
+      allow write: if false;
+    }
+
     // Deny all other access by default
     match /{document=**} {
       allow read, write: if false;

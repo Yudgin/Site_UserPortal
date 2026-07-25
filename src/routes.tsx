@@ -42,6 +42,7 @@ import BoatCatalogPage from '@/pages/BoatCatalogPage'
 import BoatOrdersPage from '@/pages/BoatOrdersPage'
 import BoatOrderPage from '@/pages/BoatOrderPage'
 import BoatImportPage from '@/pages/BoatImportPage'
+import CallsJournalPage from '@/pages/CallsJournalPage'
 import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
 import MasterPage from '@/pages/MasterPage'
 import FirmwareAccessAdminPage from '@/pages/FirmwareAccessAdminPage'
@@ -265,6 +266,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <BoatImportPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Calls journal (mirror from operator bot) - owner only (email-gated inside) */}
+      <Route
+        path="/calls"
+        element={
+          <AuthenticatedRoute>
+            <CallsJournalPage />
           </AuthenticatedRoute>
         }
       />
