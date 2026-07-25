@@ -46,6 +46,22 @@ export default function CallsJournalPage() {
 
   // Склейка: рядок = дзвінок (подія) з його результатами; результати без події — окремими рядками.
   const rows = useMemo<Row[]>(() => {
+    // call.incoming і call.completed одного дзвінка приходять з РІЗНИМИ callId (бот генерує
+    // uuid на кожну подію) — приклеюємо «завершено» до найближчого вхідного за телефоном (≤6 год).
+    const primaries: CallEvent[] = []
+    const completions: CallEvent[] = []
+    for (const e of events) (e.lastType === 'call.completed' ? completions : primaries).push({ ...e })
+    const leftovers: CallEvent[] = []
+    for (const c of completions) {
+      const cand = primaries
+        .filter((p) => p.phone === c.phone && !p.completedAt && p.at <= c.at
+          && Date.parse(c.at) - Date.parse(p.at) < 6 * 3600 * 1000)
+        .sort((a, b) => b.at.localeCompare(a.at))[0]
+      if (cand) cand.completedAt = c.completedAt || c.at
+      else leftovers.push(c)
+    }
+    const evList = [...primaries, ...leftovers]
+
     const byCall = new Map<string, CallResult[]>()
     const orphan: CallResult[] = []
     for (const r of results) {
@@ -55,7 +71,7 @@ export default function CallsJournalPage() {
       } else orphan.push(r)
     }
     const matched = new Set<string>()
-    const out: Row[] = events.map((e) => {
+    const out: Row[] = evList.map((e) => {
       const rs = (byCall.get(e.callId) || []).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
       rs.forEach((r) => matched.add(r.id))
       return { event: e, results: rs, at: e.at || '', phone: e.phone, clientName: e.clientName || '' }
