@@ -12,6 +12,7 @@ export interface CallNote {
   text: string
   at: string
   by?: string | null
+  sentTo1C?: boolean // коментар до дзвінка автоматично відправляється в 1С (false = не дійшов)
 }
 
 export interface CallEvent {

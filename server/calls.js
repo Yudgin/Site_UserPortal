@@ -4,7 +4,45 @@
 // (клиент на гарантии / гарантия закончилась / потенциальный / в оформлении — по нашей базе).
 // Auth: заголовок X-Calls-Token === CALLS_INGEST_TOKEN (env). Чтение журнала — фронт напрямую
 // из Firestore (правила: только владелец).
+import axios from 'axios'
+import { verifyFirebaseAdmin } from './adminAuth.js'
+
 const nowIso = () => new Date().toISOString()
+
+// Отправка комментария владельца/оператора с портала в 1С как «результат разговора»
+// (тот же bot-контур 1С, что использует Telegram-бот: Basic Auth, путь с {phone}).
+// Решение владельца: КАЖДЫЙ комментарий к звонку с веб-интерфейса уходит в 1С автоматически.
+const ONEC = {
+  base: (process.env.ONEC_BOT_BASE_URL || '').replace(/\/+$/, ''),
+  user: process.env.ONEC_BOT_USERNAME || '',
+  pass: process.env.ONEC_BOT_PASSWORD || '',
+  path: process.env.ONEC_CALL_RESULT_PATH || '',
+}
+const sendNoteTo1C = async ({ sourceCallId, phone, text, by }) => {
+  if (!ONEC.base || !ONEC.path) return false
+  const digits = String(phone || '').replace(/\D/g, '')
+  if (!digits) return false
+  const endpoint = ONEC.path.replaceAll('{phone}', digits)
+  try {
+    await axios.post(`${ONEC.base}${endpoint}`, {
+      callId: sourceCallId || '', // 1С чекає свій власний id дзвінка
+      phone: digits,
+      result: String(text),
+      operatorId: 0,
+      operatorName: by || 'Портал',
+      chatId: 0,
+      timestamp: nowIso(),
+    }, {
+      timeout: 15000,
+      headers: { 'Content-Type': 'application/json' },
+      ...(ONEC.user ? { auth: { username: ONEC.user, password: ONEC.pass } } : {}),
+    })
+    return true
+  } catch (e) {
+    console.error('note→1C:', e?.response?.status || e.message)
+    return false
+  }
+}
 
 // Телефон к каноничному +380… (бот шлёт 380XXXXXXXXX без плюса).
 const normPhone = (raw) => {
@@ -109,6 +147,48 @@ export function registerCalls(app, deps) {
     } catch (e) {
       console.error('kyivstar/callstate:', e.message)
       res.status(500).json({ ok: false })
+    }
+  })
+
+  // Комментарий к звонку с ПОРТАЛА (владелец/оператор в вебе): сохраняем в документ журнала
+  // И автоматически отправляем в 1С как результат разговора. body: { kind, docId, text, by? }
+  app.post('/api/calls/note', async (req, res) => {
+    if (!(await verifyFirebaseAdmin(req))) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника' } })
+    }
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const { kind, docId, text, by } = req.body || {}
+      if (!docId || !text || !String(text).trim()) {
+        return res.status(400).json({ success: false, error: { code: 'BAD_REQ', message: 'docId і text обовʼязкові' } })
+      }
+      const coll = kind === 'result' ? 'callResults' : 'callEvents'
+      const ref = adminDb.collection(coll).doc(String(docId))
+      const snap = await ref.get()
+      if (!snap.exists) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Запис не знайдено' } })
+      const d = snap.data()
+
+      // 1С-шный id звонка: у события он в sourceCallId; у «сирітського» результата пробуем
+      // найти связанное событие по callId (боту 1С отдаёт свой id только через событие).
+      let sourceCallId = d.sourceCallId || ''
+      if (!sourceCallId && kind === 'result' && d.callId) {
+        try {
+          const ev = await adminDb.collection('callEvents').doc(String(d.callId)).get()
+          sourceCallId = ev.exists ? ev.data().sourceCallId || '' : ''
+        } catch { /* некритично */ }
+      }
+
+      const sentTo1C = await sendNoteTo1C({ sourceCallId, phone: d.phone, text: String(text).trim(), by })
+      const note = { text: String(text).trim(), at: nowIso(), by: by || 'власник', sentTo1C }
+      await adminDb.runTransaction(async (tx) => {
+        const s = await tx.get(ref)
+        const cur = s.exists ? s.data() : {}
+        tx.set(ref, { notes: [...(cur.notes || []), note], updatedAt: nowIso() }, { merge: true })
+      })
+      res.json({ success: true, data: { note } })
+    } catch (e) {
+      console.error('calls/note:', e.message)
+      res.status(500).json({ success: false, error: { code: 'NOTE_FAILED', message: 'Не вдалося зберегти коментар' } })
     }
   })
 

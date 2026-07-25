@@ -14,12 +14,15 @@ import {
   Home as HomeIcon, Refresh as RefreshIcon, Call as CallIcon, CheckCircle as ReviewedIcon,
   Archive as ArchiveIcon, Unarchive as UnarchiveIcon, AddComment as NoteIcon, ArrowForward as FwdIcon,
   AssignmentTurnedIn as TaskDoneIcon, Assignment as TaskIcon, Add as AddIcon, Done as DoneIcon,
+  History as HistoryIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import {
   callsService, type BotTask, type CallEvent, type CallResult, type CallNote, type CallWorkflowStatus,
 } from '@/api/callsService'
+import { callsAdminApi } from '@/api/endpoints/callsAdmin'
+import { serviceApi } from '@/api/endpoints/service'
 
 const PAGE = 50
 
@@ -231,18 +234,42 @@ export default function CallsJournalPage() {
     setBusyKey('')
   }
 
-  // Перемещение: если в поле набрана дія — она сохраняется тем же действием.
+  // Коментар до дзвінка йде через backend: зберігається в журналі І автоматично
+  // відправляється в 1С як результат розмови (рішення власника — КОЖЕН коментар).
+  const postCallNote = async (row: Row, text: string): Promise<boolean> => {
+    setBusyKey(row.key)
+    const r = await callsAdminApi.addNote({ kind: row.kind, docId: row.docId, text })
+    if (r.ok && r.note) applyLocal(row, { notes: [...row.notes, r.note] })
+    setBusyKey('')
+    return r.ok
+  }
+
+  // Перемещение: если в поле набрана дія — она сохраняется (и уходит в 1С) тем же действием.
   const moveTo = async (row: Row, status: CallWorkflowStatus) => {
     const draft = (noteDraft[row.key] || '').trim()
-    const notes = draft ? [...row.notes, { text: draft, at: new Date().toISOString(), by: 'власник' }] : row.notes
-    await saveWorkflow(row, { workflowStatus: status, ...(draft ? { notes } : {}) })
-    if (draft) setNoteDraft((d) => ({ ...d, [row.key]: '' }))
+    if (draft) {
+      const ok = await postCallNote(row, draft)
+      if (ok) setNoteDraft((d) => ({ ...d, [row.key]: '' }))
+    }
+    await saveWorkflow(row, { workflowStatus: status })
   }
   const addNote = async (row: Row) => {
     const draft = (noteDraft[row.key] || '').trim()
     if (!draft) return
-    await saveWorkflow(row, { notes: [...row.notes, { text: draft, at: new Date().toISOString(), by: 'власник' }] })
-    setNoteDraft((d) => ({ ...d, [row.key]: '' }))
+    const ok = await postCallNote(row, draft)
+    if (ok) setNoteDraft((d) => ({ ...d, [row.key]: '' }))
+  }
+
+  // Історія обращений клієнта з 1С (дзвінки/консультації) — за телефоном.
+  const [histOpen, setHistOpen] = useState(false)
+  const [histLoading, setHistLoading] = useState(false)
+  const [histPhone, setHistPhone] = useState('')
+  const [histItems, setHistItems] = useState<{ Desc: string; Date: string }[]>([])
+  const openHistory = async (phone: string) => {
+    setHistPhone(phone); setHistItems([]); setHistOpen(true); setHistLoading(true)
+    const r = await serviceApi.getRepairHistory(phone)
+    setHistItems(r.success && r.data ? r.data : [])
+    setHistLoading(false)
   }
 
   if (!user || !isAdminEmail(user.email)) {
@@ -287,11 +314,15 @@ export default function CallsJournalPage() {
         </Box>
       ))}
 
-      {/* Дії/коментарі власника */}
+      {/* Дії/коментарі власника (кожен коментар автоматично йде в 1С) */}
       {r.notes.map((n, i) => (
         <Box key={i} sx={{ mt: 1, pl: 1.5, borderLeft: 2, borderColor: 'info.main' }}>
           <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{n.text}</Typography>
-          <Typography variant="caption" color="text.secondary">{n.by || 'власник'} · {fmtDT(n.at)}</Typography>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Typography variant="caption" color="text.secondary">{n.by || 'власник'} · {fmtDT(n.at)}</Typography>
+            {n.sentTo1C === true && <Chip size="small" variant="outlined" color="success" label="→ 1С" sx={{ height: 18 }} />}
+            {n.sentTo1C === false && <Chip size="small" variant="outlined" color="error" label="не пішло в 1С" sx={{ height: 18 }} />}
+          </Stack>
         </Box>
       ))}
 
@@ -304,6 +335,11 @@ export default function CallsJournalPage() {
           <Tooltip title="Зберегти коментар">
             <span><IconButton size="small" color="info" disabled={!(noteDraft[r.key] || '').trim() || busyKey === r.key} onClick={() => addNote(r)}><NoteIcon fontSize="small" /></IconButton></span>
           </Tooltip>
+          {r.phone && (
+            <Tooltip title="Історія обращень з 1С">
+              <span><IconButton size="small" disabled={busyKey === r.key} onClick={() => openHistory(r.phone)}><HistoryIcon fontSize="small" /></IconButton></span>
+            </Tooltip>
+          )}
           {!operatorMode && (
             <Tooltip title="Створити задачу з дзвінка">
               <span><IconButton size="small" color="primary" disabled={busyKey === r.key}
@@ -552,6 +588,30 @@ export default function CallsJournalPage() {
         <DialogActions>
           <Button onClick={() => setNewTaskOpen(false)}>Скасувати</Button>
           <Button variant="contained" onClick={createTask} disabled={!newTaskTitle.trim()}>Створити</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Історія обращень клієнта з 1С (дзвінки, консультації тощо) — за телефоном */}
+      <Dialog open={histOpen} onClose={() => setHistOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Історія з 1С · {histPhone}</DialogTitle>
+        <DialogContent dividers>
+          {histLoading ? (
+            <Box sx={{ textAlign: 'center', py: 4 }}><CircularProgress size={28} /></Box>
+          ) : histItems.length === 0 ? (
+            <Alert severity="info">Історії по цьому номеру в 1С немає (або 1С недоступна).</Alert>
+          ) : (
+            <Stack spacing={1.5}>
+              {histItems.map((h, i) => (
+                <Box key={i} sx={{ pl: 1.5, borderLeft: 2, borderColor: 'divider' }}>
+                  <Typography variant="caption" color="text.secondary">{fmtDT(h.Date) || h.Date}</Typography>
+                  <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{h.Desc}</Typography>
+                </Box>
+              ))}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setHistOpen(false)}>Закрити</Button>
         </DialogActions>
       </Dialog>
     </Container>
