@@ -170,9 +170,13 @@ export default function CallsJournalPage() {
                   <Typography variant="subtitle2" sx={{ flexGrow: 1 }}>
                     {r.clientName || '—'} · {r.phone || '—'}
                   </Typography>
+                  {r.event?.direction === 'outgoing' && <Chip size="small" variant="outlined" color="info" label="вихідний" />}
                   {r.event?.employee && <Chip size="small" variant="outlined" label={r.event.employee} />}
                   {!r.event?.employee && r.event?.employeeId && <Chip size="small" variant="outlined" label={`вн. ${r.event.employeeId}`} />}
-                  {r.event?.line && <Chip size="small" variant="outlined" label={r.event.line} />}
+                  {r.event?.line && <Chip size="small" variant="outlined" label={`лінія ${r.event.line}`} />}
+                  {r.event?.source === 'kyivstar' && r.event?.completedAt && !r.event?.answeredAt && (
+                    <Chip size="small" color="error" variant="outlined" label="без відповіді" />
+                  )}
                   {r.results.length === 0 && <Chip size="small" color="warning" variant="outlined" label="без результату" />}
                 </Stack>
                 {r.results.map((x) => (

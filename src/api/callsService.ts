@@ -13,8 +13,12 @@ export interface CallEvent {
   employee?: string | null
   employeeId?: string | null
   at: string // початок дзвінка
+  answeredAt?: string | null // Kyivstar: абонент відповів (established)
   completedAt?: string | null
   lastType?: string | null
+  source?: string | null // 'kyivstar' — прямий вебхук Віртуальної АТС; інакше — зеркало бота (1С)
+  direction?: 'incoming' | 'outgoing' | null
+  owners?: string[] // Kyivstar: номери співробітників, яким дзвонило (груповий дзвінок)
 }
 
 export interface CallResult {

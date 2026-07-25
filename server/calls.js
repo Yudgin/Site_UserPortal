@@ -61,6 +61,57 @@ export function registerCalls(app, deps) {
     }
   })
 
+  // ==== Kyivstar Віртуальна мобільна АТС — Generic FMC API webhook ====
+  // Kyivstar сам добавляет суффикс /callstate к «URL віддаленої системи», поэтому в их портале
+  // (fmc.kyivstar.ua/crm-integration, тип CRM «Generic FMC API») указывается БАЗОВЫЙ URL
+  // .../api/kyivstar, а POST приходит сюда. Авторизация: Authorization: Bearer <токен>,
+  // токен задаём мы же (env KYIVSTAR_WEBHOOK_TOKEN) и вводим в поле «Токен віддаленої системи».
+  // Состояния: alerting (телефон зазвонил) → established (ответили) → finished (завершён).
+  // Документ на звонок: callEvents/ks-<call_id> — все состояния сливаются в одну запись.
+  // ВАЖНО (из спеки): доставка «одна попытка, без повторов» — надёжная история потом
+  // добирается методом GET /v1/callhistory (отдельная фаза-reconcile).
+  const KS_TOKEN = process.env.KYIVSTAR_WEBHOOK_TOKEN || ''
+  app.post('/api/kyivstar/callstate', async (req, res) => {
+    if (!KS_TOKEN) return res.status(503).json({ ok: false, error: 'KYIVSTAR_WEBHOOK_TOKEN not set' })
+    if ((req.get('authorization') || '') !== `Bearer ${KS_TOKEN}`) return res.status(403).json({ ok: false })
+    if (!adminDb) return res.status(503).json({ ok: false })
+    try {
+      const b = req.body || {}
+      const callId = String(b.call_id || '')
+      const state = String(b.state_type || '')
+      if (!callId || !state) return res.status(400).json({ ok: false, error: 'call_id і state_type обовʼязкові' })
+      const ref = adminDb.collection('callEvents').doc(`ks-${callId}`)
+      const now = nowIso()
+      await adminDb.runTransaction(async (tx) => {
+        const snap = await tx.get(ref)
+        const cur = snap.exists ? snap.data() : {}
+        // state_owner — номер сотрудника АТС (владелец звонка); групповой звонок может звонить
+        // нескольким — копим всех, показываем последнего ответившего/актуального.
+        const owners = new Set(cur.owners || [])
+        if (b.state_owner) owners.add(String(b.state_owner))
+        tx.set(ref, {
+          callId: `ks-${callId}`,
+          sourceCallId: callId,
+          source: 'kyivstar',
+          phone: normPhone(b.phone_number) || (b.phone_number ? String(b.phone_number) : cur.phone || ''),
+          employee: b.state_owner ? String(b.state_owner) : cur.employee || null,
+          owners: [...owners],
+          direction: b.call_direction || cur.direction || null,
+          at: cur.at || now,
+          ...(state === 'established' ? { answeredAt: now } : {}),
+          ...(state === 'finished' ? { completedAt: now } : {}),
+          lastType: `ks.${state}`,
+          callControlId: b.call_control_id || cur.callControlId || null,
+          updatedAt: now,
+        }, { merge: true })
+      })
+      res.json({ ok: true })
+    } catch (e) {
+      console.error('kyivstar/callstate:', e.message)
+      res.status(500).json({ ok: false })
+    }
+  })
+
   // Результат разговора (резюме оператора; при «Принято» руководителем приходит повторно
   // с reviewedAt/reviewedByName — merge обновляет карточку).
   app.post('/api/calls/result', async (req, res) => {
