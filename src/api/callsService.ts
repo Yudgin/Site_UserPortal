@@ -1,7 +1,17 @@
 // Журнал дзвінків (читання, власник): події дзвінків + результати розмов операторів.
 // Пише тільки backend (зеркало операторского бота) — див. server/calls.js.
 import { db } from './firebase'
-import { collection, getDocs, limit, orderBy, query } from 'firebase/firestore'
+import { collection, doc, getDocs, limit, orderBy, query, updateDoc } from 'firebase/firestore'
+
+// Рабочий процесс канбана «Дзвінки»: нові (без резюме) → оброблені (оператор лишив
+// коментар/резюме — черга власника) → архів (власник додав дію і закрив).
+export type CallWorkflowStatus = 'new' | 'processed' | 'archived'
+
+export interface CallNote {
+  text: string
+  at: string
+  by?: string | null
+}
 
 export interface CallEvent {
   callId: string
@@ -19,6 +29,8 @@ export interface CallEvent {
   source?: string | null // 'kyivstar' — прямий вебхук Віртуальної АТС; інакше — зеркало бота (1С)
   direction?: 'incoming' | 'outgoing' | null
   owners?: string[] // Kyivstar: номери співробітників, яким дзвонило (груповий дзвінок)
+  workflowStatus?: CallWorkflowStatus | null // явний стан канбану (без нього — виводиться з результатів)
+  notes?: CallNote[] // дії/коментарі власника
 }
 
 export interface CallResult {
@@ -32,6 +44,9 @@ export interface CallResult {
   sentTo1C?: boolean
   reviewedAt?: string | null
   reviewedByName?: string | null
+  // Для результатов без связанного события (orphan) канбан-статус живёт на самом результате.
+  workflowStatus?: CallWorkflowStatus | null
+  notes?: CallNote[]
 }
 
 export const callsService = {
@@ -53,6 +68,28 @@ export const callsService = {
     } catch (e) {
       console.error('callResults list:', e)
       return []
+    }
+  },
+
+  // Канбан: обновление воркфлоу-полей (создание/удаление карточек — только backend).
+  updateEvent: async (callId: string, patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[] }): Promise<boolean> => {
+    if (!db) return false
+    try {
+      await updateDoc(doc(db, 'callEvents', callId), patch)
+      return true
+    } catch (e) {
+      console.error('callEvents update:', e)
+      return false
+    }
+  },
+  updateResult: async (id: string, patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[] }): Promise<boolean> => {
+    if (!db) return false
+    try {
+      await updateDoc(doc(db, 'callResults', id), patch)
+      return true
+    } catch (e) {
+      console.error('callResults update:', e)
+      return false
     }
   },
 }

@@ -1,18 +1,24 @@
-// Журнал дзвінків (власник): події дзвінків від 1С/Binotel + результати розмов операторів
-// (зеркало операторского Telegram-бота — етап 1 поглощения; після Б4 події підуть до нас
-// напряму, тут же зʼявляться НАШІ правила маршрутизації за категоріями клієнтів).
-// Сортування — нові зверху. Фільтри: пошук, «з результатом / без», «непереглянуті», співробітник.
+// «Дзвінки» (власник): канбан + журнал. Два рівні обробки (рішення власника):
+//  1) оператор фіксує резюме розмови в Telegram-боті → картка АВТОМАТИЧНО переходить у
+//     «Оброблені оператором»;
+//  2) власник переглядає СВОЮ ЧЕРГУ — це і «Нові» (без резюме, напр. пропущені), і
+//     «Оброблені» — додає свою дію/коментар і відправляє в «Архів».
+// Джерела подій: 1С через операторський бот (зеркало) + прямий вебхук Kyivstar FMC.
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, CircularProgress, Chip, Stack, TextField, MenuItem,
+  Tabs, Tab, IconButton, Tooltip,
 } from '@mui/material'
 import {
   Home as HomeIcon, Refresh as RefreshIcon, Call as CallIcon, CheckCircle as ReviewedIcon,
+  Archive as ArchiveIcon, Unarchive as UnarchiveIcon, AddComment as NoteIcon, ArrowForward as FwdIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
-import { callsService, type CallEvent, type CallResult } from '@/api/callsService'
+import {
+  callsService, type CallEvent, type CallResult, type CallNote, type CallWorkflowStatus,
+} from '@/api/callsService'
 
 const PAGE = 50
 
@@ -22,7 +28,25 @@ const fmtDT = (s?: string | null) => {
   return isNaN(d.getTime()) ? '' : d.toLocaleString('uk-UA', { dateStyle: 'short', timeStyle: 'short' })
 }
 
-type Row = { event: CallEvent | null; results: CallResult[]; at: string; phone: string; clientName: string }
+// Рядок канбану/журналу: подія дзвінка з результатами оператора, або «сирітський» результат.
+type Row = {
+  key: string
+  kind: 'event' | 'result' // де живе workflowStatus/notes (callEvents чи callResults)
+  docId: string
+  event: CallEvent | null
+  results: CallResult[]
+  at: string
+  phone: string
+  clientName: string
+  status: CallWorkflowStatus
+  notes: CallNote[]
+}
+
+const COLUMNS: { key: CallWorkflowStatus; title: string; hint: string }[] = [
+  { key: 'new', title: 'Нові', hint: 'без резюме оператора (в т.ч. пропущені)' },
+  { key: 'processed', title: 'Оброблені оператором', hint: 'є резюме — додайте дію і в архів' },
+  { key: 'archived', title: 'Архів', hint: 'закриті власником' },
+]
 
 export default function CallsJournalPage() {
   const navigate = useNavigate()
@@ -30,10 +54,12 @@ export default function CallsJournalPage() {
   const [events, setEvents] = useState<CallEvent[]>([])
   const [results, setResults] = useState<CallResult[]>([])
   const [loading, setLoading] = useState(true)
+  const [view, setView] = useState<0 | 1>(0) // 0 = канбан, 1 = журнал
   const [q, setQ] = useState('')
-  const [mode, setMode] = useState<'all' | 'withResult' | 'noResult' | 'unreviewed'>('all')
   const [employeeFilter, setEmployeeFilter] = useState('')
   const [shown, setShown] = useState(PAGE)
+  const [noteDraft, setNoteDraft] = useState<Record<string, string>>({})
+  const [busyKey, setBusyKey] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -42,9 +68,8 @@ export default function CallsJournalPage() {
     setLoading(false)
   }, [])
   useEffect(() => { load() }, [load])
-  useEffect(() => { setShown(PAGE) }, [q, mode, employeeFilter])
+  useEffect(() => { setShown(PAGE) }, [q, employeeFilter, view])
 
-  // Склейка: рядок = дзвінок (подія) з його результатами; результати без події — окремими рядками.
   const rows = useMemo<Row[]>(() => {
     // call.incoming і call.completed одного дзвінка приходять з РІЗНИМИ callId (бот генерує
     // uuid на кожну подію) — приклеюємо «завершено» до найближчого вхідного за телефоном (≤6 год).
@@ -74,16 +99,26 @@ export default function CallsJournalPage() {
     const out: Row[] = evList.map((e) => {
       const rs = (byCall.get(e.callId) || []).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
       rs.forEach((r) => matched.add(r.id))
-      return { event: e, results: rs, at: e.at || '', phone: e.phone, clientName: e.clientName || '' }
+      return {
+        key: `e-${e.callId}`, kind: 'event' as const, docId: e.callId,
+        event: e, results: rs, at: e.at || '', phone: e.phone, clientName: e.clientName || '',
+        status: e.workflowStatus || (rs.length ? 'processed' : 'new'),
+        notes: e.notes || [],
+      }
     })
     for (const r of [...orphan, ...results.filter((r) => r.callId && !matched.has(r.id))]) {
-      out.push({ event: null, results: [r], at: r.createdAt || '', phone: r.phone, clientName: r.clientName || '' })
+      out.push({
+        key: `r-${r.id}`, kind: 'result' as const, docId: r.id,
+        event: null, results: [r], at: r.createdAt || '', phone: r.phone, clientName: r.clientName || '',
+        status: r.workflowStatus || 'processed',
+        notes: r.notes || [],
+      })
     }
-    return out.sort((a, b) => (b.at || '').localeCompare(a.at || ''))
+    return out.sort((a, b) => (b.at || '').localeCompare(a.at || '')) // нові зверху
   }, [events, results])
 
   const employees = useMemo(() => {
-    const set = new Map<string, string>() // employeeId/employee → label
+    const set = new Map<string, string>()
     for (const e of events) {
       const label = e.employee || e.employeeId
       if (label) set.set(String(e.employeeId || e.employee), String(label))
@@ -95,12 +130,6 @@ export default function CallsJournalPage() {
     const query = q.trim().toLowerCase()
     const qDigits = query.replace(/\D/g, '')
     return rows
-      .filter((r) => {
-        if (mode === 'withResult') return r.results.length > 0
-        if (mode === 'noResult') return r.results.length === 0
-        if (mode === 'unreviewed') return r.results.some((x) => !x.reviewedAt)
-        return true
-      })
       .filter((r) => !employeeFilter || String(r.event?.employeeId || r.event?.employee || '') === employeeFilter)
       .filter((r) => {
         if (!query) return true
@@ -108,9 +137,39 @@ export default function CallsJournalPage() {
         return inPhone
           || r.clientName.toLowerCase().includes(query)
           || r.results.some((x) => x.resultText.toLowerCase().includes(query) || (x.operatorName || '').toLowerCase().includes(query))
+          || r.notes.some((n) => n.text.toLowerCase().includes(query))
           || (r.event?.line || '').toLowerCase().includes(query)
       })
-  }, [rows, q, mode, employeeFilter])
+  }, [rows, q, employeeFilter])
+
+  // Локально применить патч воркфлоу к источнику строки (без перезагрузки).
+  const applyLocal = (row: Row, patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[] }) => {
+    if (row.kind === 'event') setEvents((list) => list.map((e) => (e.callId === row.docId ? { ...e, ...patch } : e)))
+    else setResults((list) => list.map((r) => (r.id === row.docId ? { ...r, ...patch } : r)))
+  }
+
+  const saveWorkflow = async (row: Row, patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[] }) => {
+    setBusyKey(row.key)
+    const ok = row.kind === 'event'
+      ? await callsService.updateEvent(row.docId, patch)
+      : await callsService.updateResult(row.docId, patch)
+    if (ok) applyLocal(row, patch)
+    setBusyKey('')
+  }
+
+  // Перемещение: если в поле набрана дія — она сохраняется тем же действием.
+  const moveTo = async (row: Row, status: CallWorkflowStatus) => {
+    const draft = (noteDraft[row.key] || '').trim()
+    const notes = draft ? [...row.notes, { text: draft, at: new Date().toISOString(), by: 'власник' }] : row.notes
+    await saveWorkflow(row, { workflowStatus: status, ...(draft ? { notes } : {}) })
+    if (draft) setNoteDraft((d) => ({ ...d, [row.key]: '' }))
+  }
+  const addNote = async (row: Row) => {
+    const draft = (noteDraft[row.key] || '').trim()
+    if (!draft) return
+    await saveWorkflow(row, { notes: [...row.notes, { text: draft, at: new Date().toISOString(), by: 'власник' }] })
+    setNoteDraft((d) => ({ ...d, [row.key]: '' }))
+  }
 
   if (!user || !isAdminEmail(user.email)) {
     return (
@@ -120,28 +179,92 @@ export default function CallsJournalPage() {
     )
   }
 
+  const renderCard = (r: Row, inKanban: boolean) => (
+    <Paper key={r.key} sx={{ p: 1.5, opacity: busyKey === r.key ? 0.6 : 1 }}>
+      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+        <Typography variant="caption" color="text.secondary">{fmtDT(r.at)}</Typography>
+        <Typography variant="subtitle2" sx={{ flexGrow: 1 }}>
+          {r.clientName || '—'} · {r.phone || '—'}
+        </Typography>
+        {r.event?.direction === 'outgoing' && <Chip size="small" variant="outlined" color="info" label="вихідний" />}
+        {r.event?.employee && <Chip size="small" variant="outlined" label={r.event.employee} />}
+        {!r.event?.employee && r.event?.employeeId && <Chip size="small" variant="outlined" label={`вн. ${r.event.employeeId}`} />}
+        {r.event?.line && <Chip size="small" variant="outlined" label={`лінія ${r.event.line}`} />}
+        {r.event?.source === 'kyivstar' && r.event?.completedAt && !r.event?.answeredAt && (
+          <Chip size="small" color="error" variant="outlined" label="без відповіді" />
+        )}
+        {!inKanban && r.status === 'archived' && <Chip size="small" variant="outlined" icon={<ArchiveIcon />} label="архів" />}
+      </Stack>
+
+      {/* Резюме операторів (з бота) */}
+      {r.results.map((x) => (
+        <Box key={x.id} sx={{ mt: 1, pl: 1.5, borderLeft: 2, borderColor: x.reviewedAt ? 'success.main' : 'warning.main' }}>
+          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{x.resultText}</Typography>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.25 }} flexWrap="wrap" useFlexGap>
+            <Typography variant="caption" color="text.secondary">
+              {x.operatorName || 'оператор'} · {fmtDT(x.createdAt)}
+            </Typography>
+            {x.reviewedAt
+              ? <Chip size="small" color="success" variant="outlined" icon={<ReviewedIcon />} label={`Прийнято${x.reviewedByName ? ` · ${x.reviewedByName}` : ''}`} />
+              : <Chip size="small" color="warning" variant="outlined" label="очікує перегляду" />}
+            {x.sentTo1C === false && <Chip size="small" color="error" variant="outlined" label="не пішло в 1С" />}
+          </Stack>
+        </Box>
+      ))}
+
+      {/* Дії/коментарі власника */}
+      {r.notes.map((n, i) => (
+        <Box key={i} sx={{ mt: 1, pl: 1.5, borderLeft: 2, borderColor: 'info.main' }}>
+          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{n.text}</Typography>
+          <Typography variant="caption" color="text.secondary">{n.by || 'власник'} · {fmtDT(n.at)}</Typography>
+        </Box>
+      ))}
+
+      {/* Дія + перемещения */}
+      {inKanban && (
+        <Stack direction="row" spacing={1} sx={{ mt: 1.5 }} alignItems="center">
+          <TextField size="small" fullWidth placeholder="Додати дію / коментар…"
+            value={noteDraft[r.key] || ''}
+            onChange={(e) => setNoteDraft((d) => ({ ...d, [r.key]: e.target.value }))} />
+          <Tooltip title="Зберегти коментар">
+            <span><IconButton size="small" color="info" disabled={!(noteDraft[r.key] || '').trim() || busyKey === r.key} onClick={() => addNote(r)}><NoteIcon fontSize="small" /></IconButton></span>
+          </Tooltip>
+          {r.status === 'new' && (
+            <Tooltip title="В «Оброблені»">
+              <span><IconButton size="small" disabled={busyKey === r.key} onClick={() => moveTo(r, 'processed')}><FwdIcon fontSize="small" /></IconButton></span>
+            </Tooltip>
+          )}
+          {r.status !== 'archived' ? (
+            <Tooltip title="В архів (з коментарем, якщо набрано)">
+              <span><IconButton size="small" color="success" disabled={busyKey === r.key} onClick={() => moveTo(r, 'archived')}><ArchiveIcon fontSize="small" /></IconButton></span>
+            </Tooltip>
+          ) : (
+            <Tooltip title="Повернути в «Оброблені»">
+              <span><IconButton size="small" disabled={busyKey === r.key} onClick={() => moveTo(r, 'processed')}><UnarchiveIcon fontSize="small" /></IconButton></span>
+            </Tooltip>
+          )}
+        </Stack>
+      )}
+    </Paper>
+  )
+
   return (
-    <Container maxWidth="md" sx={{ py: 3 }}>
-      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
+    <Container maxWidth="lg" sx={{ py: 3 }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
         <CallIcon color="primary" />
         <Typography variant="h5" sx={{ flexGrow: 1 }}>Дзвінки</Typography>
         <Button startIcon={<RefreshIcon />} onClick={load} disabled={loading}>Оновити</Button>
         <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>Головна</Button>
       </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Дзвінки з 1С/Binotel і результати розмов операторів (фіксуються в Telegram-боті).
-        Маршрутизацію поки що робить 1С; правила за категоріями клієнтів — наступний етап.
-      </Typography>
 
-      <Stack direction="row" spacing={0.5} sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap alignItems="center">
-        {([['all', `Усі (${rows.length})`],
-          ['withResult', `З результатом (${rows.filter((r) => r.results.length).length})`],
-          ['noResult', `Без результату (${rows.filter((r) => !r.results.length).length})`],
-          ['unreviewed', `Непереглянуті (${rows.filter((r) => r.results.some((x) => !x.reviewedAt)).length})`],
-        ] as const).map(([m, label]) => (
-          <Chip key={m} label={label} size="small" color={mode === m ? 'primary' : 'default'} onClick={() => setMode(m)} />
-        ))}
-        <Box sx={{ flexGrow: 1 }} />
+      <Paper sx={{ mb: 2 }}>
+        <Tabs value={view} onChange={(_, v) => setView(v)} variant="fullWidth">
+          <Tab label={`Канбан (${rows.filter((r) => r.status !== 'archived').length} в роботі)`} />
+          <Tab label={`Журнал (${rows.length})`} />
+        </Tabs>
+      </Paper>
+
+      <Stack direction="row" spacing={1} sx={{ mb: 2 }} flexWrap="wrap" useFlexGap alignItems="center">
         {employees.length > 0 && (
           <TextField select label="Співробітник" value={employeeFilter} onChange={(e) => setEmployeeFilter(e.target.value)} size="small" sx={{ minWidth: 160 }}>
             <MenuItem value="">Усі</MenuItem>
@@ -149,52 +272,43 @@ export default function CallsJournalPage() {
           </TextField>
         )}
         <TextField size="small" placeholder="Пошук: телефон / імʼя / текст / оператор" value={q}
-          onChange={(e) => setQ(e.target.value)} sx={{ minWidth: 260 }} />
+          onChange={(e) => setQ(e.target.value)} sx={{ minWidth: 260, flexGrow: 1 }} />
       </Stack>
 
       {loading ? (
         <Box sx={{ textAlign: 'center', py: 6 }}><CircularProgress /></Box>
-      ) : filtered.length === 0 ? (
-        <Alert severity="info">
-          {rows.length === 0
-            ? 'Журнал порожній. Дані зʼявляться, щойно операторський бот почне дублювати події до порталу (потрібен його редеплой з новими env).'
-            : 'Нічого не знайдено за фільтром.'}
-        </Alert>
+      ) : rows.length === 0 ? (
+        <Alert severity="info">Журнал порожній — дзвінки зʼявляться автоматично (1С/бот та Kyivstar).</Alert>
+      ) : view === 0 ? (
+        /* ---- КАНБАН ---- */
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="stretch">
+          {COLUMNS.map((col) => {
+            const items = filtered.filter((r) => r.status === col.key)
+            return (
+              <Box key={col.key} sx={{ flex: 1, minWidth: 0 }}>
+                <Paper sx={{ p: 1.5, bgcolor: 'action.hover', mb: 1 }}>
+                  <Typography variant="subtitle2">{col.title} ({items.length})</Typography>
+                  <Typography variant="caption" color="text.secondary">{col.hint}</Typography>
+                </Paper>
+                <Stack spacing={1} sx={{ maxHeight: '70vh', overflowY: 'auto', pr: 0.5 }}>
+                  {items.length === 0
+                    ? <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>порожньо</Typography>
+                    : items.slice(0, col.key === 'archived' ? 30 : 200).map((r) => renderCard(r, true))}
+                  {col.key === 'archived' && items.length > 30 && (
+                    <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>
+                      …ще {items.length - 30} в архіві (повний список — у «Журналі»)
+                    </Typography>
+                  )}
+                </Stack>
+              </Box>
+            )
+          })}
+        </Stack>
       ) : (
+        /* ---- ЖУРНАЛ ---- */
         <>
           <Stack spacing={1}>
-            {filtered.slice(0, shown).map((r, i) => (
-              <Paper key={r.event?.callId || r.results[0]?.id || i} sx={{ p: 1.5 }}>
-                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                  <Typography variant="caption" color="text.secondary" sx={{ minWidth: 105 }}>{fmtDT(r.at)}</Typography>
-                  <Typography variant="subtitle2" sx={{ flexGrow: 1 }}>
-                    {r.clientName || '—'} · {r.phone || '—'}
-                  </Typography>
-                  {r.event?.direction === 'outgoing' && <Chip size="small" variant="outlined" color="info" label="вихідний" />}
-                  {r.event?.employee && <Chip size="small" variant="outlined" label={r.event.employee} />}
-                  {!r.event?.employee && r.event?.employeeId && <Chip size="small" variant="outlined" label={`вн. ${r.event.employeeId}`} />}
-                  {r.event?.line && <Chip size="small" variant="outlined" label={`лінія ${r.event.line}`} />}
-                  {r.event?.source === 'kyivstar' && r.event?.completedAt && !r.event?.answeredAt && (
-                    <Chip size="small" color="error" variant="outlined" label="без відповіді" />
-                  )}
-                  {r.results.length === 0 && <Chip size="small" color="warning" variant="outlined" label="без результату" />}
-                </Stack>
-                {r.results.map((x) => (
-                  <Box key={x.id} sx={{ mt: 1, pl: 1.5, borderLeft: 2, borderColor: x.reviewedAt ? 'success.main' : 'warning.main' }}>
-                    <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{x.resultText}</Typography>
-                    <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.25 }} flexWrap="wrap" useFlexGap>
-                      <Typography variant="caption" color="text.secondary">
-                        {x.operatorName || 'оператор'} · {fmtDT(x.createdAt)}
-                      </Typography>
-                      {x.reviewedAt
-                        ? <Chip size="small" color="success" variant="outlined" icon={<ReviewedIcon />} label={`Прийнято${x.reviewedByName ? ` · ${x.reviewedByName}` : ''}`} />
-                        : <Chip size="small" color="warning" variant="outlined" label="очікує перегляду" />}
-                      {x.sentTo1C === false && <Chip size="small" color="error" variant="outlined" label="не пішло в 1С" />}
-                    </Stack>
-                  </Box>
-                ))}
-              </Paper>
-            ))}
+            {filtered.slice(0, shown).map((r) => renderCard(r, false))}
           </Stack>
           {filtered.length > shown && (
             <Box sx={{ textAlign: 'center', mt: 2 }}>

@@ -244,15 +244,18 @@ service cloud.firestore {
       allow read, list, write: if isPriceAdmin();
     }
 
-    // Журнал дзвінків (зеркало операторского бота): пишет ТОЛЬКО backend (Admin SDK),
-    // читает владелец на странице «Дзвінки».
+    // Журнал дзвінків (зеркало операторского бота + вебхук Kyivstar): СОЗДАЁТ только backend
+    // (Admin SDK). Владелец на канбане «Дзвінки» может ОБНОВЛЯТЬ карточки (workflowStatus,
+    // notes — рабочий процесс: нові → оброблені → архів), но не создавать/удалять.
     match /callEvents/{id} {
       allow read, list: if isPriceAdmin();
-      allow write: if false;
+      allow update: if isPriceAdmin();
+      allow create, delete: if false;
     }
     match /callResults/{id} {
       allow read, list: if isPriceAdmin();
-      allow write: if false;
+      allow update: if isPriceAdmin();
+      allow create, delete: if false;
     }
 
     // Deny all other access by default
