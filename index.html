@@ -19,6 +19,33 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Safari-фикс: у части устройств завис старый service worker прежней версии сайта и
+         вечно отдаёт устаревшую оболочку из кэша. Снимаем все SW и чистим Cache Storage;
+         после первой удачной загрузки страница один раз перезагрузится начисто. -->
+    <script>
+      (function () {
+        try {
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function (regs) {
+              var had = regs.length > 0
+              return Promise.all(regs.map(function (r) { return r.unregister() })).then(function () {
+                if ('caches' in window) {
+                  return caches.keys().then(function (keys) {
+                    return Promise.all(keys.map(function (k) { return caches.delete(k) }))
+                  }).then(function () { return had })
+                }
+                return had
+              })
+            }).then(function (had) {
+              if (had && !sessionStorage.getItem('sw-purged')) {
+                sessionStorage.setItem('sw-purged', '1')
+                location.reload()
+              }
+            }).catch(function () {})
+          }
+        } catch (e) { /* ignore */ }
+      })()
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
