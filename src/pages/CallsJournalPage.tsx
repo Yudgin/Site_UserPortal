@@ -14,7 +14,7 @@ import {
   Home as HomeIcon, Refresh as RefreshIcon, Call as CallIcon, CheckCircle as ReviewedIcon,
   Archive as ArchiveIcon, Unarchive as UnarchiveIcon, AddComment as NoteIcon, ArrowForward as FwdIcon,
   AssignmentTurnedIn as TaskDoneIcon, Assignment as TaskIcon, Add as AddIcon, Done as DoneIcon,
-  History as HistoryIcon,
+  History as HistoryIcon, Sailing as BoatIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
@@ -22,6 +22,7 @@ import {
   callsService, type BotTask, type CallEvent, type CallResult, type CallNote, type CallWorkflowStatus,
 } from '@/api/callsService'
 import { callsAdminApi } from '@/api/endpoints/callsAdmin'
+import { boatOrderService } from '@/api/boatOrderService'
 import { serviceApi } from '@/api/endpoints/service'
 
 const PAGE = 50
@@ -272,6 +273,26 @@ export default function CallsJournalPage() {
     setHistLoading(false)
   }
 
+  // Лід на купівлю кораблика прямо зі дзвінка: створюємо замовлення в статусі «Лід»
+  // з клієнтом із картки, відкриваємо картку замовлення в новій вкладці (дошка лишається).
+  const createBoatLead = async (row: Row) => {
+    setBusyKey(row.key)
+    const now = new Date().toISOString()
+    const res = await boatOrderService.save({
+      clientName: row.clientName || '',
+      clientPhone: row.phone || '',
+      lines: [], total: 0,
+      status: 'lead',
+      statusHistory: [{ status: 'lead', at: now }],
+      note: `Лід зі дзвінка ${fmtDT(row.at)}`,
+    })
+    if (res) {
+      await saveWorkflow(row, { notes: [...row.notes, { text: '⛵ Створено лід на купівлю кораблика', at: now, by: 'власник' }] })
+      window.open(`/boat-orders/${res.id}`, '_blank')
+    }
+    setBusyKey('')
+  }
+
   if (!user || !isAdminEmail(user.email)) {
     return (
       <Container maxWidth="sm" sx={{ py: 6 }}>
@@ -338,6 +359,12 @@ export default function CallsJournalPage() {
           {r.phone && (
             <Tooltip title="Історія обращень з 1С">
               <span><IconButton size="small" disabled={busyKey === r.key} onClick={() => openHistory(r.phone)}><HistoryIcon fontSize="small" /></IconButton></span>
+            </Tooltip>
+          )}
+          {!operatorMode && (
+            <Tooltip title="Лід на купівлю кораблика">
+              <span><IconButton size="small" color="primary" disabled={busyKey === r.key} onClick={() => createBoatLead(r)}>
+                <BoatIcon fontSize="small" /></IconButton></span>
             </Tooltip>
           )}
           {!operatorMode && (
