@@ -566,7 +566,7 @@ function PartsDialog({ sessionId, contact, free, suggestedParts, onClose, onDone
             disabled={!city}
             loadingText="Пошук…" noOptionsText={city ? 'Відділень не знайдено' : 'Спершу оберіть місто'}
             renderInput={(params) => (
-              <TextField {...params} size="small" label="Відділення / поштомат" required
+              <TextField {...params} size="small" label="Відділення Нової Пошти" required
                 InputProps={{ ...params.InputProps, endAdornment: (<>{loadingWh ? <CircularProgress size={16} /> : null}{params.InputProps.endAdornment}</>) }} />
             )}
           />

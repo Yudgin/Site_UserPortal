@@ -70,12 +70,19 @@ export const searchStreets = async (settlementRef: string, query: string): Promi
 }
 
 // Get warehouses by city Ref
+// Поштомати ВИКЛЮЧАЄМО всюди (рішення власника): сервіс приймає/відправляє кораблики лише
+// через відділення (габарити/оформлення). Розпізнаємо і за назвою, і за типом відділення.
+const POSTOMAT_TYPE_REF = '95dc212d-479c-4ffb-a8ab-8c1b9073d0bc'
+const isPostomat = (wh: any): boolean =>
+  String(wh?.TypeOfWarehouse || '') === POSTOMAT_TYPE_REF ||
+  /поштомат|почтомат/i.test(`${wh?.Description || ''} ${wh?.DescriptionRu || ''}`)
+
 export const getWarehouses = async (cityRef: string, searchQuery?: string): Promise<NPWarehouse[]> => {
   try {
     const response = await npClient.post('/warehouses', { cityRef, searchQuery: searchQuery || '' })
 
     if (response.data.success && response.data.data) {
-      return response.data.data.map((wh: any) => ({
+      return response.data.data.filter((wh: any) => !isPostomat(wh)).map((wh: any) => ({
         Ref: wh.Ref,
         Description: wh.Description,
         DescriptionRu: wh.DescriptionRu,
