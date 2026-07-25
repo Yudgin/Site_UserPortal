@@ -123,13 +123,27 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
                   isOptionEqualToValue={(a, b) => a.Ref === b.Ref}
                   renderInput={(p) => <TextField {...p} label={`Місто клієнта (${addrLabel})`} size="small" />}
                 />
-                <TextField select label={`Відділення клієнта (${addrLabel})`} value={warehouseRef} onChange={(e) => setWarehouseRef(e.target.value)} size="small" fullWidth
-                  disabled={!city} helperText={city && warehouses.length === 0 ? 'Завантаження відділень…' : undefined}>
-                  {warehouseRef && !warehouses.some((w) => w.Ref === warehouseRef) && (
-                    <MenuItem value={warehouseRef}>{clientWarehouseName || warehouseRef}</MenuItem>
-                  )}
-                  {warehouses.map((w) => <MenuItem key={w.Ref} value={w.Ref}>{w.Description}</MenuItem>)}
-                </TextField>
+                <Autocomplete
+                  options={(() => {
+                    const cur = warehouseRef && !warehouses.some((w) => w.Ref === warehouseRef)
+                      ? [{ Ref: warehouseRef, Description: clientWarehouseName || warehouseRef } as NPWarehouse] : []
+                    return [...cur, ...warehouses]
+                  })()}
+                  getOptionLabel={(o) => o.Description || ''}
+                  value={warehouses.find((w) => w.Ref === warehouseRef)
+                    || (warehouseRef ? { Ref: warehouseRef, Description: clientWarehouseName || warehouseRef } as NPWarehouse : null)}
+                  isOptionEqualToValue={(a, b) => a.Ref === b.Ref} disabled={!city}
+                  filterOptions={(opts, state) => {
+                    const q = state.inputValue.trim().toLowerCase()
+                    if (!q) return opts
+                    return opts.filter((w) => (w.Description || '').toLowerCase().includes(q)
+                      || (/^\d+$/.test(q) && (w.Description || '').includes(`№${q}`)))
+                  }}
+                  onChange={(_, v) => setWarehouseRef(v?.Ref || '')}
+                  renderInput={(p) => <TextField {...p} label={`Відділення клієнта (${addrLabel})`} size="small"
+                    placeholder="номер або текст, напр. 30"
+                    helperText={city && warehouses.length === 0 ? 'Завантаження відділень…' : undefined} />}
+                />
               </>
             )}
             <TextField label="Оголошена вартість, грн" type="number" value={cost} onChange={(e) => setCost(e.target.value)} size="small" fullWidth

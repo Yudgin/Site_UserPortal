@@ -431,7 +431,18 @@ export function registerPayments(app, deps) {
 
       const bo = claim.bo
       // Чек — построчно (назва+вартість, кількість при qty≠1); код позиції обов'язковий для каси.
-      const goods = bo.lines.map((l, i) => ({ name: String(l.label || `Позиція ${i + 1}`), price: Number(l.price) || 0, qty: Number(l.qty) || 1, code: `POS-${i + 1}` }))
+      // Додаткова знижка рядка (extraOff %/грн) вшита в ефективну ціну за одиницю — ТА САМА
+      // формула, що в UI (types/boats.ts): gross=r2(price*qty); off=min(gross, pct? r2(gross*p/100): r2(off));
+      // effUnit=r2((gross-off)/qty). Тоді замовлення, списання і чек сходяться копійка в копійку.
+      const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100
+      const effUnit = (l) => {
+        const qty = Number(l.qty) || 1
+        const gross = r2((Number(l.price) || 0) * qty)
+        const raw = Number(l.extraOff) || 0
+        const off = raw > 0 ? Math.min(l.extraOffKind === 'pct' ? r2((gross * raw) / 100) : r2(raw), gross) : 0
+        return r2((gross - off) / qty)
+      }
+      const goods = bo.lines.map((l, i) => ({ name: String(l.label || `Позиція ${i + 1}`), price: effUnit(l), qty: Number(l.qty) || 1, code: `POS-${i + 1}` }))
       try {
         const r = await createPayment({
           fopId, amount: bo.total, goods, method,

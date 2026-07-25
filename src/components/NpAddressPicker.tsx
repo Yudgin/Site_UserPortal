@@ -3,7 +3,7 @@
 //  • 'address' — город (поиск) + улица (поиск) + дом + квартира (курьерская доставка).
 // Возвращает NpAddress. Инициализируется из сохранённого значения. Переиспользуется в шаблонах и диалоге.
 import { useEffect, useMemo, useState } from 'react'
-import { Autocomplete, TextField, MenuItem, Stack } from '@mui/material'
+import { Autocomplete, TextField, Stack } from '@mui/material'
 import { searchCities, getWarehouses, searchStreets, type NPCity, type NPWarehouse, type NPStreet } from '@/api/endpoints/novaposhta'
 import type { NpAddress } from '@/types/npTemplate'
 
@@ -74,16 +74,35 @@ export default function NpAddressPicker({ value, onChange, delivery = 'warehouse
   )
 
   if (delivery === 'warehouse') {
+    // Відділення — АВТОКОМПЛІТ з пошуком по тексту/номеру (у великих містах їх сотні:
+    // набираєш «30» — бачиш «Відділення №30…», №130, №230 тощо).
+    const currentWh: NPWarehouse | null = value.warehouseRef
+      ? warehouses.find((w) => w.Ref === value.warehouseRef)
+        || { Ref: value.warehouseRef, Description: value.warehouseName || value.warehouseRef, Number: '' } as NPWarehouse
+      : null
+    const whOptions = (() => {
+      const map = new Map<string, NPWarehouse>()
+      if (currentWh) map.set(currentWh.Ref, currentWh)
+      for (const w of warehouses) map.set(w.Ref, w)
+      return [...map.values()]
+    })()
     return (
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
         {cityField}
-        <TextField select sx={{ flex: 1 }} label={warehouseLabel} size={size} value={value.warehouseRef || ''} disabled={!value.cityRef}
-          onChange={(e) => { const w = warehouses.find((x) => x.Ref === e.target.value); onChange({ ...value, warehouseRef: e.target.value, warehouseName: w?.Description || value.warehouseName || '' }) }}>
-          {value.warehouseRef && !warehouses.some((w) => w.Ref === value.warehouseRef) && (
-            <MenuItem value={value.warehouseRef}>{value.warehouseName || value.warehouseRef}</MenuItem>
-          )}
-          {warehouses.map((w) => <MenuItem key={w.Ref} value={w.Ref}>{w.Description}</MenuItem>)}
-        </TextField>
+        <Autocomplete
+          sx={{ flex: 1 }} options={whOptions} getOptionLabel={(o) => o.Description || ''}
+          value={currentWh} isOptionEqualToValue={(a, b) => a.Ref === b.Ref} disabled={!value.cityRef}
+          filterOptions={(opts, state) => {
+            const q = state.inputValue.trim().toLowerCase()
+            if (!q) return opts
+            // «30» знаходить і «№30», і адресу з 30; текст шукається по всій назві.
+            return opts.filter((w) => (w.Description || '').toLowerCase().includes(q)
+              || (/^\d+$/.test(q) && (w.Description || '').includes(`№${q}`)))
+          }}
+          onChange={(_, v) => onChange({ ...value, warehouseRef: v?.Ref || '', warehouseName: v?.Description || '' })}
+          renderInput={(p) => <TextField {...p} label={warehouseLabel} size={size}
+            placeholder="номер або текст, напр. 30" helperText={!value.cityRef ? 'Спершу оберіть місто' : undefined} />}
+        />
       </Stack>
     )
   }

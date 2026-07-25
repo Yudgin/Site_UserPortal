@@ -101,14 +101,39 @@ export const BOAT_ORDER_STATUS_LABELS: Record<BoatOrderStatus, string> = {
 export interface BoatOrderLine {
   id: string
   label: string
-  price: number // фактична ціна (зі знижкою)
+  price: number // фактична ціна (зі знижкою каталогу)
   oldPrice?: number | null // ціна без знижки з каталогу — щоб показати знижку в замовленні
   qty: number
+  // Додаткова знижка НА РЯДОК (поверх каталожної): відсотком або фіксованою сумою (грн).
+  extraOff?: number | null
+  extraOffKind?: 'pct' | 'uah'
 }
 
 // Відсоток знижки для показу («-12%»); null — знижки немає.
 export const discountPct = (price: number, oldPrice?: number | null): number | null =>
   oldPrice && oldPrice > price && price >= 0 ? Math.round((1 - price / oldPrice) * 100) : null
+
+// ==== Грошова математика рядка (ЄДИНЕ джерело правди — сервер повторює цю ж формулу) ====
+// Дод. знижка застосовується до рядка цілком; ефективна ціна за одиницю округлюється до копійки,
+// а сума рядка = ефективна ціна × кількість — тоді оплата (mono/LiqPay) і чек (Checkbox)
+// сходяться з замовленням копійка в копійку.
+const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100
+
+export const lineDiscountAmount = (l: BoatOrderLine): number => {
+  const qty = l.qty || 1
+  const gross = r2(l.price * qty)
+  if (!l.extraOff || l.extraOff <= 0) return 0
+  const off = l.extraOffKind === 'pct' ? r2((gross * l.extraOff) / 100) : r2(l.extraOff)
+  return Math.min(off, gross)
+}
+
+export const lineEffUnit = (l: BoatOrderLine): number => {
+  const qty = l.qty || 1
+  const gross = r2(l.price * qty)
+  return r2((gross - lineDiscountAmount(l)) / qty)
+}
+
+export const lineEffTotal = (l: BoatOrderLine): number => r2(lineEffUnit(l) * (l.qty || 1))
 
 export interface BoatOrderStatusChange {
   status: BoatOrderStatus

@@ -24,13 +24,15 @@ import NpAddressPicker from '@/components/NpAddressPicker'
 import type { NpAddress } from '@/types/npTemplate'
 import {
   BOAT_ORDER_STATUSES, BOAT_ORDER_STATUS_LABELS, BOAT_OPTION_KIND_LABELS, optionFitsModel, discountPct,
+  lineEffTotal, lineDiscountAmount,
   type BoatModel, type BoatOption, type BoatOrder, type BoatOrderLine, type BoatOrderStatus, type Dropshipper,
 } from '@/types/boats'
 import { secureId } from '@/utils/id'
 
 const fmtUah = (n: number) => `${(n || 0).toLocaleString('uk-UA')} грн`
-const lineTotal = (l: BoatOrderLine) => Math.round((l.price * l.qty + Number.EPSILON) * 100) / 100
-const sumLines = (lines: BoatOrderLine[]) => Math.round(lines.reduce((s, l) => s + lineTotal(l), 0) * 100) / 100
+// Сума рядка/замовлення — з урахуванням додаткової знижки рядка (та сама формула, що на сервері).
+const lineTotal = (l: BoatOrderLine) => lineEffTotal(l)
+const sumLines = (lines: BoatOrderLine[]) => Math.round(lines.reduce((s, l) => s + lineEffTotal(l), 0) * 100) / 100
 
 export default function BoatOrderPage() {
   const navigate = useNavigate()
@@ -348,11 +350,25 @@ export default function BoatOrderPage() {
             <Stack key={l.id} direction="row" spacing={1} alignItems="center">
               <TextField label="Позиція" value={l.label} size="small" sx={{ flex: 1 }} onChange={(e) => patchLine(idx, { label: e.target.value })} />
               <TextField label="Ціна" type="number" value={l.price || ''} size="small" sx={{ width: 120 }} onChange={(e) => patchLine(idx, { price: Number(e.target.value) || 0 })} />
-              <TextField label="К-сть" type="number" value={l.qty} size="small" sx={{ width: 90 }} onChange={(e) => patchLine(idx, { qty: Math.max(1, Number(e.target.value) || 1) })} />
+              <TextField label="К-сть" type="number" value={l.qty} size="small" sx={{ width: 80 }} onChange={(e) => patchLine(idx, { qty: Math.max(1, Number(e.target.value) || 1) })} />
+              <TextField label="Дод. знижка" type="number" value={l.extraOff || ''} size="small" sx={{ width: 110 }}
+                onChange={(e) => patchLine(idx, { extraOff: Number(e.target.value) || null })} />
+              <TextField select value={l.extraOffKind || 'uah'} size="small" sx={{ width: 76 }}
+                onChange={(e) => patchLine(idx, { extraOffKind: e.target.value as 'pct' | 'uah' })}>
+                <MenuItem value="uah">грн</MenuItem>
+                <MenuItem value="pct">%</MenuItem>
+              </TextField>
               {discountPct(l.price, l.oldPrice) != null && (
                 <Chip size="small" color="error" label={`-${discountPct(l.price, l.oldPrice)}%`} />
               )}
-              <Typography variant="body2" sx={{ width: 110, textAlign: 'right' }}>{fmtUah(lineTotal(l))}</Typography>
+              <Box sx={{ width: 130, textAlign: 'right' }}>
+                {lineDiscountAmount(l) > 0 && (
+                  <Typography variant="caption" color="text.secondary" sx={{ textDecoration: 'line-through', display: 'block' }}>
+                    {fmtUah(Math.round(l.price * l.qty * 100) / 100)}
+                  </Typography>
+                )}
+                <Typography variant="body2">{fmtUah(lineTotal(l))}</Typography>
+              </Box>
               <IconButton size="small" color="error" onClick={() => dropLine(idx)}><DeleteIcon fontSize="small" /></IconButton>
             </Stack>
           ))}
