@@ -56,6 +56,10 @@ export interface BotTask {
   id: string
   kind: 'task' | 'reminder'
   title: string
+  // Привʼязка до дзвінка (для задач, створених на дошці «з дзвінка»)
+  phone?: string | null
+  clientName?: string | null
+  callId?: string | null
   assigneeUserId?: string | null
   assigneeName?: string | null
   creatorName?: string | null
@@ -139,7 +143,8 @@ export const callsService = {
   },
 
   // Задача, созданная владельцем прямо на канбане (без доставки в Telegram — для себя).
-  createTask: async (t: { title: string; dueAt?: string | null; assigneeName?: string }): Promise<BotTask | null> => {
+  // Опционально привязывается к звонку (phone/clientName/callId — кнопка «задача з дзвінка»).
+  createTask: async (t: { title: string; dueAt?: string | null; assigneeName?: string; phone?: string | null; clientName?: string | null; callId?: string | null }): Promise<BotTask | null> => {
     if (!db) return null
     try {
       const now = new Date().toISOString()
@@ -147,6 +152,9 @@ export const callsService = {
         id: `portal-${secureId(12)}`,
         kind: 'task',
         title: t.title,
+        phone: t.phone || null,
+        clientName: t.clientName || null,
+        callId: t.callId || null,
         assigneeName: t.assigneeName || 'Власник',
         creatorName: 'Власник',
         dueAt: t.dueAt || null,

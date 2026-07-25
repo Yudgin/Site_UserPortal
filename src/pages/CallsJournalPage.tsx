@@ -56,7 +56,7 @@ export default function CallsJournalPage() {
   const [results, setResults] = useState<CallResult[]>([])
   const [tasks, setTasks] = useState<BotTask[]>([])
   const [loading, setLoading] = useState(true)
-  const [view, setView] = useState<0 | 1>(0) // 0 = канбан, 1 = журнал
+  const [view, setView] = useState<0 | 1 | 2>(0) // 0 = мій канбан, 1 = дошка оператора, 2 = журнал
   const [q, setQ] = useState('')
   const [employeeFilter, setEmployeeFilter] = useState('')
   const [shown, setShown] = useState(PAGE)
@@ -148,9 +148,12 @@ export default function CallsJournalPage() {
   const taskKey = (t: BotTask) => `t-${t.id}`
   const filteredTasks = useMemo(() => {
     const query = q.trim().toLowerCase()
+    const qDigits = query.replace(/\D/g, '')
     return tasks.filter((t) => !query
       || t.title.toLowerCase().includes(query)
       || (t.assigneeName || '').toLowerCase().includes(query)
+      || (t.clientName || '').toLowerCase().includes(query)
+      || (qDigits.length >= 3 && (t.phone || '').replace(/\D/g, '').includes(qDigits))
       || (t.result || '').toLowerCase().includes(query)
       || (t.notes || []).some((n) => n.text.toLowerCase().includes(query)))
   }, [tasks, q])
@@ -174,19 +177,32 @@ export default function CallsJournalPage() {
     setNoteDraft((d) => ({ ...d, [taskKey(t)]: '' }))
   }
 
-  // Створення задачі власником прямо на дошці (без доставки в Telegram — «собі»).
+  // Створення задачі власником прямо на дошці: сама по собі («+» у колонці) або
+  // НА ОСНОВІ ДЗВІНКА (кнопка на картці — клієнт підвʼязується, на дзвінок пишеться дія).
   const [newTaskOpen, setNewTaskOpen] = useState(false)
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDue, setNewTaskDue] = useState('')
+  const [newTaskCtx, setNewTaskCtx] = useState<{ phone?: string; clientName?: string; callId?: string; row?: Row } | null>(null)
+  const openTaskDialog = (ctx: { phone?: string; clientName?: string; callId?: string; row?: Row } | null) => {
+    setNewTaskCtx(ctx); setNewTaskOpen(true)
+  }
   const createTask = async () => {
     if (!newTaskTitle.trim()) return
     const t = await callsService.createTask({
       title: newTaskTitle.trim(),
       dueAt: newTaskDue ? new Date(newTaskDue).toISOString() : null,
+      phone: newTaskCtx?.phone || null,
+      clientName: newTaskCtx?.clientName || null,
+      callId: newTaskCtx?.callId || null,
     })
     if (t) {
       setTasks((list) => [t, ...list])
-      setNewTaskOpen(false); setNewTaskTitle(''); setNewTaskDue('')
+      // На дзвінку лишаємо слід: дія «створено задачу» (видно історію обробки).
+      if (newTaskCtx?.row) {
+        const row = newTaskCtx.row
+        await saveWorkflow(row, { notes: [...row.notes, { text: `📝 Створено задачу: ${t.title}`, at: new Date().toISOString(), by: 'власник' }] })
+      }
+      setNewTaskOpen(false); setNewTaskTitle(''); setNewTaskDue(''); setNewTaskCtx(null)
     }
   }
   // «Виконано» — только для задач, созданных на портале (portal-*): задачи из бота
@@ -237,7 +253,8 @@ export default function CallsJournalPage() {
     )
   }
 
-  const renderCard = (r: Row, inKanban: boolean) => (
+  // operatorMode — спрощена дошка оператора: лише коментар і «Обробити», без архіву/задач.
+  const renderCard = (r: Row, inKanban: boolean, operatorMode = false) => (
     <Paper key={r.key} sx={{ p: 1.5, opacity: busyKey === r.key ? 0.6 : 1 }}>
       <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
         <Typography variant="caption" color="text.secondary">{fmtDT(r.at)}</Typography>
@@ -287,12 +304,19 @@ export default function CallsJournalPage() {
           <Tooltip title="Зберегти коментар">
             <span><IconButton size="small" color="info" disabled={!(noteDraft[r.key] || '').trim() || busyKey === r.key} onClick={() => addNote(r)}><NoteIcon fontSize="small" /></IconButton></span>
           </Tooltip>
-          {r.status === 'new' && (
-            <Tooltip title="В «Оброблені»">
-              <span><IconButton size="small" disabled={busyKey === r.key} onClick={() => moveTo(r, 'processed')}><FwdIcon fontSize="small" /></IconButton></span>
+          {!operatorMode && (
+            <Tooltip title="Створити задачу з дзвінка">
+              <span><IconButton size="small" color="primary" disabled={busyKey === r.key}
+                onClick={() => openTaskDialog({ phone: r.phone, clientName: r.clientName, callId: r.event?.callId, row: r })}>
+                <TaskIcon fontSize="small" /></IconButton></span>
             </Tooltip>
           )}
-          {r.status !== 'archived' ? (
+          {r.status === 'new' && (
+            <Tooltip title={operatorMode ? 'Обробити (коментар збережеться)' : 'В «Оброблені»'}>
+              <span><IconButton size="small" color={operatorMode ? 'success' : 'default'} disabled={busyKey === r.key} onClick={() => moveTo(r, 'processed')}><FwdIcon fontSize="small" /></IconButton></span>
+            </Tooltip>
+          )}
+          {!operatorMode && (r.status !== 'archived' ? (
             <Tooltip title="В архів (з коментарем, якщо набрано)">
               <span><IconButton size="small" color="success" disabled={busyKey === r.key} onClick={() => moveTo(r, 'archived')}><ArchiveIcon fontSize="small" /></IconButton></span>
             </Tooltip>
@@ -300,7 +324,7 @@ export default function CallsJournalPage() {
             <Tooltip title="Повернути в «Оброблені»">
               <span><IconButton size="small" disabled={busyKey === r.key} onClick={() => moveTo(r, 'processed')}><UnarchiveIcon fontSize="small" /></IconButton></span>
             </Tooltip>
-          )}
+          ))}
         </Stack>
       )}
     </Paper>
@@ -315,6 +339,10 @@ export default function CallsJournalPage() {
         <Chip size="small" variant="outlined" label={t.kind === 'reminder' ? 'нагадування' : 'завдання'} />
       </Stack>
       <Stack direction="row" spacing={1} sx={{ mt: 0.5 }} alignItems="center" flexWrap="wrap" useFlexGap>
+        {(t.clientName || t.phone) && (
+          <Chip size="small" variant="outlined" color="info" icon={<CallIcon />}
+            label={`${t.clientName ? `${t.clientName} · ` : ''}${t.phone || ''}`} />
+        )}
         {t.assigneeName && <Chip size="small" label={t.assigneeName} />}
         <Typography variant="caption" color="text.secondary">
           {t.creatorName ? `від: ${t.creatorName} · ` : ''}{fmtDT(t.createdAt)}
@@ -373,7 +401,8 @@ export default function CallsJournalPage() {
 
       <Paper sx={{ mb: 2 }}>
         <Tabs value={view} onChange={(_, v) => setView(v)} variant="fullWidth">
-          <Tab label={`Канбан (${rows.filter((r) => r.status !== 'archived').length + tasks.filter((t) => t.workflowStatus !== 'archived').length} в роботі)`} />
+          <Tab label={`Мій канбан (${rows.filter((r) => r.status !== 'archived').length + tasks.filter((t) => t.workflowStatus !== 'archived').length})`} />
+          <Tab label={`Дошка оператора (${rows.filter((r) => r.status === 'new').length})`} />
           <Tab label={`Журнал (${rows.length})`} />
         </Tabs>
       </Paper>
@@ -463,6 +492,29 @@ export default function CallsJournalPage() {
             )
           })()}
         </Stack>
+      ) : view === 1 ? (
+        /* ---- ДОШКА ОПЕРАТОРА: лише необроблені/оброблені, без архіву і задач ---- */
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="stretch">
+          {([
+            { key: 'new' as const, title: 'Необроблені', hint: 'зафіксуйте результат розмови і обробіть' },
+            { key: 'processed' as const, title: 'Оброблені', hint: 'з коментарем — далі їх переглядає власник' },
+          ]).map((col) => {
+            const items = filtered.filter((r) => r.status === col.key)
+            return (
+              <Box key={col.key} sx={{ flex: 1, minWidth: 0 }}>
+                <Paper sx={{ p: 1.5, bgcolor: 'action.hover', mb: 1 }}>
+                  <Typography variant="subtitle2">{col.title} ({items.length})</Typography>
+                  <Typography variant="caption" color="text.secondary">{col.hint}</Typography>
+                </Paper>
+                <Stack spacing={1} sx={{ maxHeight: '70vh', overflowY: 'auto', pr: 0.5 }}>
+                  {items.length === 0
+                    ? <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>порожньо</Typography>
+                    : items.slice(0, 200).map((r) => renderCard(r, true, true))}
+                </Stack>
+              </Box>
+            )
+          })}
+        </Stack>
       ) : (
         /* ---- ЖУРНАЛ ---- */
         <>
@@ -479,9 +531,13 @@ export default function CallsJournalPage() {
 
       {/* Діалог «Нова задача» (створюється власником на дошці; в Telegram не доставляється) */}
       <Dialog open={newTaskOpen} onClose={() => setNewTaskOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>Нова задача</DialogTitle>
+        <DialogTitle>{newTaskCtx?.phone || newTaskCtx?.clientName ? 'Задача з дзвінка' : 'Нова задача'}</DialogTitle>
         <DialogContent dividers>
           <Stack spacing={2} sx={{ pt: 1 }}>
+            {(newTaskCtx?.phone || newTaskCtx?.clientName) && (
+              <Chip icon={<CallIcon />} color="info" variant="outlined"
+                label={`Клієнт: ${newTaskCtx?.clientName ? `${newTaskCtx.clientName} · ` : ''}${newTaskCtx?.phone || ''}`} />
+            )}
             <TextField label="Що зробити" value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)}
               size="small" fullWidth autoFocus multiline
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createTask() } }} />
