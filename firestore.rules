@@ -257,6 +257,12 @@ service cloud.firestore {
       allow update: if isPriceAdmin();
       allow create, delete: if false;
     }
+    // Задачи операторского бота (зеркало): создаёт backend, владелец двигает по канбану.
+    match /botTasks/{id} {
+      allow read, list: if isPriceAdmin();
+      allow update: if isPriceAdmin();
+      allow create, delete: if false;
+    }
 
     // Deny all other access by default
     match /{document=**} {

@@ -13,11 +13,12 @@ import {
 import {
   Home as HomeIcon, Refresh as RefreshIcon, Call as CallIcon, CheckCircle as ReviewedIcon,
   Archive as ArchiveIcon, Unarchive as UnarchiveIcon, AddComment as NoteIcon, ArrowForward as FwdIcon,
+  AssignmentTurnedIn as TaskDoneIcon, Assignment as TaskIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import {
-  callsService, type CallEvent, type CallResult, type CallNote, type CallWorkflowStatus,
+  callsService, type BotTask, type CallEvent, type CallResult, type CallNote, type CallWorkflowStatus,
 } from '@/api/callsService'
 
 const PAGE = 50
@@ -53,6 +54,7 @@ export default function CallsJournalPage() {
   const { user } = useAuthStore()
   const [events, setEvents] = useState<CallEvent[]>([])
   const [results, setResults] = useState<CallResult[]>([])
+  const [tasks, setTasks] = useState<BotTask[]>([])
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState<0 | 1>(0) // 0 = канбан, 1 = журнал
   const [q, setQ] = useState('')
@@ -63,8 +65,8 @@ export default function CallsJournalPage() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    const [e, r] = await Promise.all([callsService.listEvents(), callsService.listResults()])
-    setEvents(e); setResults(r)
+    const [e, r, t] = await Promise.all([callsService.listEvents(), callsService.listResults(), callsService.listTasks()])
+    setEvents(e); setResults(r); setTasks(t)
     setLoading(false)
   }, [])
   useEffect(() => { load() }, [load])
@@ -141,6 +143,36 @@ export default function CallsJournalPage() {
           || (r.event?.line || '').toLowerCase().includes(query)
       })
   }, [rows, q, employeeFilter])
+
+  // ---- Задачі бота (окремі колонки канбану) ----
+  const taskKey = (t: BotTask) => `t-${t.id}`
+  const filteredTasks = useMemo(() => {
+    const query = q.trim().toLowerCase()
+    return tasks.filter((t) => !query
+      || t.title.toLowerCase().includes(query)
+      || (t.assigneeName || '').toLowerCase().includes(query)
+      || (t.result || '').toLowerCase().includes(query)
+      || (t.notes || []).some((n) => n.text.toLowerCase().includes(query)))
+  }, [tasks, q])
+
+  const saveTaskWorkflow = async (t: BotTask, patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[] }) => {
+    setBusyKey(taskKey(t))
+    const ok = await callsService.updateTask(t.id, patch)
+    if (ok) setTasks((list) => list.map((x) => (x.id === t.id ? { ...x, ...patch } : x)))
+    setBusyKey('')
+  }
+  const taskMove = async (t: BotTask, status: CallWorkflowStatus) => {
+    const draft = (noteDraft[taskKey(t)] || '').trim()
+    const notes = draft ? [...(t.notes || []), { text: draft, at: new Date().toISOString(), by: 'власник' }] : t.notes || []
+    await saveTaskWorkflow(t, { workflowStatus: status, ...(draft ? { notes } : {}) })
+    if (draft) setNoteDraft((d) => ({ ...d, [taskKey(t)]: '' }))
+  }
+  const taskAddNote = async (t: BotTask) => {
+    const draft = (noteDraft[taskKey(t)] || '').trim()
+    if (!draft) return
+    await saveTaskWorkflow(t, { notes: [...(t.notes || []), { text: draft, at: new Date().toISOString(), by: 'власник' }] })
+    setNoteDraft((d) => ({ ...d, [taskKey(t)]: '' }))
+  }
 
   // Локально применить патч воркфлоу к источнику строки (без перезагрузки).
   const applyLocal = (row: Row, patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[] }) => {
@@ -248,6 +280,57 @@ export default function CallsJournalPage() {
     </Paper>
   )
 
+  // Картка задачі бота (завдання/нагадування): виконавець, строк, результат, дії власника.
+  const renderTaskCard = (t: BotTask) => (
+    <Paper key={t.id} sx={{ p: 1.5, opacity: busyKey === taskKey(t) ? 0.6 : 1 }}>
+      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+        {t.status === 'done' ? <TaskDoneIcon fontSize="small" color="success" /> : <TaskIcon fontSize="small" color="action" />}
+        <Typography variant="subtitle2" sx={{ flexGrow: 1 }}>{t.title}</Typography>
+        <Chip size="small" variant="outlined" label={t.kind === 'reminder' ? 'нагадування' : 'завдання'} />
+      </Stack>
+      <Stack direction="row" spacing={1} sx={{ mt: 0.5 }} alignItems="center" flexWrap="wrap" useFlexGap>
+        {t.assigneeName && <Chip size="small" label={t.assigneeName} />}
+        <Typography variant="caption" color="text.secondary">
+          {t.creatorName ? `від: ${t.creatorName} · ` : ''}{fmtDT(t.createdAt)}
+        </Typography>
+        {t.dueAt && (
+          <Chip size="small" variant="outlined"
+            color={t.status === 'open' && t.dueAt < new Date().toISOString() ? 'error' : 'default'}
+            label={`строк: ${fmtDT(t.dueAt)}`} />
+        )}
+      </Stack>
+      {t.status === 'done' && (
+        <Box sx={{ mt: 1, pl: 1.5, borderLeft: 2, borderColor: 'success.main' }}>
+          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{t.result || 'виконано'}</Typography>
+          <Typography variant="caption" color="text.secondary">{t.doneByName || 'виконавець'} · {fmtDT(t.doneAt)}</Typography>
+        </Box>
+      )}
+      {(t.notes || []).map((n, i) => (
+        <Box key={i} sx={{ mt: 1, pl: 1.5, borderLeft: 2, borderColor: 'info.main' }}>
+          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{n.text}</Typography>
+          <Typography variant="caption" color="text.secondary">{n.by || 'власник'} · {fmtDT(n.at)}</Typography>
+        </Box>
+      ))}
+      <Stack direction="row" spacing={1} sx={{ mt: 1.5 }} alignItems="center">
+        <TextField size="small" fullWidth placeholder="Додати дію / коментар…"
+          value={noteDraft[taskKey(t)] || ''}
+          onChange={(e) => setNoteDraft((d) => ({ ...d, [taskKey(t)]: e.target.value }))} />
+        <Tooltip title="Зберегти коментар">
+          <span><IconButton size="small" color="info" disabled={!(noteDraft[taskKey(t)] || '').trim() || busyKey === taskKey(t)} onClick={() => taskAddNote(t)}><NoteIcon fontSize="small" /></IconButton></span>
+        </Tooltip>
+        {t.workflowStatus !== 'archived' ? (
+          <Tooltip title="В архів (з коментарем, якщо набрано)">
+            <span><IconButton size="small" color="success" disabled={busyKey === taskKey(t)} onClick={() => taskMove(t, 'archived')}><ArchiveIcon fontSize="small" /></IconButton></span>
+          </Tooltip>
+        ) : (
+          <Tooltip title="Повернути">
+            <span><IconButton size="small" disabled={busyKey === taskKey(t)} onClick={() => taskMove(t, 'processed')}><UnarchiveIcon fontSize="small" /></IconButton></span>
+          </Tooltip>
+        )}
+      </Stack>
+    </Paper>
+  )
+
   return (
     <Container maxWidth="lg" sx={{ py: 3 }}>
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
@@ -259,7 +342,7 @@ export default function CallsJournalPage() {
 
       <Paper sx={{ mb: 2 }}>
         <Tabs value={view} onChange={(_, v) => setView(v)} variant="fullWidth">
-          <Tab label={`Канбан (${rows.filter((r) => r.status !== 'archived').length} в роботі)`} />
+          <Tab label={`Канбан (${rows.filter((r) => r.status !== 'archived').length + tasks.filter((t) => t.workflowStatus !== 'archived').length} в роботі)`} />
           <Tab label={`Журнал (${rows.length})`} />
         </Tabs>
       </Paper>
@@ -303,6 +386,44 @@ export default function CallsJournalPage() {
               </Box>
             )
           })}
+
+          {/* ---- Колонки задач (зеркало задач/нагадувань операторського бота) ---- */}
+          {(() => {
+            const open = filteredTasks.filter((t) => t.status === 'open' && t.workflowStatus !== 'archived')
+            const done = filteredTasks.filter((t) => t.status === 'done' && t.workflowStatus !== 'archived')
+            const archivedCount = filteredTasks.filter((t) => t.workflowStatus === 'archived').length
+            return (
+              <>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Paper sx={{ p: 1.5, bgcolor: 'action.hover', mb: 1 }}>
+                    <Typography variant="subtitle2">Задачі в роботі ({open.length})</Typography>
+                    <Typography variant="caption" color="text.secondary">завдання/нагадування з бота</Typography>
+                  </Paper>
+                  <Stack spacing={1} sx={{ maxHeight: '70vh', overflowY: 'auto', pr: 0.5 }}>
+                    {open.length === 0
+                      ? <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>порожньо</Typography>
+                      : open.map(renderTaskCard)}
+                  </Stack>
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Paper sx={{ p: 1.5, bgcolor: 'action.hover', mb: 1 }}>
+                    <Typography variant="subtitle2">Задачі виконані ({done.length})</Typography>
+                    <Typography variant="caption" color="text.secondary">перегляньте результат і в архів</Typography>
+                  </Paper>
+                  <Stack spacing={1} sx={{ maxHeight: '70vh', overflowY: 'auto', pr: 0.5 }}>
+                    {done.length === 0
+                      ? <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>порожньо</Typography>
+                      : done.map(renderTaskCard)}
+                    {archivedCount > 0 && (
+                      <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>
+                        в архіві задач: {archivedCount}
+                      </Typography>
+                    )}
+                  </Stack>
+                </Box>
+              </>
+            )
+          })()}
         </Stack>
       ) : (
         /* ---- ЖУРНАЛ ---- */

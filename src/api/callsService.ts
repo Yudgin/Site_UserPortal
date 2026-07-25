@@ -49,6 +49,26 @@ export interface CallResult {
   notes?: CallNote[]
 }
 
+// Задача/напоминание операторского бота (зеркало botTasks). status: open → done;
+// после done владелец просматривает результат и архивирует (workflowStatus='archived').
+export interface BotTask {
+  id: string
+  kind: 'task' | 'reminder'
+  title: string
+  assigneeUserId?: string | null
+  assigneeName?: string | null
+  creatorName?: string | null
+  dueAt?: string | null
+  status: 'open' | 'done'
+  result?: string | null
+  doneAt?: string | null
+  doneByName?: string | null
+  createdAt: string
+  updatedAt?: string
+  workflowStatus?: CallWorkflowStatus | null
+  notes?: CallNote[]
+}
+
 export const callsService = {
   listEvents: async (max = 800): Promise<CallEvent[]> => {
     if (!db) return []
@@ -71,6 +91,17 @@ export const callsService = {
     }
   },
 
+  listTasks: async (max = 500): Promise<BotTask[]> => {
+    if (!db) return []
+    try {
+      const snap = await getDocs(query(collection(db, 'botTasks'), orderBy('createdAt', 'desc'), limit(max)))
+      return snap.docs.map((d) => d.data() as BotTask)
+    } catch (e) {
+      console.error('botTasks list:', e)
+      return []
+    }
+  },
+
   // Канбан: обновление воркфлоу-полей (создание/удаление карточек — только backend).
   updateEvent: async (callId: string, patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[] }): Promise<boolean> => {
     if (!db) return false
@@ -89,6 +120,16 @@ export const callsService = {
       return true
     } catch (e) {
       console.error('callResults update:', e)
+      return false
+    }
+  },
+  updateTask: async (id: string, patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[] }): Promise<boolean> => {
+    if (!db) return false
+    try {
+      await updateDoc(doc(db, 'botTasks', id), patch)
+      return true
+    } catch (e) {
+      console.error('botTasks update:', e)
       return false
     }
   },

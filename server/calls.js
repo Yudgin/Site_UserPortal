@@ -112,6 +112,37 @@ export function registerCalls(app, deps) {
     }
   })
 
+  // Задача/напоминание из операторского бота (создание, правка, выполнение с результатом).
+  // Канбан портала показывает их отдельными колонками; повторные события merge-ятся по id.
+  app.post('/api/calls/task', async (req, res) => {
+    if (!guard(req, res)) return
+    try {
+      const b = req.body || {}
+      const id = String(b.id || '')
+      if (!id || !b.title) return res.status(400).json({ ok: false, error: 'id і title обовʼязкові' })
+      await adminDb.collection('botTasks').doc(id).set({
+        id,
+        kind: b.kind || 'task',
+        title: String(b.title),
+        assigneeUserId: b.assigneeUserId || null,
+        assigneeName: b.assigneeName || null,
+        creatorName: b.creatorName || null,
+        dueAt: b.dueAt || null,
+        status: b.status || 'open',
+        result: b.result || null,
+        doneAt: b.doneAt || null,
+        doneByName: b.doneByName || null,
+        createdAt: b.createdAt || nowIso(),
+        updatedAt: b.updatedAt || nowIso(),
+        mirroredAt: nowIso(),
+      }, { merge: true })
+      res.json({ ok: true })
+    } catch (e) {
+      console.error('calls/task:', e.message)
+      res.status(500).json({ ok: false })
+    }
+  })
+
   // Результат разговора (резюме оператора; при «Принято» руководителем приходит повторно
   // с reviewedAt/reviewedByName — merge обновляет карточку).
   app.post('/api/calls/result', async (req, res) => {
