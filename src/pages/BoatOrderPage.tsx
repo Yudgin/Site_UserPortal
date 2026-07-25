@@ -23,7 +23,7 @@ import { boatModelService, boatOptionService, dropshipperService } from '@/api/b
 import NpAddressPicker from '@/components/NpAddressPicker'
 import type { NpAddress } from '@/types/npTemplate'
 import {
-  BOAT_ORDER_STATUSES, BOAT_ORDER_STATUS_LABELS, BOAT_OPTION_KIND_LABELS, optionFitsModel,
+  BOAT_ORDER_STATUSES, BOAT_ORDER_STATUS_LABELS, BOAT_OPTION_KIND_LABELS, optionFitsModel, discountPct,
   type BoatModel, type BoatOption, type BoatOrder, type BoatOrderLine, type BoatOrderStatus, type Dropshipper,
 } from '@/types/boats'
 import { secureId } from '@/utils/id'
@@ -85,17 +85,17 @@ export default function BoatOrderPage() {
   const buildLines = (): BoatOrderLine[] => {
     if (!order) return []
     const lines: BoatOrderLine[] = []
-    if (model && row) lines.push({ id: secureId(8), label: `Кораблик ${model.name} ${row.name}${order.color ? ` (${order.color})` : ''}`, price: row.basePrice, qty: 1 })
+    if (model && row) lines.push({ id: secureId(8), label: `Кораблик ${model.name} ${row.name}${order.color ? ` (${order.color})` : ''}`, price: row.basePrice, oldPrice: row.oldPrice || null, qty: 1 })
     const pushOpt = (oid?: string | null) => {
       const o = options.find((x) => x.id === oid)
-      if (o) lines.push({ id: secureId(8), label: `${BOAT_OPTION_KIND_LABELS[o.kind]}: ${o.name}`, price: o.price, qty: 1 })
+      if (o) lines.push({ id: secureId(8), label: `${BOAT_OPTION_KIND_LABELS[o.kind]}: ${o.name}`, price: o.price, oldPrice: o.oldPrice || null, qty: 1 })
     }
     if (order.needDepthGauge) pushOpt(order.depthGaugeOptionId)
     pushOpt(order.bagOptionId)
     pushOpt(order.echoOptionId)
     for (const a of order.accessories || []) {
       const o = options.find((x) => x.id === a.optionId)
-      if (o) lines.push({ id: secureId(8), label: `${BOAT_OPTION_KIND_LABELS[o.kind]}: ${o.name}`, price: o.price, qty: a.qty || 1 })
+      if (o) lines.push({ id: secureId(8), label: `${BOAT_OPTION_KIND_LABELS[o.kind]}: ${o.name}`, price: o.price, oldPrice: o.oldPrice || null, qty: a.qty || 1 })
     }
     return lines
   }
@@ -349,6 +349,9 @@ export default function BoatOrderPage() {
               <TextField label="Позиція" value={l.label} size="small" sx={{ flex: 1 }} onChange={(e) => patchLine(idx, { label: e.target.value })} />
               <TextField label="Ціна" type="number" value={l.price || ''} size="small" sx={{ width: 120 }} onChange={(e) => patchLine(idx, { price: Number(e.target.value) || 0 })} />
               <TextField label="К-сть" type="number" value={l.qty} size="small" sx={{ width: 90 }} onChange={(e) => patchLine(idx, { qty: Math.max(1, Number(e.target.value) || 1) })} />
+              {discountPct(l.price, l.oldPrice) != null && (
+                <Chip size="small" color="error" label={`-${discountPct(l.price, l.oldPrice)}%`} />
+              )}
               <Typography variant="body2" sx={{ width: 110, textAlign: 'right' }}>{fmtUah(lineTotal(l))}</Typography>
               <IconButton size="small" color="error" onClick={() => dropLine(idx)}><DeleteIcon fontSize="small" /></IconButton>
             </Stack>

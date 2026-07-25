@@ -16,7 +16,7 @@ import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import { boatModelService, boatOptionService, dropshipperService } from '@/api/boatCatalogService'
 import {
-  BOAT_OPTION_KINDS, BOAT_OPTION_KIND_LABELS,
+  BOAT_OPTION_KINDS, BOAT_OPTION_KIND_LABELS, discountPct,
   type BoatModel, type BoatModelRow, type BoatOption, type BoatOptionKind, type Dropshipper,
 } from '@/types/boats'
 import { secureId } from '@/utils/id'
@@ -145,7 +145,18 @@ export default function BoatCatalogPage() {
                 <IconButton size="small" color="error" onClick={() => removeEntity(boatModelService, m.id, `модель «${m.name}»`)}><DeleteIcon fontSize="small" /></IconButton>
               </Stack>
               <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mt: 1 }}>
-                {(m.rows || []).map((r) => <Chip key={r.id} size="small" label={`${r.name} · ${fmtUah(r.basePrice)}`} />)}
+                {(m.rows || []).map((r) => (
+                  <Chip key={r.id} size="small" label={
+                    <span>
+                      {r.name} ·{' '}
+                      {discountPct(r.basePrice, r.oldPrice) != null && (
+                        <s style={{ opacity: 0.6, marginRight: 4 }}>{fmtUah(r.oldPrice || 0)}</s>
+                      )}
+                      {fmtUah(r.basePrice)}
+                      {discountPct(r.basePrice, r.oldPrice) != null && ` (-${discountPct(r.basePrice, r.oldPrice)}%)`}
+                    </span>
+                  } />
+                ))}
               </Stack>
               {(m.colors || []).length > 0 && (
                 <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mt: 1 }}>
@@ -174,6 +185,12 @@ export default function BoatCatalogPage() {
               <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
                 <Chip size="small" label={BOAT_OPTION_KIND_LABELS[o.kind]} />
                 <Typography variant="subtitle2" sx={{ flexGrow: 1 }}>{o.name}{!o.active && ' (неактивна)'}</Typography>
+                {discountPct(o.price, o.oldPrice) != null && (
+                  <>
+                    <Typography variant="body2" color="text.secondary" sx={{ textDecoration: 'line-through' }}>{fmtUah(o.oldPrice || 0)}</Typography>
+                    <Chip size="small" color="error" label={`-${discountPct(o.price, o.oldPrice)}%`} />
+                  </>
+                )}
                 <Typography variant="subtitle2">{fmtUah(o.price)}</Typography>
                 <IconButton size="small" onClick={() => setEditOption({ ...o, compatibleModelIds: [...(o.compatibleModelIds || [])] })}><EditIcon fontSize="small" /></IconButton>
                 <IconButton size="small" color="error" onClick={() => removeEntity(boatOptionService, o.id, `опцію «${o.name}»`)}><DeleteIcon fontSize="small" /></IconButton>
@@ -228,7 +245,9 @@ export default function BoatCatalogPage() {
               {(editModel.rows || []).map((r, idx) => (
                 <Stack key={r.id} direction="row" spacing={1} alignItems="center">
                   <TextField label="Рік / назва ряду" value={r.name} onChange={(e) => patchRow(idx, { name: e.target.value })} size="small" sx={{ flex: 1 }} />
-                  <TextField label="Базова ціна, грн" type="number" value={r.basePrice || ''} onChange={(e) => patchRow(idx, { basePrice: Number(e.target.value) || 0 })} size="small" sx={{ width: 160 }} />
+                  <TextField label="Ціна (зі знижкою)" type="number" value={r.basePrice || ''} onChange={(e) => patchRow(idx, { basePrice: Number(e.target.value) || 0 })} size="small" sx={{ width: 140 }} />
+                  <TextField label="Без знижки" type="number" value={r.oldPrice || ''} onChange={(e) => patchRow(idx, { oldPrice: Number(e.target.value) || null })} size="small" sx={{ width: 130 }}
+                    helperText={discountPct(r.basePrice, r.oldPrice) ? `-${discountPct(r.basePrice, r.oldPrice)}%` : ' '} />
                   <IconButton size="small" color="error" onClick={() => dropRow(idx)}><DeleteIcon fontSize="small" /></IconButton>
                 </Stack>
               ))}
@@ -253,7 +272,11 @@ export default function BoatCatalogPage() {
                 {BOAT_OPTION_KINDS.map((k) => <MenuItem key={k} value={k}>{BOAT_OPTION_KIND_LABELS[k]}</MenuItem>)}
               </TextField>
               <TextField label="Назва" value={editOption.name || ''} onChange={(e) => setEditOption({ ...editOption, name: e.target.value })} size="small" fullWidth autoFocus />
-              <TextField label="Ціна, грн" type="number" value={editOption.price || ''} onChange={(e) => setEditOption({ ...editOption, price: Number(e.target.value) || 0 })} size="small" fullWidth />
+              <Stack direction="row" spacing={1}>
+                <TextField label="Ціна (зі знижкою), грн" type="number" value={editOption.price || ''} onChange={(e) => setEditOption({ ...editOption, price: Number(e.target.value) || 0 })} size="small" fullWidth />
+                <TextField label="Без знижки, грн" type="number" value={editOption.oldPrice || ''} onChange={(e) => setEditOption({ ...editOption, oldPrice: Number(e.target.value) || null })} size="small" fullWidth
+                  helperText={discountPct(editOption.price || 0, editOption.oldPrice) ? `знижка -${discountPct(editOption.price || 0, editOption.oldPrice)}%` : 'порожньо = без знижки'} />
+              </Stack>
               <FormControlLabel
                 control={<Switch checked={!editOption.compatibleModelIds?.length} onChange={(e) => setEditOption({ ...editOption, compatibleModelIds: e.target.checked ? [] : models.map((m) => m.id).slice(0, 1) })} />}
                 label="Сумісна з усіма моделями"

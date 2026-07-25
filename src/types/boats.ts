@@ -9,7 +9,8 @@
 export interface BoatModelRow {
   id: string
   name: string // напр. «2024»
-  basePrice: number // базова ціна кораблика цього ряду, грн
+  basePrice: number // ФАКТИЧНА ціна кораблика (вже зі знижкою, якщо вона є), грн
+  oldPrice?: number | null // ціна БЕЗ знижки — для красивого показу вигоди (закреслена)
 }
 
 // Модель кораблика. Кольори — на рівні моделі (доступні для всіх рядів).
@@ -43,7 +44,8 @@ export interface BoatOption {
   id: string
   kind: BoatOptionKind
   name: string
-  price: number
+  price: number // фактична ціна (зі знижкою)
+  oldPrice?: number | null // ціна без знижки (для показу вигоди)
   compatibleModelIds?: string[]
   active: boolean
   createdAt: string
@@ -99,9 +101,14 @@ export const BOAT_ORDER_STATUS_LABELS: Record<BoatOrderStatus, string> = {
 export interface BoatOrderLine {
   id: string
   label: string
-  price: number
+  price: number // фактична ціна (зі знижкою)
+  oldPrice?: number | null // ціна без знижки з каталогу — щоб показати знижку в замовленні
   qty: number
 }
+
+// Відсоток знижки для показу («-12%»); null — знижки немає.
+export const discountPct = (price: number, oldPrice?: number | null): number | null =>
+  oldPrice && oldPrice > price && price >= 0 ? Math.round((1 - price / oldPrice) * 100) : null
 
 export interface BoatOrderStatusChange {
   status: BoatOrderStatus
