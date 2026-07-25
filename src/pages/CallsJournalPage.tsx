@@ -8,12 +8,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, CircularProgress, Chip, Stack, TextField, MenuItem,
-  Tabs, Tab, IconButton, Tooltip,
+  Tabs, Tab, IconButton, Tooltip, Dialog, DialogTitle, DialogContent, DialogActions,
 } from '@mui/material'
 import {
   Home as HomeIcon, Refresh as RefreshIcon, Call as CallIcon, CheckCircle as ReviewedIcon,
   Archive as ArchiveIcon, Unarchive as UnarchiveIcon, AddComment as NoteIcon, ArrowForward as FwdIcon,
-  AssignmentTurnedIn as TaskDoneIcon, Assignment as TaskIcon,
+  AssignmentTurnedIn as TaskDoneIcon, Assignment as TaskIcon, Add as AddIcon, Done as DoneIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
@@ -155,7 +155,7 @@ export default function CallsJournalPage() {
       || (t.notes || []).some((n) => n.text.toLowerCase().includes(query)))
   }, [tasks, q])
 
-  const saveTaskWorkflow = async (t: BotTask, patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[] }) => {
+  const saveTaskWorkflow = async (t: BotTask, patch: Parameters<typeof callsService.updateTask>[1]) => {
     setBusyKey(taskKey(t))
     const ok = await callsService.updateTask(t.id, patch)
     if (ok) setTasks((list) => list.map((x) => (x.id === t.id ? { ...x, ...patch } : x)))
@@ -172,6 +172,32 @@ export default function CallsJournalPage() {
     if (!draft) return
     await saveTaskWorkflow(t, { notes: [...(t.notes || []), { text: draft, at: new Date().toISOString(), by: 'власник' }] })
     setNoteDraft((d) => ({ ...d, [taskKey(t)]: '' }))
+  }
+
+  // Створення задачі власником прямо на дошці (без доставки в Telegram — «собі»).
+  const [newTaskOpen, setNewTaskOpen] = useState(false)
+  const [newTaskTitle, setNewTaskTitle] = useState('')
+  const [newTaskDue, setNewTaskDue] = useState('')
+  const createTask = async () => {
+    if (!newTaskTitle.trim()) return
+    const t = await callsService.createTask({
+      title: newTaskTitle.trim(),
+      dueAt: newTaskDue ? new Date(newTaskDue).toISOString() : null,
+    })
+    if (t) {
+      setTasks((list) => [t, ...list])
+      setNewTaskOpen(false); setNewTaskTitle(''); setNewTaskDue('')
+    }
+  }
+  // «Виконано» — только для задач, созданных на портале (portal-*): задачи из бота
+  // выполняются в Telegram, иначе статусы разъедутся.
+  const taskMarkDone = async (t: BotTask) => {
+    const draft = (noteDraft[taskKey(t)] || '').trim()
+    await saveTaskWorkflow(t, {
+      status: 'done', result: draft || 'виконано',
+      doneAt: new Date().toISOString(), doneByName: 'Власник',
+    })
+    if (draft) setNoteDraft((d) => ({ ...d, [taskKey(t)]: '' }))
   }
 
   // Локально применить патч воркфлоу к источнику строки (без перезагрузки).
@@ -318,6 +344,11 @@ export default function CallsJournalPage() {
         <Tooltip title="Зберегти коментар">
           <span><IconButton size="small" color="info" disabled={!(noteDraft[taskKey(t)] || '').trim() || busyKey === taskKey(t)} onClick={() => taskAddNote(t)}><NoteIcon fontSize="small" /></IconButton></span>
         </Tooltip>
+        {t.status === 'open' && t.id.startsWith('portal-') && (
+          <Tooltip title="Виконано (текст у полі стане результатом)">
+            <span><IconButton size="small" color="success" disabled={busyKey === taskKey(t)} onClick={() => taskMarkDone(t)}><DoneIcon fontSize="small" /></IconButton></span>
+          </Tooltip>
+        )}
         {t.workflowStatus !== 'archived' ? (
           <Tooltip title="В архів (з коментарем, якщо набрано)">
             <span><IconButton size="small" color="success" disabled={busyKey === taskKey(t)} onClick={() => taskMove(t, 'archived')}><ArchiveIcon fontSize="small" /></IconButton></span>
@@ -396,8 +427,15 @@ export default function CallsJournalPage() {
               <>
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Paper sx={{ p: 1.5, bgcolor: 'action.hover', mb: 1 }}>
-                    <Typography variant="subtitle2">Задачі в роботі ({open.length})</Typography>
-                    <Typography variant="caption" color="text.secondary">завдання/нагадування з бота</Typography>
+                    <Stack direction="row" alignItems="center">
+                      <Box sx={{ flexGrow: 1 }}>
+                        <Typography variant="subtitle2">Задачі в роботі ({open.length})</Typography>
+                        <Typography variant="caption" color="text.secondary">з бота та створені тут</Typography>
+                      </Box>
+                      <Tooltip title="Нова задача (собі)">
+                        <IconButton size="small" color="primary" onClick={() => setNewTaskOpen(true)}><AddIcon /></IconButton>
+                      </Tooltip>
+                    </Stack>
                   </Paper>
                   <Stack spacing={1} sx={{ maxHeight: '70vh', overflowY: 'auto', pr: 0.5 }}>
                     {open.length === 0
@@ -438,6 +476,28 @@ export default function CallsJournalPage() {
           )}
         </>
       )}
+
+      {/* Діалог «Нова задача» (створюється власником на дошці; в Telegram не доставляється) */}
+      <Dialog open={newTaskOpen} onClose={() => setNewTaskOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Нова задача</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <TextField label="Що зробити" value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)}
+              size="small" fullWidth autoFocus multiline
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createTask() } }} />
+            <TextField label="Строк (необовʼязково)" type="datetime-local" value={newTaskDue}
+              onChange={(e) => setNewTaskDue(e.target.value)} size="small" fullWidth InputLabelProps={{ shrink: true }} />
+            <Typography variant="caption" color="text.secondary">
+              Задача зʼявиться в колонці «Задачі в роботі»; закриєте її кнопкою «Виконано» на картці.
+              Задачі для операторів із доставкою в Telegram — створюйте поки що з карток дзвінків у боті.
+            </Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNewTaskOpen(false)}>Скасувати</Button>
+          <Button variant="contained" onClick={createTask} disabled={!newTaskTitle.trim()}>Створити</Button>
+        </DialogActions>
+      </Dialog>
     </Container>
   )
 }

@@ -1,7 +1,8 @@
 // Журнал дзвінків (читання, власник): події дзвінків + результати розмов операторів.
 // Пише тільки backend (зеркало операторского бота) — див. server/calls.js.
 import { db } from './firebase'
-import { collection, doc, getDocs, limit, orderBy, query, updateDoc } from 'firebase/firestore'
+import { collection, doc, getDocs, limit, orderBy, query, setDoc, updateDoc } from 'firebase/firestore'
+import { secureId } from '@/utils/id'
 
 // Рабочий процесс канбана «Дзвінки»: нові (без резюме) → оброблені (оператор лишив
 // коментар/резюме — черга власника) → архів (власник додав дію і закрив).
@@ -123,7 +124,10 @@ export const callsService = {
       return false
     }
   },
-  updateTask: async (id: string, patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[] }): Promise<boolean> => {
+  updateTask: async (
+    id: string,
+    patch: { workflowStatus?: CallWorkflowStatus; notes?: CallNote[]; status?: 'open' | 'done'; result?: string | null; doneAt?: string | null; doneByName?: string | null }
+  ): Promise<boolean> => {
     if (!db) return false
     try {
       await updateDoc(doc(db, 'botTasks', id), patch)
@@ -131,6 +135,30 @@ export const callsService = {
     } catch (e) {
       console.error('botTasks update:', e)
       return false
+    }
+  },
+
+  // Задача, созданная владельцем прямо на канбане (без доставки в Telegram — для себя).
+  createTask: async (t: { title: string; dueAt?: string | null; assigneeName?: string }): Promise<BotTask | null> => {
+    if (!db) return null
+    try {
+      const now = new Date().toISOString()
+      const task: BotTask = {
+        id: `portal-${secureId(12)}`,
+        kind: 'task',
+        title: t.title,
+        assigneeName: t.assigneeName || 'Власник',
+        creatorName: 'Власник',
+        dueAt: t.dueAt || null,
+        status: 'open',
+        createdAt: now,
+        updatedAt: now,
+      }
+      await setDoc(doc(db, 'botTasks', task.id), task)
+      return task
+    } catch (e) {
+      console.error('botTasks create:', e)
+      return null
     }
   },
 }
