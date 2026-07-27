@@ -527,6 +527,8 @@ export function registerPayments(app, deps) {
     variantLabel: e.variantLabel || '',
     status: e.status || 'approved',
     total: e.total,
+    // Знижка кошторису (вже вшита в рядки) — для показу клієнту «було / знижка / разом».
+    discount: e.discount || null,
     currency: e.currency || 'UAH',
     lines: (e.lines || []).map((l) => ({ type: l.type, refId: l.refId, name: l.name, qty: l.qty, unitPrice: l.unitPrice, lineTotal: l.lineTotal, complaintIndex: l.complaintIndex ?? null })),
     // Разрезы по требованиям (только метка + направление — клиенту показываем структуру, без внутреннего).

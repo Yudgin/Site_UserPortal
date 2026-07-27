@@ -348,13 +348,15 @@ const worksWaiveSurcharge = (workIds: string[], catalog: PriceCatalog): boolean 
 export const commonWorkInputs = (
   settings: PricingSettings,
   catalog: PriceCatalog,
-  existingWorkIds: Set<string>
+  existingWorkIds: Set<string>,
+  excludeCodes?: Set<string> // виключені майстром у фактичному кошторисі
 ): EstimateWorkInput[] => {
   const codes = settings.commonWorkCodes ?? []
   if (!codes.length) return []
   const byCode = new Map(Object.values(catalog.works).map((w) => [w.code, w]))
   const result: EstimateWorkInput[] = []
   for (const code of codes) {
+    if (excludeCodes?.has(code)) continue
     const w = byCode.get(code)
     if (!w || !w.active || existingWorkIds.has(w.id)) continue
     result.push({ workId: w.id, qty: 1 })
@@ -408,6 +410,8 @@ export interface BuildMultiEstimateParams {
   settings: PricingSettings
   month?: number
   meta?: BuildEstimateParams['meta']
+  // Коди загальних робіт, які майстер ВИКЛЮЧИВ у фактичному кошторисі (не додавати авто-секцією)
+  excludeCommonCodes?: string[]
 }
 
 // Собрать смету из нескольких жалоб с дедупликацией повторяющихся позиций.
@@ -422,7 +426,8 @@ export const buildMultiEstimate = (params: BuildMultiEstimateParams): Estimate =
   // Общие работы (сопутствующие любому ремонту), которых нет ни в одной секции —
   // добавляем отдельной секцией. dedupe='once' обеспечит единичное вхождение.
   const existingIds = new Set(inputSections.flatMap((s) => s.works.map((w) => w.workId)))
-  const commonInputs = commonWorkInputs(settings, catalog, existingIds)
+  const commonInputs = commonWorkInputs(settings, catalog, existingIds,
+    params.excludeCommonCodes?.length ? new Set(params.excludeCommonCodes) : undefined)
   const sections: ComplaintSection[] = commonInputs.length
     ? [...inputSections, { complaint: COMMON_SECTION_LABEL, serviceKind: 'repair', works: commonInputs }]
     : inputSections
@@ -879,6 +884,51 @@ export const estimate2goods = (est: Estimate, lang = 'uk'): ReceiptGood[] => {
     goods.push({ name: name + suffix, price: round2(l.lineTotal), qty: 1 })
   }
   return goods
+}
+
+// ==== Знижка на кошторис ====
+//
+// Знижка (відсотком або сумою) ВШИВАЄТЬСЯ в lineTotal рядків пропорційно, в копійках
+// (останній ненульовий рядок забирає залишок) — тому Σ(рядків) == total == чек == списання
+// банку без жодних від'ємних рядків (їх не можна у фіскальний чек). unitPrice після знижки —
+// довідковий (estimate2goods сам згорне рядок у qty=1, якщо ціна за одиницю не ділиться).
+export interface EstimateDiscountInput { value: number; kind: 'pct' | 'uah' }
+
+export const applyEstimateDiscount = (est: Estimate, d?: EstimateDiscountInput | null): Estimate => {
+  const value = Number(d?.value) || 0
+  if (!d || value <= 0) return est
+  const grossKop = Math.round(est.total * 100)
+  if (grossKop <= 0) return est
+  const offKop = Math.min(d.kind === 'pct' ? Math.round((grossKop * value) / 100) : Math.round(value * 100), grossKop)
+  if (offKop <= 0) return est
+  const targetKop = grossKop - offKop
+
+  const idxs = est.lines
+    .map((l, i) => ({ i, kop: Math.round(l.lineTotal * 100) }))
+    .filter((x) => x.kop > 0)
+  const sumKop = idxs.reduce((acc, x) => acc + x.kop, 0)
+  if (!idxs.length || sumKop <= 0) return est
+
+  const lines = est.lines.map((l) => ({ ...l }))
+  let acc = 0
+  idxs.forEach((x, n) => {
+    const nk = n === idxs.length - 1 ? targetKop - acc : Math.floor((x.kop * targetKop) / sumKop)
+    acc += nk
+    lines[x.i].lineTotal = nk / 100
+    lines[x.i].unitPrice = round2(nk / 100 / (lines[x.i].qty || 1))
+  })
+
+  const sumBy = (type: EstimateLine['type']) =>
+    round2(lines.filter((l) => l.type === type).reduce((a, l) => a + l.lineTotal, 0))
+  return {
+    ...est,
+    lines,
+    laborTotal: sumBy('labor'),
+    materialsTotal: sumBy('material'),
+    addonsTotal: sumBy('addon'),
+    total: round2(targetKop / 100),
+    discount: { value, kind: d.kind, amount: round2(offKop / 100), grossTotal: round2(grossKop / 100) },
+  }
 }
 
 // Итог по позициям чека (грн) — для сверки/отображения

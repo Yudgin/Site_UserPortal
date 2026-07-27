@@ -80,6 +80,7 @@ export interface SafeEstimate {
   variantLabel: string
   status: string
   total: number
+  discount?: { value: number; kind: 'pct' | 'uah'; amount: number; grossTotal: number } | null
   currency: string
   lines: SafeEstimateLine[]
   sections?: { complaint: string; serviceKind?: 'repair' | 'upgrade' | null }[] | null // разрезы по требованиям

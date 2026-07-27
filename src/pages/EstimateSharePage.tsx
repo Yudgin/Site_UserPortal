@@ -208,6 +208,13 @@ export default function EstimateSharePage() {
       <Paper sx={{ p: 2, mb: 3 }}>
         <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Склад робіт за вашими вимогами</Typography>
         <EstimateSectionsView lines={est.lines} sections={est.sections} total={est.total} currency={est.currency} />
+        {est.discount && est.discount.amount > 0 && (
+          <Alert severity="success" sx={{ mt: 1.5 }}>
+            🎁 Вам надано знижку <b>−{formatMoney(est.discount.amount)}</b>
+            {est.discount.kind === 'pct' ? ` (${est.discount.value}%)` : ''}: без знижки {formatMoney(est.discount.grossTotal)},
+            до сплати — <b>{formatMoney(est.total)}</b>.
+          </Alert>
+        )}
       </Paper>
 
       {/* Історія змін кошторису (що і коли редагували) */}

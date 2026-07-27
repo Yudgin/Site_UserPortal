@@ -290,6 +290,10 @@ export interface EstimateVersion {
 
 // Смета целиком. Сохраняется в Firestore и служит обучающим примером для AI-оценки.
 export interface Estimate {
+  // Знижка на кошторис (вшита в lineTotal; amount/grossTotal — для показу «було/стало»)
+  discount?: { value: number; kind: 'pct' | 'uah'; amount: number; grossTotal: number } | null
+  // Коди загальних робіт, виключені майстром (build не додає їх авто-секцією)
+  excludedCommonCodes?: string[]
   id: string
   requestId: string | null // привязка к заявке 1С (если смета из заявки)
   title: string

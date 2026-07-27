@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, Snackbar, CircularProgress, Divider,
-  TextField, Chip, Stack,
+  TextField, Chip, Stack, Checkbox, FormControlLabel, MenuItem,
 } from '@mui/material'
 import {
   Home as HomeIcon, Save as SaveIcon, ArrowBack as BackIcon,
@@ -31,6 +31,7 @@ import EstimateSectionsView from '@/components/EstimateSectionsView'
 import { PAY_METHOD_KEYS, PAY_METHOD_LABELS } from '@/types/pricing'
 import {
   buildMultiEstimate, estimate2goods, compareEstimates, needsReapproval, tName, formatMoney,
+  applyEstimateDiscount,
 } from '@/utils/pricing'
 import { estimateToSections, toComplaintSections, type EditableSection } from '@/utils/estimateSections'
 import { buildPriceContext } from '@/utils/aiContext'
@@ -51,6 +52,11 @@ export default function ActualEstimateEditorPage() {
   const [prelim, setPrelim] = useState<Estimate | null>(null)
   const [editParentId, setEditParentId] = useState<string | null>(null) // id родителя в режиме ?edit=
   const [sections, setSections] = useState<EditableSection[]>([]) // разрезы по требованиям клиента
+  // Керовані загальні роботи та знижка фактичного кошторису (рішення власника: майстер може
+  // прибрати загальні позиції і дати знижку — вона вшивається в рядки, чек/оплата сходяться).
+  const [excludedCommon, setExcludedCommon] = useState<string[]>([])
+  const [discountValue, setDiscountValue] = useState<number | ''>('')
+  const [discountKind, setDiscountKind] = useState<'pct' | 'uah'>('uah')
   const [title, setTitle] = useState('')
 
   const [fops, setFops] = useState<FopPublic[]>([])
@@ -98,6 +104,8 @@ export default function ActualEstimateEditorPage() {
       setTitle(act.title || '')
       setPayouts(act.specialistPayouts || [])
       setPayOptions(act.payOptions || []) // старые сметы без payOptions — мастер выберет способы заново
+      setExcludedCommon(act.excludedCommonCodes || [])
+      if (act.discount) { setDiscountValue(act.discount.value); setDiscountKind(act.discount.kind) }
       setSections((prev) => prev.length ? prev : estimateToSections(act, indexed)) // разрезы по требованиям
       if (act.parentEstimateId) {
         setEditParentId(act.parentEstimateId) // помним связь, даже если родитель ещё грузится
@@ -144,10 +152,11 @@ export default function ActualEstimateEditorPage() {
   const actual: Estimate | null = useMemo(() => {
     const cs = toComplaintSections(sections, indexed)
     if (!cs.length) return null
-    return buildMultiEstimate({
+    const built = buildMultiEstimate({
       sections: cs,
       catalog: indexed,
       settings: catalog.settings,
+      excludeCommonCodes: excludedCommon,
       meta: {
         requestId: prelim?.requestId ?? null, // 1С-ссылка (унаследованная от предложения), если есть
         title: title || (prelim?.title ?? ''),
@@ -155,7 +164,10 @@ export default function ActualEstimateEditorPage() {
         createdBy: user?.email ?? null,
       },
     })
-  }, [sections, indexed, catalog.settings, title, prelim, user])
+    const withDiscount = applyEstimateDiscount(built,
+      discountValue && Number(discountValue) > 0 ? { value: Number(discountValue), kind: discountKind } : null)
+    return { ...withDiscount, excludedCommonCodes: excludedCommon }
+  }, [sections, indexed, catalog.settings, title, prelim, user, excludedCommon, discountValue, discountKind])
 
   const comparison = useMemo(() => (prelim && actual ? compareEstimates(prelim, actual) : null), [prelim, actual])
   const reapproval = useMemo(() => (prelim && actual ? needsReapproval(prelim, actual) : null), [prelim, actual])
@@ -299,6 +311,45 @@ export default function ActualEstimateEditorPage() {
           Кожна вимога — окремий розділ зі своїм напрямом (ремонт/апгрейд), роботами та набором. Загальні роботи додаються автоматично.
         </Typography>
         <SectionsWorksEditor sections={sections} onChange={setSections} catalog={indexed} priceContext={priceCtx} />
+      </Paper>
+
+      {/* Загальні роботи (можна вимкнути зайві) + знижка на кошторис */}
+      <Paper sx={{ p: 2, mb: 3 }}>
+        <Typography variant="subtitle1" sx={{ mb: 0.5 }}>Загальні роботи та знижка</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          Зніміть галочку, щоб прибрати загальну позицію з цього кошторису. Знижка вшивається
+          в рядки пропорційно — оплата і фіскальний чек збігаються копійка в копійку.
+        </Typography>
+        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1.5 }}>
+          {(catalog.settings.commonWorkCodes ?? []).map((code) => {
+            const w = Object.values(indexed.works).find((x) => x.code === code)
+            if (!w || !w.active) return null
+            const off = excludedCommon.includes(code)
+            return (
+              <FormControlLabel key={code} sx={{ mr: 2 }}
+                control={<Checkbox size="small" checked={!off}
+                  onChange={() => setExcludedCommon((prev) => off ? prev.filter((c) => c !== code) : [...prev, code])} />}
+                label={`${tName(w.name, 'uk')} — ${formatMoney(w.laborHours * (catalog.settings.laborRatePerHour || 0))}`} />
+            )
+          })}
+        </Stack>
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <TextField label="Знижка" type="number" size="small" sx={{ width: 130 }}
+            value={discountValue} onChange={(e) => setDiscountValue(e.target.value === '' ? '' : Number(e.target.value))} />
+          <TextField select size="small" sx={{ width: 84 }} value={discountKind}
+            onChange={(e) => setDiscountKind(e.target.value as 'pct' | 'uah')}>
+            <MenuItem value="uah">грн</MenuItem>
+            <MenuItem value="pct">%</MenuItem>
+          </TextField>
+          {actual?.discount && (
+            <>
+              <Chip size="small" color="error" label={`-${formatMoney(actual.discount.amount)}`} />
+              <Typography variant="body2" color="text.secondary">
+                без знижки {formatMoney(actual.discount.grossTotal)} → разом <b>{formatMoney(actual.total)}</b>
+              </Typography>
+            </>
+          )}
+        </Stack>
       </Paper>
 
       {/* Результат — фактическая смета разрезами по требованиям */}

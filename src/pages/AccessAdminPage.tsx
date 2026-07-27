@@ -80,6 +80,10 @@ export default function AccessAdminPage() {
       name: centerEdit.name.trim(),
       zone: centerEdit.zone?.trim() || '',
       externalId: centerEdit.externalId?.trim() || null,
+      // ВАЖНО: поля нижче раніше не передавались — вибір ФОП/шаблонів ТТН мовчки губився.
+      defaultFopByMethod: centerEdit.defaultFopByMethod || {},
+      incomingTtnTemplateId: centerEdit.incomingTtnTemplateId || null,
+      returnTtnTemplateId: centerEdit.returnTtnTemplateId || null,
       active: centerEdit.active !== false,
     })
     if (ok) { notify('Центр збережено'); setCenterEdit(null); await load(); await reloadCenters() }
