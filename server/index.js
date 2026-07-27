@@ -441,13 +441,20 @@ app.post('/api/novaposhta/warehouses', proxyLimiter, async (req, res) => {
         error: { code: 'MISSING_CITY_REF', message: 'cityRef is required' },
       })
     }
-    // Limit 1000: у великих містах сотні відділень — фронт фільтрує локально (пошук за №/текстом),
-    // тому потрібен ПОВНИЙ список міста, інакше «№30» може не потрапити в перші 50.
+    // ПОВНИЙ список міста (фронт шукає локально за №/текстом) МІНУС поштомати (рішення власника:
+    // кораблики — лише через відділення). Фільтруємо на сервері, бо у великих містах поштоматів
+    // більше, ніж відділень, і вони зʼїдали б ліміт вибірки.
     const data = await npRequest('Address', 'getWarehouses', {
       CityRef: cityRef,
       FindByString: searchQuery || '',
-      Limit: 1000,
+      Limit: 5000,
     })
+    if (data && Array.isArray(data.data)) {
+      const POSTOMAT_TYPE = '95dc212d-479c-4ffb-a8ab-8c1b9073d0bc'
+      data.data = data.data.filter((wh) =>
+        String(wh?.TypeOfWarehouse || '') !== POSTOMAT_TYPE &&
+        !/поштомат|почтомат/i.test(`${wh?.Description || ''} ${wh?.DescriptionRu || ''}`))
+    }
     res.json(data)
   } catch (error) {
     console.error('Nova Poshta warehouses error:', error.message)
