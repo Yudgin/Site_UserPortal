@@ -8,6 +8,7 @@ import {
 } from '@mui/material'
 import { AutoAwesome as AiIcon } from '@mui/icons-material'
 import { aiApi } from '@/api/endpoints/ai'
+import { usePricingStore } from '@/store/pricingStore'
 import { tName, type PriceCatalog, type EstimateWorkInput } from '@/utils/pricing'
 
 // Позиция от ИИ: код может совпасть с РАБОТОЙ (workId) или с НАБОРОМ (kitId — разворачиваем в работы).
@@ -22,6 +23,11 @@ export default function AiWorkPicker({ priceContext, catalog, onAdd, initialDesc
   const [open, setOpen] = useState(false)
   const [desc, setDesc] = useState('')
 
+  // Свіжий каталог при кожному відкритті: інакше вкладка, відкрита ДО збереження прайсу,
+  // тримала застарілий контекст — ІІ чесно «не знаходив» щойно доданих позицій.
+  const loadFromServer = usePricingStore((st) => st.loadFromServer)
+  useEffect(() => { if (open) loadFromServer() }, [open, loadFromServer])
+
   // При открытии диалога с пустым полем — засеваем описанием из диагностики (если есть).
   useEffect(() => {
     if (open) setDesc((d) => d || (initialDescription || '').trim())
@@ -35,12 +41,50 @@ export default function AiWorkPicker({ priceContext, catalog, onAdd, initialDesc
   const byCode = useMemo(() => new Map(Object.values(catalog.works).map((w) => [w.code, w])), [catalog])
   const byKitCode = useMemo(() => new Map(Object.values(catalog.kits).map((k) => [k.code, k])), [catalog])
 
+  // Локальний пошук за назвою: якщо майстер написав точну/близьку назву позиції — знаходимо
+  // її БЕЗ ІІ (страховка від промаху моделі та застарілого контексту).
+  const localMatches = (query: string): Picked[] => {
+    const q = query.toLowerCase().replace(/\s+/g, ' ').trim()
+    if (q.length < 4) return []
+    const toks = (t: string) => t.toLowerCase().split(/[^a-zа-яіїєґ0-9ʼ']+/i).filter((x) => x.length >= 4)
+    const qt = new Set(toks(q))
+    const score = (name: string): number => {
+      const n = name.toLowerCase().replace(/\s+/g, ' ').trim()
+      if (!n) return 0
+      if (q.includes(n) || n.includes(q)) return 2
+      const nt = toks(name)
+      const common = nt.filter((t) => qt.has(t)).length
+      return common >= 2 ? 1 : 0
+    }
+    const out: Picked[] = []
+    for (const k of Object.values(catalog.kits)) {
+      if (k.active && score(tName(k.name, 'uk')) > 0)
+        out.push({ workId: null, kitId: k.id, code: k.code, name: tName(k.name, 'uk'), qty: 1, matched: true, isKit: true })
+    }
+    for (const w of Object.values(catalog.works)) {
+      if (w.active && score(tName(w.name, 'uk')) === 2)
+        out.push({ workId: w.id, kitId: null, code: w.code, name: tName(w.name, 'uk'), qty: 1, matched: true, isKit: false })
+    }
+    return out
+  }
+
   const run = async () => {
     if (!desc.trim()) return
     setLoading(true); setErr(''); setPicked(null)
     const res = await aiApi.pickWorks({ description: desc, priceContext })
     setLoading(false)
-    if (!res.success || !res.data) { setErr(res.error?.message || 'Не вдалося підібрати'); return }
+    if (!res.success || !res.data) {
+      // ІІ недоступний — покажемо хоча б локальні збіги за назвою.
+      const local = localMatches(desc)
+      if (local.length) {
+        setPicked(local); setNote('ІІ недоступний — знайдено за назвою в прайсі.')
+        const s0: Record<number, boolean> = {}
+        local.forEach((_, i) => { s0[i] = true })
+        setSel(s0)
+        return
+      }
+      setErr(res.error?.message || 'Не вдалося підібрати'); return
+    }
     const items: Picked[] = res.data.works.map((w) => {
       const qty = w.qty || 1
       const work = byCode.get(w.workCode)
@@ -50,10 +94,13 @@ export default function AiWorkPicker({ priceContext, catalog, onAdd, initialDesc
       if (kit && kit.active) return { workId: null, kitId: kit.id, code: w.workCode, name: tName(kit.name, 'uk'), qty, matched: true, isKit: true }
       return { workId: null, kitId: null, code: w.workCode, name: w.name, qty, matched: false, isKit: false }
     })
-    setPicked(items)
-    setNote(res.data.note || '')
+    // Доповнюємо прямими збігами за назвою, яких ІІ не повернув (напр. точна назва набору).
+    const extra = localMatches(desc).filter((lm) => !items.some((it) => it.code === lm.code))
+    const all = [...items, ...extra]
+    setPicked(all)
+    setNote(res.data.note || (extra.length && !items.some((i) => i.matched) ? 'Знайдено за назвою в прайсі.' : ''))
     const s: Record<number, boolean> = {}
-    items.forEach((it, i) => { if (it.matched) s[i] = true })
+    all.forEach((it, i) => { if (it.matched) s[i] = true })
     setSel(s)
   }
 
