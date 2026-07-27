@@ -34,6 +34,8 @@ import { NOTIFICATION_EVENT_LABELS, type ClientNotification } from '@/types/noti
 import { cardVisibility, type ViewRole, type ServiceCenter } from '@/types/access'
 import { serviceCenterService } from '@/api/serviceCenterService'
 import { telegramLinkApi } from '@/api/endpoints/telegramLink'
+import NpAddressPicker from '@/components/NpAddressPicker'
+import type { NpAddress } from '@/types/npTemplate'
 import CreateTtnDialog from '@/components/CreateTtnDialog'
 import ViewAsButton from '@/components/ViewAsButton'
 
@@ -230,6 +232,22 @@ export default function ServiceRequestPage() {
             {centers.filter((c) => c.active).map((c) => <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>)}
           </TextField>
         </Stack>
+        {/* Адреса НП клієнта (підставляється в ТТН; при переносі з 1С резолвиться автоматично) */}
+        <Box sx={{ mb: 2 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+            Адреса Нової Пошти клієнта {req.clientCityName ? '' : '— не задана (потрібна для ТТН «з ремонту»)'}
+          </Typography>
+          <NpAddressPicker
+            value={{
+              cityRef: req.clientCityRef || undefined, cityName: req.clientCityName || undefined,
+              warehouseRef: req.clientWarehouseRef || undefined, warehouseName: req.clientWarehouseName || undefined,
+            } as NpAddress}
+            onChange={(v) => patch({
+              clientCityRef: v.cityRef || undefined, clientCityName: v.cityName || undefined,
+              clientWarehouseRef: v.warehouseRef || undefined, clientWarehouseName: v.warehouseName || undefined,
+            })}
+            label="Місто клієнта" warehouseLabel="Відділення НП" />
+        </Box>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
           <TextField label="Кораблик" value={boat} onChange={(e) => setBoat(e.target.value)} size="small" sx={{ minWidth: 200 }} />
           <TextField label="Скарга / опис" value={complaint} onChange={(e) => setComplaint(e.target.value)} size="small" fullWidth multiline />

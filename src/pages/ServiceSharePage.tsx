@@ -47,6 +47,7 @@ import LanguageSelector from '@/components/common/LanguageSelector'
 import LoadingSpinner from '@/components/common/LoadingSpinner'
 import ClientInfoEditor from '@/components/common/ClientInfoEditor'
 import { serviceApi, ServiceRequestData, ClientInfo } from '@/api/endpoints/service'
+import { searchCities, getWarehouses } from '@/api/endpoints/novaposhta'
 import { serviceContentService, SERVICE_CONTENT_KEYS } from '@/api/serviceContentService'
 import { serviceRequestService } from '@/api/serviceRequestService'
 import { useSettingsStore } from '@/store/settingsStore'
@@ -114,6 +115,30 @@ export default function ServiceSharePage() {
       if (!localExists) {
         const ci = data.clientInfo
         const clientName = ci ? [ci.lastName, ci.firstName, ci.middleName].filter(Boolean).join(' ').trim() : ''
+        // 1С часто віддає місто/відділення ЛИШЕ текстом (без Ref-ів НП) — резолвимо їх самі,
+        // щоб ТТН не просила вводити адресу заново: місто за точною назвою, відділення за №.
+        let addr: { clientCityRef?: string; clientCityName?: string; clientWarehouseRef?: string; clientWarehouseName?: string } = {}
+        if (ci?.cityRef) {
+          addr = { clientCityRef: ci.cityRef, clientCityName: ci.city }
+          if (ci.warehouseRef) { addr.clientWarehouseRef = ci.warehouseRef; addr.clientWarehouseName = ci.warehouse }
+        } else if (ci?.city) {
+          try {
+            const cities = await searchCities(ci.city)
+            // Description тут повний («м. Хмельницький, Хмельницька обл.») — шукаємо входженням.
+            const cityQ = ci.city.trim().toLowerCase()
+            const city = cities.find((c) => c.Description.toLowerCase().includes(cityQ)) || cities[0]
+            if (city) {
+              addr = { clientCityRef: city.Ref, clientCityName: city.Description }
+              if (ci.warehouse) {
+                const whs = await getWarehouses(city.Ref)
+                const num = ci.warehouse.match(/№\s*(\d+)/)?.[1]
+                const wh = (num && whs.find((w) => String(w.Number) === num))
+                  || whs.find((w) => w.Description.trim().toLowerCase() === ci.warehouse.trim().toLowerCase())
+                if (wh) { addr.clientWarehouseRef = wh.Ref; addr.clientWarehouseName = wh.Description }
+              }
+            }
+          } catch { /* НП недоступна — перенесемо без адреси, її можна додати на заявці */ }
+        }
         await serviceRequestService.save({
           id: localReqId,
           externalRequestId: requestId,
@@ -121,8 +146,7 @@ export default function ServiceSharePage() {
           ...(clientName ? { clientName } : {}),
           ...(ci?.phone ? { clientPhone: ci.phone } : {}),
           ...(data.complaint ? { complaint: data.complaint } : {}),
-          ...(ci?.cityRef ? { clientCityRef: ci.cityRef, clientCityName: ci.city } : {}),
-          ...(ci?.warehouseRef ? { clientWarehouseRef: ci.warehouseRef, clientWarehouseName: ci.warehouse } : {}),
+          ...addr,
         })
       }
       navigate(`/service-request/${localReqId}`)
