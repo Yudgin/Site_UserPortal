@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Box, Container, Paper, Typography, Button, Tabs, Tab, Table, TableBody, TableCell,
@@ -85,7 +85,44 @@ export default function PriceListAdminPage() {
   const [archiveOpen, setArchiveOpen] = useState(false)
 
   useEffect(() => { loadFromServer() }, [loadFromServer])
-  useEffect(() => { setDraft(structuredClone(catalog)) }, [catalog])
+
+  // Незбережені правки (в т.ч. додане AI-конструктором) НЕ мають губитися:
+  //  • чернетку скидаємо з каталогу лише коли правок немає (фонове оновлення її не затирає);
+  //  • при закритті/перезавантаженні вкладки з правками — попередження браузера;
+  //  • чернетка бекапиться в localStorage і пропонується до відновлення після повернення.
+  const dirty = useMemo(() => !!draft && JSON.stringify(draft) !== JSON.stringify(catalog), [draft, catalog])
+  const dirtyRef = useRef(false)
+  useEffect(() => { dirtyRef.current = dirty }, [dirty])
+  useEffect(() => { setDraft((d) => (d && dirtyRef.current ? d : structuredClone(catalog))) }, [catalog])
+
+  const BACKUP_KEY = 'priceListDraftBackup'
+  const [draftBackup, setDraftBackup] = useState<{ at: string; doc: PriceListDoc } | null>(null)
+  const backupChecked = useRef(false)
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        if (dirty && draft) localStorage.setItem(BACKUP_KEY, JSON.stringify({ at: new Date().toISOString(), doc: draft }))
+        else if (!dirty) localStorage.removeItem(BACKUP_KEY)
+      } catch { /* квота localStorage — некритично */ }
+    }, 800)
+    return () => clearTimeout(t)
+  }, [draft, dirty])
+  useEffect(() => {
+    if (!persisted || backupChecked.current) return
+    backupChecked.current = true
+    try {
+      const raw = localStorage.getItem(BACKUP_KEY)
+      if (!raw) return
+      const b = JSON.parse(raw) as { at: string; doc: PriceListDoc }
+      if (b?.doc && JSON.stringify(b.doc) !== JSON.stringify(catalog)) setDraftBackup(b)
+      else localStorage.removeItem(BACKUP_KEY)
+    } catch { /* битий бекап — ігноруємо */ }
+  }, [persisted, catalog])
+  useEffect(() => {
+    const h = (e: BeforeUnloadEvent) => { if (dirtyRef.current) { e.preventDefault(); e.returnValue = '' } }
+    window.addEventListener('beforeunload', h)
+    return () => window.removeEventListener('beforeunload', h)
+  }, [])
 
   if (!user || !isAdminEmail(user.email)) {
     return (
@@ -113,6 +150,7 @@ export default function PriceListAdminPage() {
       materials: draft.materials, addons: draft.addons, settings: draft.settings,
     })
     setSaving(false)
+    if (ok) { try { localStorage.removeItem(BACKUP_KEY) } catch { /* ignore */ } }
     notify(ok ? 'Прайс-лист сохранён' : 'Не удалось сохранить (нужны права администратора)', ok ? 'success' : 'error')
   }
 
@@ -216,8 +254,28 @@ export default function PriceListAdminPage() {
           </Button>
           <Button variant="contained" startIcon={saving ? <CircularProgress size={18} /> : <SaveIcon />}
             onClick={handleSave} disabled={saving}>Сохранить</Button>
+          {dirty && <Chip size="small" color="warning" label="є незбережені зміни" />}
         </Box>
       </Box>
+
+      {/* Відновлення незбереженої чернетки (бекап у localStorage переживає закриття вкладки) */}
+      {draftBackup && (
+        <Alert severity="warning" sx={{ mx: 2, mb: 1 }}
+          action={
+            <Box sx={{ display: 'flex', gap: 1 }}>
+              <Button size="small" variant="contained" color="warning"
+                onClick={() => { setDraft(structuredClone(draftBackup.doc)); setDraftBackup(null); notify('Чернетку відновлено — перевірте і натисніть «Сохранить»') }}>
+                Відновити
+              </Button>
+              <Button size="small" color="inherit"
+                onClick={() => { try { localStorage.removeItem('priceListDraftBackup') } catch { /* ignore */ } setDraftBackup(null) }}>
+                Відкинути
+              </Button>
+            </Box>
+          }>
+          Знайдено незбережену чернетку прайсу від {new Date(draftBackup.at).toLocaleString('uk-UA')} — відновити її?
+        </Alert>
+      )}
 
       <Container maxWidth="lg" sx={{ pb: 6 }}>
         <Paper sx={{ p: { xs: 1, sm: 2 } }}>
