@@ -22,6 +22,8 @@ import { serviceRequestService } from '@/api/serviceRequestService'
 import { serviceCenterService } from '@/api/serviceCenterService'
 import { userProfileService } from '@/api/userProfileService'
 import { notificationApi } from '@/api/endpoints/notification'
+import { notificationService } from '@/api/notificationService'
+import type { ClientNotification } from '@/types/notification'
 import { paymentsApi, FopPublic } from '@/api/endpoints/payments'
 import SpecialistPayoutsEditor from '@/components/SpecialistPayoutsEditor'
 import PayOptionsEditor from '@/components/PayOptionsEditor'
@@ -48,6 +50,9 @@ export default function ActualEstimateEditorPage() {
   const parentId = params.get('parent') || ''
   const editId = params.get('edit') || '' // редактировать СУЩЕСТВУЮЩИЙ факт (а не создавать новый)
   const serviceRequestId = params.get('request') || '' // наша заявка на обслуживание
+  const [editSrId, setEditSrId] = useState('') // заявка, взята из редактируемой сметы
+  const [estNotifs, setEstNotifs] = useState<ClientNotification[]>([]) // журнал оповещений заявки
+  const [notifBusy, setNotifBusy] = useState(false)
 
   const [prelim, setPrelim] = useState<Estimate | null>(null)
   const [editParentId, setEditParentId] = useState<string | null>(null) // id родителя в режиме ?edit=
@@ -104,6 +109,7 @@ export default function ActualEstimateEditorPage() {
       setTitle(act.title || '')
       setPayouts(act.specialistPayouts || [])
       setPayOptions(act.payOptions || []) // старые сметы без payOptions — мастер выберет способы заново
+      setEditSrId(act.serviceRequestId || '')
       setExcludedCommon(act.excludedCommonCodes || [])
       if (act.discount) { setDiscountValue(act.discount.value); setDiscountKind(act.discount.kind) }
       setSections((prev) => prev.length ? prev : estimateToSections(act, indexed)) // разрезы по требованиям
@@ -116,7 +122,7 @@ export default function ActualEstimateEditorPage() {
 
   // Заявка (для специалистов/центра). При СОЗДАНИИ факта (без ?edit=) авто-подставляем специалистов
   // заявки в распределение (суммы 0 — мастер заполнит). При редактировании existing факта не трогаем.
-  const effRequestId = serviceRequestId || prelim?.serviceRequestId || ''
+  const effRequestId = serviceRequestId || prelim?.serviceRequestId || editSrId || ''
   useEffect(() => {
     if (!effRequestId) return
     serviceRequestService.get(effRequestId).then((r) => {
@@ -173,11 +179,42 @@ export default function ActualEstimateEditorPage() {
   const reapproval = useMemo(() => (prelim && actual ? needsReapproval(prelim, actual) : null), [prelim, actual])
   const goods = useMemo(() => (actual ? estimate2goods(actual, 'uk') : []), [actual])
 
+  // Журнал оповещений заявки — статус «чи надіслали SMS про фактичну калькуляцію».
+  useEffect(() => {
+    if (!effRequestId) { setEstNotifs([]); return }
+    notificationService.listByRequest(effRequestId).then(setEstNotifs).catch(() => setEstNotifs([]))
+  }, [effRequestId, savedId])
+
   const priceCtx = useMemo(() => buildPriceContext(catalog), [catalog])
 
   const clientLink = savedId ? `${window.location.origin}/estimate/${savedId}` : ''
 
   const canSave = !!actual && !!user && isAdminEmail(user.email) && payOptions.length > 0 && payOptions.every((o) => o.fopId)
+
+  // Надіслати клієнту сповіщення про фактичну калькуляцію (канал: Telegram/SMS — обирає сервер).
+  // Перший раз — авто-подія 'actual' (ідемпотентна); повторно — та сама фраза як custom.
+  const lastActualNotif = useMemo(() => {
+    const list = estNotifs.filter((n) => n.event === 'actual').sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    return list[0] || null
+  }, [estNotifs])
+  const sendActualNotif = async () => {
+    if (!effRequestId) return
+    setNotifBusy(true)
+    try {
+      const already = lastActualNotif?.status === 'sent'
+      const res = already
+        ? await notificationApi.notify({ serviceRequestId: effRequestId, event: 'custom',
+            text: `Роботи по вашому корабликові виконано — готова фактична калькуляція. Деталі та оплата: ${clientLink}` })
+        : await notificationApi.notify({ serviceRequestId: effRequestId, event: 'actual' })
+      if (res?.status === 'sent') notify(`Надіслано (${res.via === 'sms' ? 'SMS' : res.channel || 'месенджер'})`)
+      else notify(res?.error || 'Не вдалося надіслати', 'error')
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Не вдалося надіслати', 'error')
+    } finally {
+      setNotifBusy(false)
+      notificationService.listByRequest(effRequestId).then(setEstNotifs).catch(() => {})
+    }
+  }
 
   const handleSave = async (): Promise<string | null> => {
     if (!actual) return null
@@ -356,11 +393,36 @@ export default function ActualEstimateEditorPage() {
       {actual && (
         <Paper sx={{ p: 2, mb: 3 }}>
           <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Фактичний кошторис</Typography>
-          <EstimateSectionsView lines={actual.lines} sections={actual.sections} total={actual.total} currency={actual.currency} />
+          <EstimateSectionsView lines={actual.lines} sections={actual.sections} total={actual.total} currency={actual.currency} discount={actual.discount} />
           <Typography variant="caption" color="text.secondary" sx={{ mt: 1.5, display: 'block' }}>
             <ReceiptIcon fontSize="inherit" sx={{ verticalAlign: 'middle', mr: 0.5 }} />
             У чеку буде {goods.length} позиц. (побудовано за вимогами фіскального чека).
           </Typography>
+        </Paper>
+      )}
+
+      {/* Сповіщення клієнта про фактичну калькуляцію (SMS/Telegram) + статус відправки */}
+      {savedId && effRequestId && (
+        <Paper sx={{ p: 2, mb: 3 }}>
+          <Typography variant="subtitle1" sx={{ mb: 1 }}>Сповіщення клієнта</Typography>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            {lastActualNotif ? (
+              lastActualNotif.status === 'sent' ? (
+                <Chip color="success" size="small"
+                  label={`Надіслано (${lastActualNotif.via === 'sms' ? 'SMS' : lastActualNotif.channel || 'месенджер'}) · ${new Date(lastActualNotif.createdAt).toLocaleString('uk-UA')}`} />
+              ) : (
+                <Chip color="error" size="small" label={`Помилка: ${lastActualNotif.error || 'не надіслано'}`} />
+              )
+            ) : (
+              <Chip size="small" variant="outlined" label="ще не надсилалося" />
+            )}
+            <Button variant="outlined" size="small" disabled={notifBusy} onClick={sendActualNotif}>
+              {lastActualNotif?.status === 'sent' ? 'Надіслати повторно' : 'Надіслати клієнту (SMS/Telegram)'}
+            </Button>
+            <Typography variant="caption" color="text.secondary">
+              Канал обирається автоматично: Telegram, якщо підключений, інакше SMS. Історія — на заявці.
+            </Typography>
+          </Stack>
         </Paper>
       )}
 

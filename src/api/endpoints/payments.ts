@@ -68,7 +68,7 @@ export interface SafeEstimateLine {
   name: LocalizedText
   qty: number
   unitPrice: number
-  lineTotal: number
+  lineTotal: number; grossLineTotal?: number | null
   complaintIndex?: number | null // к какому требованию (секции) относится
 }
 export interface SafeEstimate {

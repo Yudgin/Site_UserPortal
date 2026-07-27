@@ -914,8 +914,10 @@ export const applyEstimateDiscount = (est: Estimate, d?: EstimateDiscountInput |
   idxs.forEach((x, n) => {
     const nk = n === idxs.length - 1 ? targetKop - acc : Math.floor((x.kop * targetKop) / sumKop)
     acc += nk
+    // Для ПОКАЗУ рядки лишаються з повною сумою (grossLineTotal), а знижка — окремим рядком
+    // внизу; lineTotal (зі знижкою) — грошова правда для чека/оплати.
+    lines[x.i].grossLineTotal = lines[x.i].lineTotal
     lines[x.i].lineTotal = nk / 100
-    lines[x.i].unitPrice = round2(nk / 100 / (lines[x.i].qty || 1))
   })
 
   const sumBy = (type: EstimateLine['type']) =>

@@ -530,7 +530,7 @@ export function registerPayments(app, deps) {
     // Знижка кошторису (вже вшита в рядки) — для показу клієнту «було / знижка / разом».
     discount: e.discount || null,
     currency: e.currency || 'UAH',
-    lines: (e.lines || []).map((l) => ({ type: l.type, refId: l.refId, name: l.name, qty: l.qty, unitPrice: l.unitPrice, lineTotal: l.lineTotal, complaintIndex: l.complaintIndex ?? null })),
+    lines: (e.lines || []).map((l) => ({ type: l.type, refId: l.refId, name: l.name, qty: l.qty, unitPrice: l.unitPrice, lineTotal: l.lineTotal, grossLineTotal: l.grossLineTotal ?? null, complaintIndex: l.complaintIndex ?? null })),
     // Разрезы по требованиям (только метка + направление — клиенту показываем структуру, без внутреннего).
     sections: Array.isArray(e.sections) ? e.sections.map((s) => ({ complaint: s.complaint || '', serviceKind: s.serviceKind || null })) : null,
     fopId: e.fopId || null,

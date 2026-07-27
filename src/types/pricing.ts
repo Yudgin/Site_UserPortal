@@ -193,7 +193,9 @@ export interface EstimateLine {
   laborHours?: number // для строк type='labor'
   unitPrice: number // цена за единицу ДО сезонного коэффициента, грн
   seasonApplied: boolean // применён ли сезонный коэффициент к этой строке (только labor)
-  lineTotal: number // итог строки, грн (с учётом сезона для labor)
+  lineTotal: number
+  // Сума рядка ДО знижки кошторису (тільки для показу; чек/оплата — за lineTotal)
+  grossLineTotal?: number // итог строки, грн (с учётом сезона для labor)
   sourceKitId?: string // из какого набора пришла работа (для группировки)
   fromWorkId?: string // к какой работе относится материал/доп.
   // Мульти-жалобы:

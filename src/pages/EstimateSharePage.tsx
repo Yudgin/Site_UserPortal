@@ -207,7 +207,7 @@ export default function EstimateSharePage() {
       {/* Позиции — разрезами по требованиям клиента */}
       <Paper sx={{ p: 2, mb: 3 }}>
         <Typography variant="subtitle1" sx={{ mb: 1.5 }}>Склад робіт за вашими вимогами</Typography>
-        <EstimateSectionsView lines={est.lines} sections={est.sections} total={est.total} currency={est.currency} />
+        <EstimateSectionsView lines={est.lines} sections={est.sections} total={est.total} currency={est.currency} discount={est.discount} />
         {est.discount && est.discount.amount > 0 && (
           <Alert severity="success" sx={{ mt: 1.5 }}>
             🎁 Вам надано знижку <b>−{formatMoney(est.discount.amount)}</b>
