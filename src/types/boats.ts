@@ -144,8 +144,12 @@ export interface BoatOrderStatusChange {
 // Замовлення кораблика (картотека продажів).
 export interface BoatOrder {
   id: string
-  // Клієнт
+  // Клієнт. clientName — зведене «Прізвище Імʼя По батькові» (для списків/пошуку/ТТН);
+  // роздільні поля — джерело правди при редагуванні в картці (потрібні для НП).
   clientName: string
+  clientLastName?: string | null
+  clientFirstName?: string | null
+  clientMiddleName?: string | null
   clientPhone: string
   clientCityRef?: string | null
   clientCityName?: string | null

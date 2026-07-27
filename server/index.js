@@ -441,10 +441,12 @@ app.post('/api/novaposhta/warehouses', proxyLimiter, async (req, res) => {
         error: { code: 'MISSING_CITY_REF', message: 'cityRef is required' },
       })
     }
+    // Limit 1000: у великих містах сотні відділень — фронт фільтрує локально (пошук за №/текстом),
+    // тому потрібен ПОВНИЙ список міста, інакше «№30» може не потрапити в перші 50.
     const data = await npRequest('Address', 'getWarehouses', {
       CityRef: cityRef,
       FindByString: searchQuery || '',
-      Limit: 50,
+      Limit: 1000,
     })
     res.json(data)
   } catch (error) {

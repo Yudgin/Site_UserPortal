@@ -243,10 +243,33 @@ export default function BoatOrderPage() {
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Клієнт</Typography>
         <Stack spacing={2}>
+          {/* ПІБ роздільно (потрібно для НП/документів); clientName тримаємо синхронним зведенням.
+              Для старих замовлень (тільки clientName) частини підставляються розбиттям по пробілах. */}
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-            <TextField label="Імʼя клієнта" value={order.clientName} onChange={(e) => patch({ clientName: e.target.value })} size="small" fullWidth />
-            <TextField label="Телефон" value={order.clientPhone} onChange={(e) => patch({ clientPhone: e.target.value })} size="small" fullWidth placeholder="+380..." />
+            {(() => {
+              const legacy = (order.clientName || '').trim().split(/\s+/)
+              const parts = {
+                last: order.clientLastName ?? (legacy[0] || ''),
+                first: order.clientFirstName ?? (legacy[1] || ''),
+                middle: order.clientMiddleName ?? (legacy.slice(2).join(' ') || ''),
+              }
+              const setPart = (key: 'last' | 'first' | 'middle', v: string) => {
+                const p = { ...parts, [key]: v }
+                patch({
+                  clientLastName: p.last, clientFirstName: p.first, clientMiddleName: p.middle,
+                  clientName: [p.last, p.first, p.middle].filter(Boolean).join(' '),
+                })
+              }
+              return (
+                <>
+                  <TextField label="Прізвище" value={parts.last} onChange={(e) => setPart('last', e.target.value)} size="small" fullWidth />
+                  <TextField label="Імʼя" value={parts.first} onChange={(e) => setPart('first', e.target.value)} size="small" fullWidth />
+                  <TextField label="По батькові" value={parts.middle} onChange={(e) => setPart('middle', e.target.value)} size="small" fullWidth />
+                </>
+              )
+            })()}
           </Stack>
+          <TextField label="Телефон" value={order.clientPhone} onChange={(e) => patch({ clientPhone: e.target.value })} size="small" placeholder="+380..." sx={{ maxWidth: 260 }} />
           <NpAddressPicker value={addr} onChange={(v) => patch({
             clientCityRef: v.cityRef || null, clientCityName: v.cityName || null,
             clientWarehouseRef: v.warehouseRef || null, clientWarehouseName: v.warehouseName || null,
