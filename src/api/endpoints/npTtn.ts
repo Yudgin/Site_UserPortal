@@ -12,6 +12,7 @@ export interface CreateTtnParams {
   serviceRequestId?: string // ТТН для сервисной заявки…
   boatOrderId?: string // …или для замовлення кораблика (рівно одне з двох)
   templateId: string
+  fopId?: string // переопределить ФОП-отправителя (иначе — ФОП шаблона)
   clientCityRef?: string // нужен, только когда сторона ТТН = «клієнт заявки»
   clientWarehouseRef?: string
   cost: number

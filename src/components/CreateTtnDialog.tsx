@@ -3,17 +3,18 @@
 //  • возврат/новый/мелочи: сервис → клиент (адрес — «куди»), получатель = клиент; для возврата
 //    по умолчанию наложенный платёж = сумма факта (снимается сервером, если уже оплачено онлайн).
 // Ошибку НП показываем текстом (первый прод-вызов — доводка маппинга).
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Dialog, DialogTitle, DialogContent, DialogActions, Button, Stack, TextField, MenuItem, Alert,
   Autocomplete, CircularProgress, Typography, Box,
 } from '@mui/material'
 import { npTemplateService } from '@/api/npTemplateService'
+import { boatPayApi, type FopPublic } from '@/api/endpoints/boatPay'
 import { npTtnApi } from '@/api/endpoints/npTtn'
 import { searchCities, getWarehouses, type NPCity, type NPWarehouse } from '@/api/endpoints/novaposhta'
 import { SIZE_LABELS, SCENARIO_LABELS, type NpTemplate } from '@/types/npTemplate'
 
-export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatOrderId, clientName, clientPhone, clientCityRef, clientCityName, clientWarehouseRef, clientWarehouseName, presetTemplateId, defaultCost, defaultCod, onCreated }: {
+export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatOrderId, clientName, clientPhone, clientCityRef, clientCityName, clientWarehouseRef, clientWarehouseName, presetTemplateId, defaultCost, defaultCod, defaultFopId, onCreated }: {
   open: boolean
   onClose: () => void
   serviceRequestId?: string // ТТН для сервисной заявки…
@@ -27,6 +28,7 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
   presetTemplateId?: string // предвыбранный шаблон (из центра); селект блокируется
   defaultCost?: number // оголошена вартість за замовчуванням (для замовлень — сума замовлення)
   defaultCod?: number // наложений платіж за замовчуванням (замовлення з методом 'cod', не оплачене)
+  defaultFopId?: string // ФОП-відправник за замовчуванням (замовлення: ФОП методу 'cod')
   onCreated: (ttn: string) => void
 }) {
   const [templates, setTemplates] = useState<NpTemplate[]>([])
@@ -38,6 +40,11 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
   const [warehouseRef, setWarehouseRef] = useState('')
   const [cost, setCost] = useState('300')
   const [cod, setCod] = useState('') // наложений платіж, грн ('' = авто/без)
+  const [fops, setFops] = useState<FopPublic[]>([]) // ФОПи з ключем НП (відправник ТТН)
+  const [fopId, setFopId] = useState('') // '' = ФОП шаблону
+  // Префілл адреси клієнта: ефект завантаження відділень скидає warehouseRef — памʼятаємо
+  // початкову пару, щоб НЕ затерти передане відділення (баг «не заповнилось відділення»).
+  const initialAddr = useRef<{ cityRef?: string; warehouseRef?: string }>({})
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [done, setDone] = useState<string | null>(null)
@@ -56,6 +63,9 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
     // Оголошена вартість = сумі замовлення (можна поправити); наложка — з методу оплати замовлення.
     if (defaultCost && defaultCost > 0) setCost(String(Math.max(1, Math.round(defaultCost))))
     setCod(defaultCod && defaultCod > 0 ? String(Math.round(defaultCod)) : '')
+    initialAddr.current = { cityRef: clientCityRef, warehouseRef: clientWarehouseRef }
+    setFopId(defaultFopId || '')
+    boatPayApi.listFops().then((all) => setFops(all.filter((f) => f.novaPoshta)))
     // Префилл адреса клиента из заявки (если он там сохранён из формы /repair/new)
     if (clientCityRef) {
       setCity({ Ref: clientCityRef, Description: clientCityName || clientCityRef, DescriptionRu: '', Area: '', AreaDescription: '' })
@@ -77,7 +87,10 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
   }, [cityQuery])
 
   useEffect(() => {
-    setWarehouses([]); setWarehouseRef('')
+    setWarehouses([])
+    // Скидаємо відділення ЛИШЕ якщо місто змінив користувач; для префілла з заявки/замовлення
+    // лишаємо передане відділення (раніше воно затиралось цим ефектом).
+    setWarehouseRef(city?.Ref && city.Ref === initialAddr.current.cityRef ? (initialAddr.current.warehouseRef || '') : '')
     if (!city?.Ref) return
     getWarehouses(city.Ref).then(setWarehouses)
   }, [city])
@@ -93,6 +106,7 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
     const res = await npTtnApi.create({
       ...(serviceRequestId ? { serviceRequestId } : {}), ...(boatOrderId ? { boatOrderId } : {}),
       templateId, cost: Number(cost),
+      ...(fopId ? { fopId } : {}),
       ...(cod !== '' ? { codAmount: Number(cod) || 0 } : {}),
       ...(needsClientAddr && city ? { clientCityRef: city.Ref, clientWarehouseRef: warehouseRef } : {}),
       ...(recipientIsClient ? { clientName, clientPhone } : {}),
@@ -117,6 +131,13 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
             ) : (
               <TextField select label="Шаблон посилки" value={templateId} onChange={(e) => setTemplateId(e.target.value)} size="small" fullWidth disabled={!!presetTemplateId}>
                 {templates.map((t) => <MenuItem key={t.id} value={t.id}>{SCENARIO_LABELS[t.scenario]} · {t.name} · {SIZE_LABELS[t.size]}</MenuItem>)}
+              </TextField>
+            )}
+            {fops.length > 0 && (
+              <TextField select label="ФОП-відправник (ключ НП; на нього — наложка)" value={fopId}
+                onChange={(e) => setFopId(e.target.value)} size="small" fullWidth>
+                <MenuItem value="">— ФОП із шаблону —</MenuItem>
+                {fops.map((f) => <MenuItem key={f.id} value={f.id}>{f.name}</MenuItem>)}
               </TextField>
             )}
             <Typography variant="body2" color="text.secondary">

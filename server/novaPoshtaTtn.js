@@ -97,7 +97,8 @@ export function registerNpTtn(app, deps) {
       const tpl = tplSnap.data()
       const scenario = tpl.scenario || 'incoming'
 
-      const fop = getFop(tpl.fopId)
+      // ФОП-відправник: явний вибір з діалогу (напр. ФОП методу 'cod' замовлення) → ФОП шаблону.
+      const fop = getFop(String(b.fopId || '') || tpl.fopId)
       const np = fop && fop.novaPoshta
       if (!np || !np.apiKey) return res.status(400).json({ success: false, error: { code: 'NO_NP_KEY', message: 'У ФОП шаблону не заданий ключ/відправник Нової Пошти («ФОПи та ключі»)' } })
       if (!np.senderRef || !np.contactRef || !np.cityRef || !np.warehouseRef) {

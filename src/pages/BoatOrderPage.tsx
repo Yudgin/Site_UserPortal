@@ -67,6 +67,7 @@ export default function BoatOrderPage() {
     setLoading(false)
   }, [id])
   useEffect(() => { load() }, [load])
+  useEffect(() => { boatPayApi.listFops().then(setFops).catch(() => setFops([])) }, [])
 
   const patch = (p: Partial<BoatOrder>) => { setOrder((o) => (o ? { ...o, ...p } : o)); setDirty(true) }
 
@@ -162,7 +163,13 @@ export default function BoatOrderPage() {
       list = await boatPayApi.listFops()
       setFops(list)
     }
-    if (!payFopId && list.length) {
+    // Префілл: перший дозволений онлайн-метод замовлення + його ФОП із payFops.
+    const allowed = order?.payMethods?.length ? order.payMethods.filter((m) => m !== 'cod') : null
+    const method = (allowed && allowed[0]) || BOAT_PAY_METHODS.filter((x) => list[0]?.methods?.[x.fopKey])[0]?.value || ''
+    const fopFromOrder = method && order?.payFops?.[method]
+    if (fopFromOrder && list.some((f) => f.id === fopFromOrder)) {
+      setPayFopId(fopFromOrder); setPayMethod(method)
+    } else if (!payFopId && list.length) {
       const f = list[0]
       setPayFopId(f.id)
       setPayMethod(BOAT_PAY_METHODS.filter((x) => f.methods?.[x.fopKey])[0]?.value || '')
@@ -421,6 +428,27 @@ export default function BoatOrderPage() {
             )
           })}
         </Stack>
+        {/* ФОП для кожного обраного способу: онлайн — хто приймає гроші/видає чек;
+            наложка — ФОП-відправник ТТН (його ключ НП, на нього приходять гроші). */}
+        {(order.payMethods || []).length > 0 && (
+          <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap sx={{ mt: 1.5 }}>
+            {(order.payMethods || []).map((m) => {
+              const fopKey = ({ cod: 'cod', 'mono-acquire': 'monoAcquire', 'mono-chast': 'monoChast', 'liqpay-card': 'liqpayCard', 'liqpay-paypart': 'liqpayPaypart' } as Record<string, string>)[m]
+              const applicable = fops.filter((f) => (m === 'cod' ? f.novaPoshta : f.methods?.[fopKey]))
+              return (
+                <TextField key={m} select size="small" sx={{ minWidth: 230 }}
+                  label={`ФОП: ${BOAT_ORDER_PAY_METHOD_LABELS[m] || m}`}
+                  value={order.payFops?.[m] || ''}
+                  error={!order.payFops?.[m]}
+                  helperText={!order.payFops?.[m] ? 'оберіть ФОП' : undefined}
+                  onChange={(e) => patch({ payFops: { ...(order.payFops || {}), [m]: e.target.value } })}>
+                  <MenuItem value=""><em>—</em></MenuItem>
+                  {applicable.map((f) => <MenuItem key={f.id} value={f.id}>{f.name}{m !== 'cod' && !f.receipts ? ' — без ПРРО!' : ''}</MenuItem>)}
+                </TextField>
+              )
+            })}
+          </Stack>
+        )}
       </Paper>
 
       {/* Дії: доставка та оплата */}
@@ -513,6 +541,7 @@ export default function BoatOrderPage() {
         boatOrderId={order.id}
         defaultCost={order.total > 0 ? order.total : undefined}
         defaultCod={(order.payMethods || []).includes('cod') && !order.paidAt && order.total > 0 ? order.total : undefined}
+        defaultFopId={order.payFops?.cod || undefined}
         clientName={order.clientName}
         clientPhone={order.clientPhone}
         clientCityRef={order.clientCityRef || undefined}
