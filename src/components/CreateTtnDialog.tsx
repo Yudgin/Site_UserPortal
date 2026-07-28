@@ -13,7 +13,7 @@ import { npTtnApi } from '@/api/endpoints/npTtn'
 import { searchCities, getWarehouses, type NPCity, type NPWarehouse } from '@/api/endpoints/novaposhta'
 import { SIZE_LABELS, SCENARIO_LABELS, type NpTemplate } from '@/types/npTemplate'
 
-export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatOrderId, clientName, clientPhone, clientCityRef, clientCityName, clientWarehouseRef, clientWarehouseName, presetTemplateId, onCreated }: {
+export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatOrderId, clientName, clientPhone, clientCityRef, clientCityName, clientWarehouseRef, clientWarehouseName, presetTemplateId, defaultCost, defaultCod, onCreated }: {
   open: boolean
   onClose: () => void
   serviceRequestId?: string // ТТН для сервисной заявки…
@@ -25,6 +25,8 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
   clientWarehouseRef?: string
   clientWarehouseName?: string
   presetTemplateId?: string // предвыбранный шаблон (из центра); селект блокируется
+  defaultCost?: number // оголошена вартість за замовчуванням (для замовлень — сума замовлення)
+  defaultCod?: number // наложений платіж за замовчуванням (замовлення з методом 'cod', не оплачене)
   onCreated: (ttn: string) => void
 }) {
   const [templates, setTemplates] = useState<NpTemplate[]>([])
@@ -35,6 +37,7 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
   const [warehouses, setWarehouses] = useState<NPWarehouse[]>([])
   const [warehouseRef, setWarehouseRef] = useState('')
   const [cost, setCost] = useState('300')
+  const [cod, setCod] = useState('') // наложений платіж, грн ('' = авто/без)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [done, setDone] = useState<string | null>(null)
@@ -50,6 +53,9 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
   useEffect(() => {
     if (!open) return
     setErr(''); setDone(null)
+    // Оголошена вартість = сумі замовлення (можна поправити); наложка — з методу оплати замовлення.
+    if (defaultCost && defaultCost > 0) setCost(String(Math.max(1, Math.round(defaultCost))))
+    setCod(defaultCod && defaultCod > 0 ? String(Math.round(defaultCod)) : '')
     // Префилл адреса клиента из заявки (если он там сохранён из формы /repair/new)
     if (clientCityRef) {
       setCity({ Ref: clientCityRef, Description: clientCityName || clientCityRef, DescriptionRu: '', Area: '', AreaDescription: '' })
@@ -87,6 +93,7 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
     const res = await npTtnApi.create({
       ...(serviceRequestId ? { serviceRequestId } : {}), ...(boatOrderId ? { boatOrderId } : {}),
       templateId, cost: Number(cost),
+      ...(cod !== '' ? { codAmount: Number(cod) || 0 } : {}),
       ...(needsClientAddr && city ? { clientCityRef: city.Ref, clientWarehouseRef: warehouseRef } : {}),
       ...(recipientIsClient ? { clientName, clientPhone } : {}),
     })
@@ -147,7 +154,11 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
               </>
             )}
             <TextField label="Оголошена вартість, грн" type="number" value={cost} onChange={(e) => setCost(e.target.value)} size="small" fullWidth
-              helperText="Оціночна вартість вмісту для НП" />
+              helperText={defaultCost ? 'Підставлено з суми замовлення' : 'Оціночна вартість вмісту для НП'} />
+            {recipientIsClient && (
+              <TextField label="Наложений платіж, грн" type="number" value={cod} onChange={(e) => setCod(e.target.value)} size="small" fullWidth
+                helperText={defaultCod ? 'Підставлено з суми замовлення (метод «наложений платіж»)' : 'Порожньо — авто (за шаблоном/оплатою); 0 — без наложки'} />
+            )}
             {recipientIsClient && !clientPhone && <Alert severity="warning">У заявці немає телефону клієнта — отримувача НП може не вдатися створити.</Alert>}
             {err && <Alert severity="error"><Box sx={{ whiteSpace: 'pre-wrap' }}>{err}</Box></Alert>}
           </Stack>

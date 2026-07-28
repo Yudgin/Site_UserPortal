@@ -23,7 +23,7 @@ import { boatModelService, boatOptionService, dropshipperService } from '@/api/b
 import NpAddressPicker from '@/components/NpAddressPicker'
 import type { NpAddress } from '@/types/npTemplate'
 import {
-  BOAT_ORDER_STATUSES, BOAT_ORDER_STATUS_LABELS, BOAT_OPTION_KIND_LABELS, optionFitsModel, discountPct,
+  BOAT_ORDER_STATUSES, BOAT_ORDER_STATUS_LABELS, BOAT_OPTION_KIND_LABELS, BOAT_ORDER_PAY_METHOD_LABELS, optionFitsModel, discountPct,
   lineEffTotal, lineDiscountAmount,
   type BoatModel, type BoatOption, type BoatOrder, type BoatOrderLine, type BoatOrderStatus, type Dropshipper,
 } from '@/types/boats'
@@ -150,8 +150,9 @@ export default function BoatOrderPage() {
   // Онлайн-способи, доступні обраному ФОП (переключатели методів у ФОП + наявність ключів).
   const availableMethods = useMemo(() => {
     const fop = fops.find((f) => f.id === payFopId)
-    return fop ? BOAT_PAY_METHODS.filter((m) => fop.methods?.[m.fopKey]) : []
-  }, [fops, payFopId])
+    const allowed = order?.payMethods?.length ? new Set(order.payMethods) : null
+    return fop ? BOAT_PAY_METHODS.filter((m) => fop.methods?.[m.fopKey] && (!allowed || allowed.has(m.value))) : []
+  }, [fops, payFopId, order?.payMethods])
 
   const openPayDialog = async () => {
     setPayErr('')
@@ -403,6 +404,25 @@ export default function BoatOrderPage() {
         </Stack>
       </Paper>
 
+      {/* Способи оплати замовлення: онлайн-методи + наложений платіж (сума піде в ТТН) */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Способи оплати</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          Оберіть, як клієнт може оплатити. «Наложений платіж» — сума замовлення автоматично
+          підставиться наложкою при створенні ТТН (якщо не оплачено онлайн).
+        </Typography>
+        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+          {Object.entries(BOAT_ORDER_PAY_METHOD_LABELS).map(([m, label]) => {
+            const onList = (order.payMethods || []).includes(m)
+            return (
+              <Chip key={m} label={label} size="small"
+                color={onList ? 'primary' : 'default'} variant={onList ? 'filled' : 'outlined'}
+                onClick={() => patch({ payMethods: onList ? (order.payMethods || []).filter((x) => x !== m) : [...(order.payMethods || []), m] })} />
+            )
+          })}
+        </Stack>
+      </Paper>
+
       {/* Дії: доставка та оплата */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Дії</Typography>
@@ -491,6 +511,8 @@ export default function BoatOrderPage() {
         open={ttnDialog}
         onClose={() => setTtnDialog(false)}
         boatOrderId={order.id}
+        defaultCost={order.total > 0 ? order.total : undefined}
+        defaultCod={(order.payMethods || []).includes('cod') && !order.paidAt && order.total > 0 ? order.total : undefined}
         clientName={order.clientName}
         clientPhone={order.clientPhone}
         clientCityRef={order.clientCityRef || undefined}

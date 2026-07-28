@@ -177,7 +177,8 @@ export function registerNpTtn(app, deps) {
       let codAmount = Number(b.codAmount)
       if (!Number.isFinite(codAmount)) {
         codAmount = 0
-        if (tpl.cod && fopAcceptsCod && recipientTarget === 'client') {
+        const orderWantsCod = boId && Array.isArray(sr.payMethods) && sr.payMethods.includes('cod')
+        if ((tpl.cod || orderWantsCod) && fopAcceptsCod && recipientTarget === 'client') {
           if (srId && sr.actualEstimateId) {
             try {
               const est = await adminDb.collection('priceEstimates').doc(String(sr.actualEstimateId)).get()

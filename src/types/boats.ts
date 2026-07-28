@@ -171,6 +171,9 @@ export interface BoatOrder {
   // Хід виконання
   status: BoatOrderStatus
   statusHistory: BoatOrderStatusChange[]
+  // Дозволені способи оплати цього замовлення (обирає адмін): онлайн-методи + 'cod'
+  // (наложений платіж — сума встановлюється в ТТН автоматично з суми замовлення).
+  payMethods?: string[]
   // Дропшипінг: хто посередник і куди йде оплата. Чек видає отримувач грошей:
   // payTo='dropshipper' ⇒ без наших посилань на оплату і чеків (лише фіксація суми).
   dropshipperId?: string | null
@@ -194,4 +197,13 @@ export interface BoatOrder {
   createdAt: string
   updatedAt: string
   createdBy?: string | null
+}
+
+// Способи оплати замовлення для UI (онлайн-методи збігаються з BOAT_PAY_METHODS у boatPay.ts).
+export const BOAT_ORDER_PAY_METHOD_LABELS: Record<string, string> = {
+  cod: 'Наложений платіж (НП)',
+  'mono-acquire': 'Картою (monobank)',
+  'mono-chast': 'Покупка частинами (monobank)',
+  'liqpay-card': 'Картою (LiqPay)',
+  'liqpay-paypart': 'Оплата частинами (LiqPay)',
 }
