@@ -11,6 +11,7 @@ import { Home as HomeIcon, Refresh as RefreshIcon } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import { serviceRequestService } from '@/api/serviceRequestService'
+import { useTtnStatuses, ttnChipColor } from '@/hooks/useTtnStatuses'
 import {
   SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequestStatus,
 } from '@/types/serviceRequest'
@@ -39,6 +40,19 @@ export default function ServiceRequestsListPage() {
   useEffect(() => { setShown(PAGE) }, [statusFilter, sourceFilter, q])
 
   const is1c6 = (r: ServiceRequest) => r.id.startsWith('sr-1c6-')
+
+  // Статуси ТТН НП для видимих рядків (батч; кеш на сторінку).
+  const visible = useMemo(() => rows.slice(0, 400), [rows])
+  const ttnStatuses = useTtnStatuses(visible.flatMap((r) => [r.waybillNumber, r.returnTtn]))
+  const ttnChip = (ttn?: string | null, prefix = '') => {
+    if (!ttn) return null
+    const st = ttnStatuses[String(ttn).replace(/\D/g, '')]
+    return (
+      <Chip size="small" variant="outlined" color={st ? ttnChipColor(st.status) : 'default'}
+        sx={{ maxWidth: 190 }} title={`${ttn}${st ? ` — ${st.status}` : ''}`}
+        label={`${prefix}${st ? st.status : '…'}`} />
+    )
+  }
 
   const filtered = useMemo(() => {
     const query = q.trim().toLowerCase()
@@ -110,6 +124,7 @@ export default function ServiceRequestsListPage() {
                   <TableCell>Клієнт</TableCell>
                   <TableCell>Скарга</TableCell>
                   <TableCell>Статус</TableCell>
+                  <TableCell>ТТН</TableCell>
                   <TableCell>Етапи</TableCell>
                 </TableRow>
               </TableHead>
@@ -125,6 +140,12 @@ export default function ServiceRequestsListPage() {
                     <TableCell>
                       <Chip size="small" color={statusColor(r.status)} label={SERVICE_REQUEST_STATUS_LABELS[r.status]} />
                       {is1c6(r) && <Chip size="small" variant="outlined" label="1С6" sx={{ ml: 0.5 }} />}
+                    </TableCell>
+                    <TableCell>
+                      <Stack spacing={0.5}>
+                        {ttnChip(r.waybillNumber, '→ нам: ')}
+                        {ttnChip(r.returnTtn, '→ клієнту: ')}
+                      </Stack>
                     </TableCell>
                     <TableCell>
                       {r.diagnostics?.text && <Chip size="small" color="info" variant="outlined" label="діагн." sx={{ mr: 0.5 }} />}

@@ -483,6 +483,25 @@ app.post('/api/novaposhta/streets', proxyLimiter, async (req, res) => {
 })
 
 // Track parcel by TTN
+// Батч-трекинг ТТН (для списков заявок/замовлень): до 100 накладних одним викликом НП.
+app.post('/api/novaposhta/track-batch', proxyLimiter, async (req, res) => {
+  try {
+    const ttns = Array.isArray(req.body?.ttns) ? req.body.ttns.map((t) => String(t).replace(/\D/g, '')).filter(Boolean).slice(0, 100) : []
+    if (!ttns.length) return res.json({ success: true, data: {} })
+    const data = await npRequest('TrackingDocument', 'getStatusDocuments', {
+      Documents: ttns.map((t) => ({ DocumentNumber: t })),
+    })
+    const map = {}
+    for (const d of (data && data.data) || []) {
+      if (d && d.Number) map[String(d.Number)] = { status: d.Status || '', code: String(d.StatusCode || '') }
+    }
+    res.json({ success: true, data: map })
+  } catch (error) {
+    console.error('Nova Poshta batch tracking error:', error.message)
+    res.status(500).json({ success: false, error: { code: 'NP_FAILED', message: 'Failed to track parcels' } })
+  }
+})
+
 app.post('/api/novaposhta/track', proxyLimiter, async (req, res) => {
   try {
     const { ttn } = req.body

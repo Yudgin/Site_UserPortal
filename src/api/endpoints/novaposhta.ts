@@ -99,6 +99,19 @@ export const getWarehouses = async (cityRef: string, searchQuery?: string): Prom
   }
 }
 
+// Батч-статуси ТТН: {ттн → {status, code}}. Використовується списками заявок/замовлень.
+export const trackParcels = async (ttns: string[]): Promise<Record<string, { status: string; code: string }>> => {
+  try {
+    const clean = [...new Set(ttns.map((t) => String(t).replace(/\D/g, '')).filter(Boolean))]
+    if (!clean.length) return {}
+    const response = await npClient.post('/track-batch', { ttns: clean })
+    return response.data.success && response.data.data ? response.data.data : {}
+  } catch (error) {
+    console.error('Error batch tracking:', error)
+    return {}
+  }
+}
+
 // Track parcel by TTN
 export const trackParcel = async (ttn: string): Promise<any> => {
   try {

@@ -7,7 +7,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, CircularProgress, Stack, Chip, Divider,
   TextField, MenuItem, Switch, FormControlLabel, IconButton, Snackbar, ToggleButtonGroup, ToggleButton,
-  Dialog, DialogTitle, DialogContent, DialogActions,
+  Dialog, DialogTitle, DialogContent, DialogActions, Tooltip,
 } from '@mui/material'
 import {
   ArrowBack as BackIcon, Add as AddIcon, Delete as DeleteIcon, Sailing as BoatIcon,
@@ -28,6 +28,7 @@ import {
   type BoatModel, type BoatOption, type BoatOrder, type BoatOrderLine, type BoatOrderStatus, type Dropshipper,
 } from '@/types/boats'
 import { secureId } from '@/utils/id'
+import { useTtnStatuses, ttnChipColor } from '@/hooks/useTtnStatuses'
 
 const fmtUah = (n: number) => `${(n || 0).toLocaleString('uk-UA')} грн`
 // Сума рядка/замовлення — з урахуванням додаткової знижки рядка (та сама формула, що на сервері).
@@ -140,6 +141,8 @@ export default function BoatOrderPage() {
     if (res) notify(`Статус: ${BOAT_ORDER_STATUS_LABELS[s]}`)
     else notify('Не вдалося зберегти статус', 'error')
   }
+
+  const ttnStatuses = useTtnStatuses([order?.ttn])
 
   const addr: NpAddress = useMemo(() => ({
     cityRef: order?.clientCityRef || undefined,
@@ -459,8 +462,20 @@ export default function BoatOrderPage() {
             <Button variant="outlined" startIcon={<TtnIcon />} onClick={() => setTtnDialog(true)} disabled={dirty}>
               Створити ТТН
             </Button>
+            {/* ТТН можна ввести і вручну (якщо накладну створено поза системою) — «Зберегти» запише */}
+            <TextField label="ТТН (можна вручну)" size="small" sx={{ minWidth: 190 }}
+              value={order.ttn || ''} placeholder="напр. 20450…"
+              onChange={(e) => patch({ ttn: e.target.value.trim() || null })} />
             {order.ttn && (
-              <Chip size="small" color="info" label={`ТТН: ${order.ttn}`} onDelete={() => copy(String(order.ttn))} deleteIcon={<CopyIcon />} />
+              <>
+                <Tooltip title="Скопіювати номер">
+                  <IconButton size="small" onClick={() => copy(String(order.ttn))}><CopyIcon fontSize="small" /></IconButton>
+                </Tooltip>
+                {(() => {
+                  const st = ttnStatuses[String(order.ttn).replace(/\D/g, '')]
+                  return st ? <Chip size="small" variant="outlined" color={ttnChipColor(st.status)} label={st.status} /> : null
+                })()}
+              </>
             )}
           </Stack>
           {order.payTo === 'dropshipper' ? (
