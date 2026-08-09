@@ -8,6 +8,7 @@ export interface Firmware {
   branch: string
   brand: string
   device: string
+  feature?: string // код особливості збірки (напр. W1114); часто порожній
   win?: string // ID for Windows version download (optional)
   mac?: string // ID for Mac version download (optional)
 }

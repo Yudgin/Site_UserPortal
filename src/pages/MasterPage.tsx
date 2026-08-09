@@ -30,6 +30,7 @@ export default function MasterPage() {
   const [filterLang, setFilterLang] = useState<string>('')
   const [filterBrand, setFilterBrand] = useState<string>('')
   const [filterDevice, setFilterDevice] = useState<string>('')
+  const [filterFeature, setFilterFeature] = useState<string>('') // '' = усі; 'none' = без feature; інакше — значення
 
   // Access control state
   const [brands, setBrands] = useState<FirmwareBrand[]>([])
@@ -130,7 +131,8 @@ export default function MasterPage() {
     const langs = [...new Set(accessibleFirmwares.map((fw) => fw.lang))].sort()
     const brandList = [...new Set(accessibleFirmwares.map((fw) => fw.brand))].sort()
     const devices = [...new Set(accessibleFirmwares.map((fw) => fw.device).filter(Boolean))].sort()
-    return { branches: branchList, langs, brands: brandList, devices }
+    const features = [...new Set(accessibleFirmwares.map((fw) => fw.feature || '').filter(Boolean))].sort()
+    return { branches: branchList, langs, brands: brandList, devices, features }
   }, [accessibleFirmwares])
 
   const filteredFirmwares = useMemo(() => {
@@ -141,14 +143,17 @@ export default function MasterPage() {
         fw.lang.toLowerCase().includes(query) ||
         fw.branch.toLowerCase().includes(query) ||
         fw.brand.toLowerCase().includes(query) ||
-        (fw.device && fw.device.toLowerCase().includes(query))
+        (fw.device && fw.device.toLowerCase().includes(query)) ||
+        (fw.feature && fw.feature.toLowerCase().includes(query))
       const matchesBranch = !filterBranch || fw.branch === filterBranch
       const matchesLang = !filterLang || fw.lang === filterLang
       const matchesBrand = !filterBrand || fw.brand === filterBrand
       const matchesDevice = !filterDevice || fw.device === filterDevice
-      return matchesSearch && matchesBranch && matchesLang && matchesBrand && matchesDevice
+      const matchesFeature = !filterFeature
+        || (filterFeature === 'none' ? !(fw.feature || '') : fw.feature === filterFeature)
+      return matchesSearch && matchesBranch && matchesLang && matchesBrand && matchesDevice && matchesFeature
     })
-  }, [accessibleFirmwares, searchQuery, filterBranch, filterLang, filterBrand, filterDevice])
+  }, [accessibleFirmwares, searchQuery, filterBranch, filterLang, filterBrand, filterDevice, filterFeature])
 
   const groupedByBrand = useMemo(() => {
     return filteredFirmwares.reduce((acc, fw) => {
@@ -236,6 +241,17 @@ export default function MasterPage() {
                 {filterOptions.devices.map((device) => <MenuItem key={device} value={device}>{device}</MenuItem>)}
               </Select>
             </FormControl>
+
+            {filterOptions.features.length > 0 && (
+              <FormControl size="small" sx={{ minWidth: 130 }}>
+                <InputLabel>{t('master.feature', 'Feature')}</InputLabel>
+                <Select value={filterFeature} label={t('master.feature', 'Feature')} onChange={(e) => setFilterFeature(e.target.value)}>
+                  <MenuItem value="">{t('common.all', 'Усі')}</MenuItem>
+                  <MenuItem value="none">{t('master.featureNone', 'Без feature')}</MenuItem>
+                  {filterOptions.features.map((f) => <MenuItem key={f} value={f}>{f}</MenuItem>)}
+                </Select>
+              </FormControl>
+            )}
           </Stack>
 
           {/* Прошивки по брендам */}
@@ -264,6 +280,7 @@ export default function MasterPage() {
                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                               <Typography variant="body2">{firmware.Name}</Typography>
                               {isBeta && <Chip label="Beta" size="small" color="warning" sx={{ height: 20, fontSize: '0.7rem' }} />}
+                              {firmware.feature && <Chip label={firmware.feature} size="small" color="info" variant="outlined" sx={{ height: 20, fontSize: '0.7rem' }} />}
                             </Box>
                           </TableCell>
                           <TableCell>{firmware.device || '-'}</TableCell>
