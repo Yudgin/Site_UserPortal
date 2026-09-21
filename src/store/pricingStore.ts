@@ -13,6 +13,7 @@ interface PricingState {
   error: string | null
 
   loadFromServer: () => Promise<void>
+  refreshSilent: () => Promise<void>
   savePriceList: (data: Omit<PriceListDoc, 'updatedAt' | 'updatedBy'>) => Promise<boolean>
 }
 
@@ -55,6 +56,17 @@ export const usePricingStore = create<PricingState>()((set) => ({
     } finally {
       set({ isLoading: false })
     }
+  },
+
+  // ТИХОЕ обновление каталога (без isLoading): для ИИ-подборщика, который освежает прайс
+  // при открытии диалога. loadFromServer здесь нельзя: страницы (напр. фактическая
+  // калькуляция) на isLoading сворачиваются в спиннер и РАЗМОНТИРУЮТ открытый диалог —
+  // «страница моргает, ничего не происходит».
+  refreshSilent: async () => {
+    try {
+      const doc = await pricingService.loadPriceList()
+      if (doc) set({ catalog: doc, indexed: toIndex(doc), persisted: true, isSynced: true })
+    } catch { /* тихо: работаем на текущем каталоге */ }
   },
 
   savePriceList: async (data) => {

@@ -25,8 +25,10 @@ export default function AiWorkPicker({ priceContext, catalog, onAdd, initialDesc
 
   // Свіжий каталог при кожному відкритті: інакше вкладка, відкрита ДО збереження прайсу,
   // тримала застарілий контекст — ІІ чесно «не знаходив» щойно доданих позицій.
-  const loadFromServer = usePricingStore((st) => st.loadFromServer)
-  useEffect(() => { if (open) loadFromServer() }, [open, loadFromServer])
+  // САМЕ refreshSilent: loadFromServer вмикає глобальний isLoading, сторінка калькуляції
+  // згортається у спінер і РОЗМОНТОВУЄ відкритий діалог (сторінка «моргала», діалог зникав).
+  const refreshSilent = usePricingStore((st) => st.refreshSilent)
+  useEffect(() => { if (open) refreshSilent() }, [open, refreshSilent])
 
   // При открытии диалога с пустым полем — засеваем описанием из диагностики (если есть).
   useEffect(() => {
