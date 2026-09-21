@@ -115,8 +115,60 @@ export function registerOnecSync(app, deps) {
     return verifyFirebaseAdmin(req)
   }
 
+  // Сервисный центр 1С (serviceCenterID = Код, serviceCenterName = Наименование) → id нашего
+  // реестра serviceCenters: сперва по externalId (код 1С), затем по названию (тогда дописываем
+  // externalId центру), нет совпадения — создаём центр автоматически (владелец донастроит
+  // ФОП/шаблоны в админке). Резолвер живёт один прогон; создание защищено promise-кешем.
+  const makeCenterResolver = () => {
+    const norm = (s) => String(s || '').trim().toLowerCase()
+    let loaded = null
+    const creating = new Map()
+    const load = async () => {
+      const snap = await adminDb.collection('serviceCenters').get()
+      const byCode = new Map(), byName = new Map()
+      for (const d of snap.docs) {
+        const c = d.data() || {}
+        if (c.externalId) byCode.set(norm(c.externalId), d.id)
+        if (c.name) byName.set(norm(c.name), d.id)
+      }
+      return { byCode, byName }
+    }
+    return async (code, name) => {
+      code = String(code || '').trim(); name = String(name || '').trim()
+      if (!code && !name) return ''
+      if (!loaded) loaded = load()
+      const m = await loaded
+      const foundByCode = code && m.byCode.get(norm(code))
+      if (foundByCode) return foundByCode
+      const foundByName = name && m.byName.get(norm(name))
+      if (foundByName) {
+        if (code) {
+          m.byCode.set(norm(code), foundByName)
+          adminDb.collection('serviceCenters').doc(foundByName)
+            .set({ externalId: code, updatedAt: nowIso() }, { merge: true }).catch(() => {})
+        }
+        return foundByName
+      }
+      const key = norm(code || name)
+      if (!creating.has(key)) {
+        creating.set(key, (async () => {
+          const id = crypto.randomBytes(9).toString('base64url').slice(0, 12)
+          const now = nowIso()
+          await adminDb.collection('serviceCenters').doc(id).set({
+            id, name: name || `Центр 1С ${code}`, externalId: code, active: true,
+            createdAt: now, createdBy: '1c-sync', updatedAt: now,
+          })
+          if (code) m.byCode.set(norm(code), id)
+          if (name) m.byName.set(norm(name), id)
+          return id
+        })())
+      }
+      return creating.get(key)
+    }
+  }
+
   // Один ремонт: полный объект из 1С → upsert. Возвращает 'created'|'updated'|'unchanged'.
-  const syncOne = async (item) => {
+  const syncOne = async (item, resolveCenter) => {
     const guid = String(item.id || '').trim().toLowerCase()
     if (!GUID_RE.test(guid)) throw new Error('bad guid')
     const { data: raw } = await axios.get(`${API_BASE}/repair/${guid}`, { timeout: 20000 })
@@ -124,6 +176,7 @@ export function registerOnecSync(app, deps) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw) || (isEmpty(raw.FixNumber) && isEmpty(raw.requestId))) {
       throw new Error('bad 1C response')
     }
+    const centerId = await resolveCenter(raw.serviceCenterID, raw.serviceCenterName)
 
     const col = adminDb.collection('serviceRequests')
     return adminDb.runTransaction(async (tx) => {
@@ -154,6 +207,7 @@ export function registerOnecSync(app, deps) {
       fill('complaint', String(raw.complaint || item.Dist || '').slice(0, 2000))
       fill('waybillNumber', normTtn(raw.shipment?.ttn))
       fill('returnTtn', normTtn(raw.returnTtn))
+      fill('serviceCenterId', centerId) // ручной выбор центра на карточке не затираем
       // Адрес НП 1С отдаёт текстом без Ref-ов — кладём текст, только если адреса нет совсем
       // (Ref при необходимости резолвится на карточке заявки/при создании ТТН).
       if (!exists || (isEmpty(cur.clientCityName) && isEmpty(cur.clientCityRef))) {
@@ -230,12 +284,13 @@ export function registerOnecSync(app, deps) {
 
       const stats = { total: list.length, created: 0, updated: 0, unchanged: 0, deferred: 0, errors: [] }
       const deadline = Date.now() + RUN_BUDGET_MS
+      const resolveCenter = makeCenterResolver()
       let i = 0
       const worker = async () => {
         while (i < list.length) {
           if (Date.now() > deadline) return
           const item = list[i++]
-          try { stats[await syncOne(item)]++ } catch (e) {
+          try { stats[await syncOne(item, resolveCenter)]++ } catch (e) {
             stats.errors.push({ guid: String(item.id || ''), error: e?.response?.status ? `HTTP ${e.response.status}` : String(e.message || e).slice(0, 200) })
           }
         }
