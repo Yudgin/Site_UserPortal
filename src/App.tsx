@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Snackbar, Alert, Box, CircularProgress } from '@mui/material'
 import AppRoutes from './routes'
 import { useAuthStore } from '@/store/authStore'
@@ -13,6 +13,17 @@ function App() {
   const { setUser, setLoading, isLoading } = useAuthStore()
   const loadBoatsFromServer = useBoatStore((state) => state.loadFromServer)
   const loadSettingsFromServer = useSettingsStore((state) => state.loadFromServer)
+
+  // Глобальный перехват JS-ошибок: любая необработанная ошибка/отклонённый промис показывается
+  // красной плашкой (иначе «кнопка не работает» молча и без DevTools причину не увидеть).
+  const [jsError, setJsError] = useState<string | null>(null)
+  useEffect(() => {
+    const onErr = (e: ErrorEvent) => setJsError(e.message || 'Невідома помилка')
+    const onRej = (e: PromiseRejectionEvent) => setJsError(String((e.reason as any)?.message || e.reason || 'Помилка'))
+    window.addEventListener('error', onErr)
+    window.addEventListener('unhandledrejection', onRej)
+    return () => { window.removeEventListener('error', onErr); window.removeEventListener('unhandledrejection', onRej) }
+  }, [])
 
   useEffect(() => {
     setLoading(true)
@@ -98,6 +109,12 @@ function App() {
           sx={{ width: '100%' }}
         >
           {error}
+        </Alert>
+      </Snackbar>
+      <Snackbar open={!!jsError} onClose={() => setJsError(null)} autoHideDuration={15000}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
+        <Alert severity="error" variant="filled" onClose={() => setJsError(null)} sx={{ maxWidth: 560 }}>
+          Помилка на сторінці: {jsError}
         </Alert>
       </Snackbar>
     </>
