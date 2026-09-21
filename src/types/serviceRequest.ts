@@ -62,4 +62,8 @@ export interface ServiceRequest {
   offerId?: string | null // предложение с вариантами (предварительные калькуляции)
   actualEstimateId?: string | null // фактическая калькуляция
   paymentId?: string | null // оплата
+  // Мета ремонта из 1С (пишет backend-синхронизация /api/onec/sync-repairs). Полный сырой
+  // объект 1С лежит в поддокументе serviceRequests/{id}/onec/snapshot (список остаётся лёгким);
+  // rawHash — сверка изменений без чтения снимка.
+  onec?: { guid: string; number: string; listDate?: string; syncedAt: string; rawHash?: string; rawSize?: number } | null
 }

@@ -7,10 +7,11 @@ import {
   Container, Box, Paper, Typography, Button, Alert, CircularProgress, Chip, Stack, TextField,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
 } from '@mui/material'
-import { Home as HomeIcon, Refresh as RefreshIcon } from '@mui/icons-material'
+import { Home as HomeIcon, Refresh as RefreshIcon, CloudSync as SyncIcon } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import { serviceRequestService } from '@/api/serviceRequestService'
+import { syncRepairsFrom1C } from '@/api/onecSyncApi'
 import { useTtnStatuses, ttnChipColor } from '@/hooks/useTtnStatuses'
 import {
   SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequestStatus,
@@ -34,8 +35,28 @@ export default function ServiceRequestsListPage() {
   const [sourceFilter, setSourceFilter] = useState<'all' | 'portal' | '1c6'>('all')
   const [q, setQ] = useState('')
   const [shown, setShown] = useState(PAGE)
+  const [syncing, setSyncing] = useState(false)
+  const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   const load = useCallback(async () => { setLoading(true); setRows(await serviceRequestService.list(3000)); setLoading(false) }, [])
+
+  // Синхронизация картотеки ремонтов из 1С (~1-2 хв на повний прогін).
+  const sync1c = async () => {
+    setSyncing(true); setSyncMsg(null)
+    try {
+      const r = await syncRepairsFrom1C()
+      setSyncMsg({
+        ok: r.success && !r.errors?.length,
+        text: `1С: усього ${r.total} · нових ${r.created} · оновлено ${r.updated} · без змін ${r.unchanged}`
+          + (r.deferred ? ` · відкладено ${r.deferred} (добере наступний прогін)` : '')
+          + (r.errors?.length ? ` · помилок ${r.errors.length} (${r.errors[0].guid}: ${r.errors[0].error})` : ''),
+      })
+      await load()
+    } catch (e: any) {
+      setSyncMsg({ ok: false, text: `Синхронізація не вдалася: ${e?.response?.data?.error || e?.message || e}` })
+    }
+    setSyncing(false)
+  }
   useEffect(() => { load() }, [load])
   useEffect(() => { setShown(PAGE) }, [statusFilter, sourceFilter, q])
 
@@ -63,6 +84,7 @@ export default function ServiceRequestsListPage() {
         || (r.clientName || '').toLowerCase().includes(query)
         || (r.clientPhone || '').toLowerCase().includes(query)
         || (r.externalRequestId || '').toLowerCase().includes(query)
+        || (r.onec?.number || '').replace(/^0+/, '').includes(query.replace(/^0+/, '') || ' ')
         || r.id.toLowerCase().includes(query)
         || (r.complaint || '').toLowerCase().includes(query))
       .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')) // нові зверху
@@ -82,10 +104,14 @@ export default function ServiceRequestsListPage() {
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h4">Заявки на обслуговування</Typography>
         <Box>
+          <Button startIcon={syncing ? <CircularProgress size={16} /> : <SyncIcon />} onClick={sync1c} disabled={syncing || loading}>
+            Синхронізувати з 1С
+          </Button>
           <Button startIcon={<RefreshIcon />} onClick={load} disabled={loading}>Оновити</Button>
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
         </Box>
       </Box>
+      {syncMsg && <Alert severity={syncMsg.ok ? 'success' : 'warning'} sx={{ mb: 2 }} onClose={() => setSyncMsg(null)}>{syncMsg.text}</Alert>}
 
       <Stack direction="row" spacing={0.5} sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap alignItems="center">
         <Chip label={`Усі (${rows.length})`} size="small" color={statusFilter === 'all' ? 'primary' : 'default'} onClick={() => setStatusFilter('all')} />
@@ -140,6 +166,7 @@ export default function ServiceRequestsListPage() {
                     <TableCell>
                       <Chip size="small" color={statusColor(r.status)} label={SERVICE_REQUEST_STATUS_LABELS[r.status]} />
                       {is1c6(r) && <Chip size="small" variant="outlined" label="1С6" sx={{ ml: 0.5 }} />}
+                      {r.onec && <Chip size="small" variant="outlined" color="info" label={`1С №${(r.onec.number || '').replace(/^0+/, '')}`} sx={{ ml: 0.5 }} />}
                     </TableCell>
                     <TableCell>
                       <Stack spacing={0.5}>

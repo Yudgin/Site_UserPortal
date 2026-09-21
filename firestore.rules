@@ -110,6 +110,11 @@ service cloud.firestore {
     // связи с калькуляциями/оплатой — доступ только администратору.
     match /serviceRequests/{reqId} {
       allow read, list, create, update, delete: if isPriceAdmin();
+      // Снимок ремонта из 1С (пишет ТОЛЬКО backend-синхронизация через Admin SDK).
+      match /onec/{docId} {
+        allow read: if isPriceAdmin();
+        allow write: if false;
+      }
     }
 
     // Редактируемые тексты сервиса (соглашение и т.п.) — публичное чтение,

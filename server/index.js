@@ -19,6 +19,7 @@ import { registerNpTtn } from './novaPoshtaTtn.js'
 import { registerTelegramLinks } from './telegramLinks.js'
 import { registerOperatorBot } from './operatorBot.js'
 import { registerCalls } from './calls.js'
+import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
@@ -1187,6 +1188,8 @@ registerTelegramLinks(app, { adminDb })
 registerOperatorBot(app, { adminDb })
 // Журнал дзвінків: зеркальные события/результаты от операторского бота (X-Calls-Token).
 registerCalls(app, { adminDb })
+// Синхронизация картотеки ремонтов из 1С (admin/scheduler): upsert в serviceRequests.
+registerOnecSync(app, { adminDb })
 
 // Справочники НП по ключу конкретного ФОП (отправители/контакты + добавление) — owner-gated.
 registerNpAccount(app)

@@ -112,7 +112,10 @@ export default function ServiceSharePage() {
     if (!requestId || !data) return
     setTransferring(true)
     try {
-      if (!localExists) {
+      // Проверяем существование СВЕЖИМ чтением, а не стейтом: заявку могла только что
+      // создать 1С-синхронизация — повторный save со status:'new' откатил бы её статус.
+      const fresh = localExists || !!(await serviceRequestService.get(localReqId).catch(() => null))
+      if (!fresh) {
         const ci = data.clientInfo
         const clientName = ci ? [ci.lastName, ci.firstName, ci.middleName].filter(Boolean).join(' ').trim() : ''
         // 1С часто віддає місто/відділення ЛИШЕ текстом (без Ref-ів НП) — резолвимо їх самі,
