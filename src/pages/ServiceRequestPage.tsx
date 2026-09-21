@@ -254,7 +254,11 @@ export default function ServiceRequestPage() {
           <Button variant="outlined" startIcon={<SaveIcon />} disabled={saving}
             onClick={() => patch({ complaint, boat, clientName: clientName.trim(), clientPhone: clientPhone.trim() }).then((ok) => { if (ok) notify('Збережено') })}>Зберегти</Button>
         </Stack>
-        {req.externalRequestId && <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>Заявка 1С: {req.externalRequestId}</Typography>}
+        {(req.onec?.number || req.externalRequestId) && (
+          <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+            {req.onec?.number ? `Ремонт 1С №${req.onec.number.replace(/^0+/, '')} · ` : ''}Заявка 1С: {req.externalRequestId || req.onec?.guid}
+          </Typography>
+        )}
       </Paper>
 
       {/* Предварительная оценка ИИ — та, что клиент видел в переписке (ориентировочная, до диагностики) */}

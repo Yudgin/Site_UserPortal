@@ -4,18 +4,20 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Container, Box, Paper, Typography, Button, Alert, CircularProgress, Chip, Stack, TextField,
+  Container, Box, Paper, Typography, Button, Alert, CircularProgress, Chip, Stack, TextField, MenuItem,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
 } from '@mui/material'
 import { Home as HomeIcon, Refresh as RefreshIcon, CloudSync as SyncIcon } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
 import { serviceRequestService } from '@/api/serviceRequestService'
+import { serviceCenterService } from '@/api/serviceCenterService'
 import { syncRepairsFrom1C } from '@/api/onecSyncApi'
 import { useTtnStatuses, ttnChipColor } from '@/hooks/useTtnStatuses'
 import {
   SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequestStatus,
 } from '@/types/serviceRequest'
+import type { ServiceCenter } from '@/types/access'
 
 const STATUS_ORDER = Object.keys(SERVICE_REQUEST_STATUS_LABELS) as ServiceRequestStatus[]
 
@@ -37,8 +39,16 @@ export default function ServiceRequestsListPage() {
   const [shown, setShown] = useState(PAGE)
   const [syncing, setSyncing] = useState(false)
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [centers, setCenters] = useState<ServiceCenter[]>([])
+  const [centerFilter, setCenterFilter] = useState('') // '' = усі; 'none' = без центру; інакше id
 
-  const load = useCallback(async () => { setLoading(true); setRows(await serviceRequestService.list(3000)); setLoading(false) }, [])
+  const load = useCallback(async () => {
+    setLoading(true)
+    const [reqs, cs] = await Promise.all([serviceRequestService.list(3000), serviceCenterService.list()])
+    setRows(reqs); setCenters(cs)
+    setLoading(false)
+  }, [])
+  const centerName = (id?: string | null) => centers.find((c) => c.id === id)?.name || ''
 
   // Синхронизация картотеки ремонтов из 1С (~1-2 хв на повний прогін).
   const sync1c = async () => {
@@ -58,7 +68,7 @@ export default function ServiceRequestsListPage() {
     setSyncing(false)
   }
   useEffect(() => { load() }, [load])
-  useEffect(() => { setShown(PAGE) }, [statusFilter, sourceFilter, q])
+  useEffect(() => { setShown(PAGE) }, [statusFilter, sourceFilter, q, centerFilter])
 
   const is1c6 = (r: ServiceRequest) => r.id.startsWith('sr-1c6-')
 
@@ -80,6 +90,7 @@ export default function ServiceRequestsListPage() {
     return rows
       .filter((r) => statusFilter === 'all' || r.status === statusFilter)
       .filter((r) => sourceFilter === 'all' || (sourceFilter === '1c6' ? is1c6(r) : !is1c6(r)))
+      .filter((r) => !centerFilter || (centerFilter === 'none' ? !r.serviceCenterId : r.serviceCenterId === centerFilter))
       .filter((r) => !query
         || (r.clientName || '').toLowerCase().includes(query)
         || (r.clientPhone || '').toLowerCase().includes(query)
@@ -88,7 +99,7 @@ export default function ServiceRequestsListPage() {
         || r.id.toLowerCase().includes(query)
         || (r.complaint || '').toLowerCase().includes(query))
       .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')) // нові зверху
-  }, [rows, statusFilter, sourceFilter, q])
+  }, [rows, statusFilter, sourceFilter, q, centerFilter])
 
   if (!user || !isAdminEmail(user.email)) {
     return (
@@ -131,6 +142,17 @@ export default function ServiceRequestsListPage() {
         <Chip label="з 1С6" size="small" variant={sourceFilter === '1c6' ? 'filled' : 'outlined'}
           color={sourceFilter === '1c6' ? 'info' : 'default'}
           onClick={() => setSourceFilter(sourceFilter === '1c6' ? 'all' : '1c6')} />
+        {centers.length > 0 && (
+          <TextField select size="small" label="Сервісний центр" value={centerFilter}
+            onChange={(e) => setCenterFilter(e.target.value)} sx={{ minWidth: 190 }}>
+            <MenuItem value="">Усі центри</MenuItem>
+            <MenuItem value="none">Без центру</MenuItem>
+            {centers.map((c) => {
+              const n = rows.filter((r) => r.serviceCenterId === c.id).length
+              return <MenuItem key={c.id} value={c.id}>{c.name}{n ? ` (${n})` : ''}</MenuItem>
+            })}
+          </TextField>
+        )}
         <Box sx={{ flexGrow: 1 }} />
         <TextField size="small" placeholder="Пошук: клієнт / телефон / № ремонту / скарга" value={q}
           onChange={(e) => setQ(e.target.value)} sx={{ minWidth: 280 }} />
@@ -146,6 +168,7 @@ export default function ServiceRequestsListPage() {
             <Table size="small">
               <TableHead>
                 <TableRow sx={{ bgcolor: 'action.hover' }}>
+                  <TableCell>№</TableCell>
                   <TableCell>Дата</TableCell>
                   <TableCell>Клієнт</TableCell>
                   <TableCell>Скарга</TableCell>
@@ -157,6 +180,7 @@ export default function ServiceRequestsListPage() {
               <TableBody>
                 {filtered.slice(0, shown).map((r) => (
                   <TableRow key={r.id} hover sx={{ cursor: 'pointer' }} onClick={() => navigate(`/service-request/${r.id}`)}>
+                    <TableCell sx={{ whiteSpace: 'nowrap', fontWeight: 600 }}>{(r.onec?.number || '').replace(/^0+/, '') || '—'}</TableCell>
                     <TableCell sx={{ whiteSpace: 'nowrap' }}>{fmtDate(r.createdAt)}</TableCell>
                     <TableCell>
                       {r.clientName || '—'}
@@ -166,7 +190,9 @@ export default function ServiceRequestsListPage() {
                     <TableCell>
                       <Chip size="small" color={statusColor(r.status)} label={SERVICE_REQUEST_STATUS_LABELS[r.status]} />
                       {is1c6(r) && <Chip size="small" variant="outlined" label="1С6" sx={{ ml: 0.5 }} />}
-                      {r.onec && <Chip size="small" variant="outlined" color="info" label={`1С №${(r.onec.number || '').replace(/^0+/, '')}`} sx={{ ml: 0.5 }} />}
+                      {centerName(r.serviceCenterId) && (
+                        <Chip size="small" variant="outlined" label={centerName(r.serviceCenterId)} sx={{ ml: 0.5, maxWidth: 140 }} />
+                      )}
                     </TableCell>
                     <TableCell>
                       <Stack spacing={0.5}>
