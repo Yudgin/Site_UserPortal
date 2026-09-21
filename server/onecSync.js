@@ -37,7 +37,14 @@ const isEmpty = (v) => v === undefined || v === null || v === ''
 const sortKeys = (v) => Array.isArray(v) ? v.map(sortKeys)
   : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])]))
   : v
-const rawHashOf = (obj) => crypto.createHash('sha256').update(JSON.stringify(sortKeys(obj))).digest('hex').slice(0, 32)
+// monopayUrl НЕ хешируем: 1С генерирует СВЕЖУЮ monobank-ссылку при каждом чтении объекта,
+// иначе все неоплаченные ремонты «менялись» бы каждый прогон.
+const VOLATILE_KEYS = ['monopayUrl']
+const rawHashOf = (obj) => {
+  const src = { ...obj }
+  for (const k of VOLATILE_KEYS) delete src[k]
+  return crypto.createHash('sha256').update(JSON.stringify(sortKeys(src))).digest('hex').slice(0, 32)
+}
 
 // «05.06.2025 14:46:59» — локальное киевское время 1С → честный UTC-ISO (смещение по датам DST).
 const kyivOffsetMin = (probe) => {
