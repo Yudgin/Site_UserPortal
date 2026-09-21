@@ -88,13 +88,21 @@ const normTtn = (v) => {
   return d && d !== '0' ? d : ''
 }
 
-// Статус НОВОЙ заявки по данным 1С (пока в 1С нет явного поля status):
-// вернули клиенту (есть обратная ТТН) → done; посылку получили → in_work; иначе new.
+// Статус НОВОЙ заявки по данным 1С (пока в 1С нет явного поля status). Лесенка владельца:
+// обратная ТТН есть → відправили клієнту → done; в истории посылки было «отримано» →
+// кораблик у нас → in_work; «не знайдено» (номер стёрт НП через ~6 мес) без «отримано»
+// в истории → клиент так и не отправил → cancelled; «Створена» → очікуємо відправку,
+// статусы между «Створена» и «отримано» → в дороге к нам — в обоих случаях new
+// (живой статус НП виден чипом в списках).
 const inferStatus = (raw) => {
   if (normTtn(raw?.returnTtn)) return 'done'
-  const hist = raw?.shipment?.statusHistory
-  const last = Array.isArray(hist) && hist.length ? String(hist[hist.length - 1]?.status || '') : ''
-  if (normTtn(raw?.shipment?.ttn) && /отримано|вручен/i.test(last)) return 'in_work'
+  const hist = Array.isArray(raw?.shipment?.statusHistory) ? raw.shipment.statusHistory : []
+  const all = hist.map((h) => String(h?.status || '')).join(' ')
+  const last = hist.length ? String(hist[hist.length - 1]?.status || '') : ''
+  if (normTtn(raw?.shipment?.ttn)) {
+    if (/отримано|вручен/i.test(all)) return 'in_work'
+    if (/не знайдено/i.test(last)) return 'cancelled'
+  }
   return 'new'
 }
 
