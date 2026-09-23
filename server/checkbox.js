@@ -114,4 +114,13 @@ export const closeShift = async (fop) => {
   return r.data
 }
 
-export default { signin, ensureShift, sellReceipt, closeShift, buildSellPayload, toKop, goodsTotalKop }
+// Статус чека по id: fiscal_code/tax_url появляются ПОСЛЕ асинхронной регистрации в ДПС
+// (сразу после receipts/sell чек в статусе CREATED без кода — его добивает reconcile).
+export const getReceipt = async (fop, receiptId) => {
+  await ensureToken(fop)
+  const res = await axios.get(`${BASE}/api/v1/receipts/${receiptId}`, { headers: headers(fop), timeout: 20000 })
+  const d = res.data || {}
+  return { receiptId: d.id || receiptId, fiscalCode: d.fiscal_code || null, taxUrl: d.tax_url || null, status: d.status || null }
+}
+
+export default { signin, ensureShift, sellReceipt, closeShift, getReceipt, buildSellPayload, toKop, goodsTotalKop }

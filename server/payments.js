@@ -203,6 +203,7 @@ export function registerPayments(app, deps) {
         receiptId: res.receiptId,
         fiscalCode: res.fiscalCode,
         taxUrl: res.taxUrl,
+        receiptError: null, // прежняя ошибка неактуальна — чек создан
         receiptStatus: res.status || 'done',
         receiptAt: nowIso(),
       })
@@ -836,6 +837,23 @@ export function registerPayments(app, deps) {
         await fiscalize(o, lbl)
       }
     } catch (e) { console.error('reconcile failed query:', e.message) }
+    // 2б) чек создан (CREATED), но фискальный код/ссылка ДПС ещё не дописаны — опросить Checkbox.
+    try {
+      const created = await col().where('receiptStatus', '==', 'CREATED').limit(50).get()
+      for (const doc of created.docs) {
+        const o = doc.data()
+        if (!o.receiptId || o.taxUrl) continue
+        const fop = getFop(o.fopId)
+        if (!fop) continue
+        checked++
+        try {
+          const r = await checkbox.getReceipt(fop, o.receiptId)
+          if (r.fiscalCode || r.taxUrl || (r.status && r.status !== 'CREATED')) {
+            await saveOrder({ orderId: o.orderId, receiptStatus: r.status || o.receiptStatus, fiscalCode: r.fiscalCode, taxUrl: r.taxUrl, receiptError: null })
+          }
+        } catch (e) { console.error('reconcile receipt', o.orderId, e?.response?.status || e.message) }
+      }
+    } catch (e) { console.error('reconcile created query:', e.message) }
     // 3) LiqPay «pending» дольше 5 минут — спросить статус напрямую (потерянный success-колбэк:
     // деньги списаны, вебхук не дошёл → оплата зависла без чека). Свежие не трогаем (клиент ещё платит).
     try {
