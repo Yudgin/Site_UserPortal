@@ -40,6 +40,16 @@ const validateGoods = (goods) => {
   return null
 }
 
+// Детерминированный uuid чека из orderId: sha256(rcpt-<orderId>) → байты в форме uuid v4.
+// Один и тот же заказ всегда даёт один id → повторная фискализация не создаст дубль чека.
+const receiptUuidFor = (orderId) => {
+  const h = crypto.createHash('sha256').update(`rcpt-${orderId}`).digest()
+  h[6] = (h[6] & 0x0f) | 0x40
+  h[8] = (h[8] & 0x3f) | 0x80
+  const x = h.subarray(0, 16).toString('hex')
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`
+}
+
 export function registerPayments(app, deps) {
   const { adminDb } = deps
   const PUBLIC = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '')
@@ -182,7 +192,10 @@ export function registerPayments(app, deps) {
       const res = await checkbox.sellReceipt(fop, {
         goods: order.goods,
         paymentLabel,
-        receiptId: `rcpt-${order.orderId}`, // детерминированный id → идемпотентность у Checkbox
+        // Checkbox требует body.id строго в формате uuid («Невірне значення uuid» на
+        // rcpt-<orderId>). Детерминированно выводим uuid из orderId (sha256 → форма v4):
+        // идемпотентность у Checkbox сохраняется, формат валиден.
+        receiptId: receiptUuidFor(order.orderId),
         deliveryEmail: order.deliveryEmail || undefined,
       })
       await saveOrder({
