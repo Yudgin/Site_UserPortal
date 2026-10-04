@@ -35,6 +35,46 @@ service cloud.firestore {
         && request.auth.token.email == 'admin@runferry.de';
     }
 
+    // RBAC (фаза 1b): роль сотрудника — из users/{uid} (пишет ТОЛЬКО владелец/бэкенд, см. ниже).
+    // isStaff — любой АКТИВНЫЙ сотрудник (чтение заявок/смет/оплат); isServiceStaff — те, кто
+    // ведёт заявки и калькуляции (владелец/директор/мастер; бухгалтер — только чтение + оплаты).
+    // Разрез по центрам здесь НЕ проверяется (много заявок без центра) — он в UI и в серверных
+    // операциях с внешним эффектом (SMS/Telegram). Сотрудник (не владелец) НЕ может с клиента
+    // ставить backend-поля оплаты (status='paid', paymentId, …) — см. payFieldsClean/payFieldsKept.
+    function staffDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    function hasStaffDoc() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    function isStaff() {
+      return isPriceAdmin()
+        || (hasStaffDoc() && staffDoc().active == true
+            && staffDoc().role in ['owner', 'director', 'accountant', 'master']);
+    }
+    function isServiceStaff() {
+      return isPriceAdmin()
+        || (hasStaffDoc() && staffDoc().active == true
+            && staffDoc().role in ['owner', 'director', 'master']);
+    }
+    // Поля оплаты пишет только backend (Admin SDK) — мастер/директор не должны «оплатить» смету
+    // руками (обход оплаты, ТТН без наложки, блокировка /api/estimates/pay). На создании —
+    // значения пусты; на обновлении — не меняются (редактор пересохраняет документ целиком).
+    function payFieldsClean() {
+      return request.resource.data.get('status', '') != 'paid'
+        && request.resource.data.get('paymentId', null) == null
+        && request.resource.data.get('paidAt', null) == null
+        && request.resource.data.get('taxUrl', null) == null
+        && request.resource.data.get('fiscalCode', null) == null
+        && request.resource.data.get('payInitiatedAt', null) == null;
+    }
+    function payFieldsKept() {
+      return request.resource.data.get('status', '') != 'paid'
+        && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['paymentId', 'paidAt', 'taxUrl', 'fiscalCode', 'payInitiatedAt', 'receiptId']);
+    }
+
     // Прайс-лист (каталог работ, наборов, материалов, настроек) — публичное чтение,
     // запись только администратору.
     match /priceList/{docId} {
@@ -50,13 +90,13 @@ service cloud.firestore {
     // Оплаты и чеки. Пишутся ТОЛЬКО backend-ом (firebase-admin, минуя правила).
     // С клиента — только чтение админом (содержат суммы/ФОП/статусы).
     match /payments/{orderId} {
-      allow read, list: if isPriceAdmin();
+      allow read, list: if isStaff(); // бухгалтер/мастера видят оплаты; пишет только backend
     }
 
     // Журнал оповещений клиента (готова калькуляция, відправлення тощо). Пишет только backend
     // (Admin SDK, /api/notify — проверка админ-токена там). Клиент/фронт — только чтение (админ).
     match /notifications/{ntfId} {
-      allow read, list: if isPriceAdmin();
+      allow read, list: if isStaff();
       allow write: if false;
     }
 
@@ -70,7 +110,10 @@ service cloud.firestore {
     }
     match /users/{userId} {
       allow get: if isPriceAdmin() || (request.auth != null && request.auth.uid == userId);
-      allow list: if isPriceAdmin();
+      // Список: владелец — все; персонал — только АКТИВНЫХ сотрудников, и запрос обязан нести
+      // where('active','==',true) (правило list проверяется против ограничений запроса). users
+      // содержит и клиентов (active=false / без поля) — их PII персоналу не отдаём.
+      allow list: if isPriceAdmin() || (isStaff() && resource.data.active == true);
       // Создание: владелец — что угодно; сам пользователь — только БЕЗ RBAC-полей.
       allow create: if isPriceAdmin()
         || (request.auth != null && request.auth.uid == userId
@@ -95,24 +138,34 @@ service cloud.firestore {
     // редактора мастера не затёрло backend-поля оплаты: status=paid, paymentId, taxUrl → защита
     // от двойного списания). Сам backend (Admin SDK) правила обходит и статусы пишет свободно.
     match /priceEstimates/{estId} {
-      allow get, list: if isPriceAdmin();
-      allow create: if isPriceAdmin();
-      allow update, delete: if isPriceAdmin() && resource.data.status != 'paid';
+      allow get, list: if isStaff();
+      allow create: if isPriceAdmin() || (isServiceStaff() && payFieldsClean());
+      allow update: if resource.data.status != 'paid'
+        && (isPriceAdmin() || (isServiceStaff() && payFieldsKept()));
+      allow delete: if isServiceStaff() && resource.data.status != 'paid';
     }
 
     // Предложения клиенту (наборы вариантов сметы). Прямой доступ — только администратор; клиент
     // видит варианты и выбирает путь через backend (/api/offers/:id/public, /choose) — Admin SDK.
     match /estimateOffers/{offerId} {
-      allow read, list, create, update, delete: if isPriceAdmin();
+      allow read, list: if isStaff();
+      allow create, update: if isServiceStaff();
+      allow delete: if isPriceAdmin();
     }
 
     // Заявки на обслуживание (наша локальная сущность-хаб). Содержат контакт клиента (PII) и
     // связи с калькуляциями/оплатой — доступ только администратору.
     match /serviceRequests/{reqId} {
-      allow read, list, create, update, delete: if isPriceAdmin();
+      allow read, list: if isStaff();
+      // paymentId заявки ставит только backend/владелец (иначе карточка показала бы «оплачено»).
+      allow create: if isPriceAdmin()
+        || (isServiceStaff() && request.resource.data.get('paymentId', null) == null);
+      allow update: if isPriceAdmin()
+        || (isServiceStaff() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['paymentId']));
+      allow delete: if isPriceAdmin();
       // Снимок ремонта из 1С (пишет ТОЛЬКО backend-синхронизация через Admin SDK).
       match /onec/{docId} {
-        allow read: if isPriceAdmin();
+        allow read: if isStaff();
         allow write: if false;
       }
     }

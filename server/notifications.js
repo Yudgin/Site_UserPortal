@@ -6,7 +6,7 @@
 //     вне — «bot-initiated» (платно/ненадёжно) → уходим в SMS.
 //   • Нет мессенджер-сессии (заявка с веб-формы) или окно закрыто → SMS (TurboSMS).
 // Пороги настраиваются через env (в часах): NOTIFY_VIBER_WINDOW_H (24), NOTIFY_TELEGRAM_WINDOW_H (0=без лимита).
-import { verifyFirebaseAdmin } from './adminAuth.js'
+import { verifyFirebaseStaff } from './adminAuth.js'
 
 const nowIso = () => new Date().toISOString()
 
@@ -169,13 +169,26 @@ export function registerNotifications(app, deps) {
     return rec
   }
 
-  // Отправить оповещение (админ). Авто-события фронт шлёт при публикации калькуляций/ТТН.
+  // Отправить оповещение (RBAC 1b: владелец/директор/мастер; бухгалтер — только чтение).
+  // Авто-события фронт шлёт при публикации калькуляций/ТТН. НЕ-владелец: только в привязке к
+  // заявке СВОЕГО центра и только на телефон заявки (платный SMS-шлюз — не для произвольных номеров).
   app.post('/api/notify', async (req, res) => {
-    if (!(await verifyFirebaseAdmin(req))) {
-      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для адміністратора' } })
+    const staff = await verifyFirebaseStaff(req, ['owner', 'director', 'master'])
+    if (!staff) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника, директора або майстра' } })
     }
     try {
-      const { serviceRequestId, sessionId, phone, text, event, link, ttn } = req.body || {}
+      const { serviceRequestId, sessionId, text, event, link, ttn } = req.body || {}
+      let { phone } = req.body || {}
+      if (staff.role !== 'owner') {
+        if (!serviceRequestId) return res.status(400).json({ success: false, error: { code: 'NEED_REQUEST', message: 'Потрібна заявка' } })
+        const srSnap = await adminDb.collection('serviceRequests').doc(String(serviceRequestId)).get()
+        const sr = srSnap.exists ? srSnap.data() : null
+        if (!sr) return res.status(404).json({ success: false, error: { code: 'NO_SR', message: 'Заявку не знайдено' } })
+        const own = !!sr.serviceCenterId && staff.centers.some((c) => c && c.centerId === sr.serviceCenterId)
+        if (!own) return res.status(403).json({ success: false, error: { code: 'OTHER_CENTER', message: 'Заявка іншого сервісного центру' } })
+        phone = null // телефон — только из заявки
+      }
       const rec = await notifyClient({
         serviceRequestId: serviceRequestId || null,
         sessionId: sessionId || null,
@@ -184,7 +197,7 @@ export function registerNotifications(app, deps) {
         event: event || 'custom',
         link: link || null,
         ttn: ttn || null,
-        by: 'admin@runferry.de',
+        by: staff.email || staff.uid,
       })
       res.json({ success: true, data: rec })
     } catch (e) {

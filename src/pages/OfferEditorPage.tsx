@@ -16,7 +16,8 @@ import {
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { usePricingStore } from '@/store/pricingStore'
-import { isAdminEmail } from '@/config/access'
+import { useStaffGate, centerVisible } from '@/hooks/useStaffGate'
+import { useAccess } from '@/store/accessStore'
 import { pricingService } from '@/api/pricingService'
 import { serviceRequestService } from '@/api/serviceRequestService'
 import { notificationApi } from '@/api/endpoints/notification'
@@ -36,6 +37,10 @@ export default function OfferEditorPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const { user } = useAuthStore()
+  const access = useAccess()
+  const gate = useStaffGate((a) => a.can('preliminary'), 'Потрібне право «попередня калькуляція».')
+  // Центр заявки (если редактор открыт по ?request=…) — для разреза по центрам, как в факте.
+  const [srCenter, setSrCenter] = useState<{ loaded: boolean; centerId: string | null }>({ loaded: false, centerId: null })
   const { catalog, indexed, loadFromServer, isLoading } = usePricingStore()
 
   const parentId = params.get('parent') || '' // засев из оценки ИИ / существующей сметы
@@ -75,6 +80,7 @@ export default function OfferEditorPage() {
   useEffect(() => {
     if (!serviceRequestId) return
     serviceRequestService.get(serviceRequestId).then((sr) => {
+      setSrCenter({ loaded: true, centerId: sr?.serviceCenterId || null })
       if (!sr) return
       const auto = [sr.boat, sr.complaint ? sr.complaint.slice(0, 60) : ''].filter(Boolean).join(' — ')
       setTitle((t) => t || auto || 'Пропозиція')
@@ -187,13 +193,11 @@ export default function OfferEditorPage() {
     catch { notify(clientLink, 'info') }
   }
 
-  if (!user || !isAdminEmail(user.email)) {
-    return (
-      <Container maxWidth="sm" sx={{ py: 6 }}>
-        <Alert severity="error">Доступ лише для адміністратора.</Alert>
-        <Button startIcon={<HomeIcon />} onClick={() => navigate('/')} sx={{ mt: 2 }}>На головну</Button>
-      </Container>
-    )
+  if (gate) return gate // RBAC 1b: право «попередня калькуляція»
+  // Разрез по центрам: заявка другого центра / без центра — директору и мастеру недоступна.
+  if (serviceRequestId && srCenter.loaded
+      && (!centerVisible(access, srCenter.centerId) || !access.can('preliminary', srCenter.centerId || undefined))) {
+    return <Container maxWidth="sm" sx={{ py: 8 }}><Alert severity="error">Ця заявка належить іншому сервісному центру або у вас немає права «попередня калькуляція» для нього.</Alert></Container>
   }
   if (isLoading) return <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress /></Box>
 

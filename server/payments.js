@@ -17,6 +17,7 @@
 import crypto from 'crypto'
 import axios from 'axios'
 import { getAuth } from 'firebase-admin/auth'
+import { verifyFirebaseStaff } from './adminAuth.js'
 import { getFop, fopHas, listFopsPublic, hasAnyFop } from './fops.js'
 import * as liqpay from './liqpay.js'
 import * as monoChast from './monoChast.js'
@@ -95,6 +96,8 @@ export function registerPayments(app, deps) {
       return false
     }
   }
+  // RBAC 1b: мониторинг чеков и повторная фискализация — владелец ИЛИ бухгалтер (роль из users).
+  const isPayStaffReq = async (req) => (await isAdminReq(req)) || !!(await verifyFirebaseStaff(req, ['owner', 'accountant']))
 
   // Уведомление владельцу в Telegram (для «гроші є, чек ні»). Один раз на заказ (ownerNotified).
   const notifyOwner = async (text) => {
@@ -904,14 +907,14 @@ export function registerPayments(app, deps) {
 
   // Ручной триггер реконсиляции (для крон-джобы/админки). Доступ: токен ИЛИ Firebase ID-токен админа.
   app.post('/api/pay/reconcile', async (req, res) => {
-    if (!(await isAdminReq(req))) return res.status(403).json({ success: false })
+    if (!(await isPayStaffReq(req))) return res.status(403).json({ success: false }) // владелец/бухгалтер/планировщик
     const r = await reconcile()
     res.json({ success: true, data: r })
   })
 
   // Список «гроші є, чек ні» (paid без receiptId) — для админки/мониторинга.
   app.get('/api/pay/unfiscalized', async (req, res) => {
-    if (!(await isAdminReq(req))) return res.status(403).json({ success: false })
+    if (!(await isPayStaffReq(req))) return res.status(403).json({ success: false })
     if (!adminDb) return res.status(503).json({ success: false })
     const q = await col().where('status', '==', 'paid').limit(200).get()
     const items = q.docs.map((d) => d.data()).filter((o) => !o.receiptId)
@@ -919,9 +922,9 @@ export function registerPayments(app, deps) {
     res.json({ success: true, data: items })
   })
 
-  // Повторно выбить чек по конкретному заказу (оплачен, но чека нет). Админ-доступ.
+  // Повторно выбить чек по конкретному заказу (оплачен, но чека нет). Владелец/бухгалтер.
   app.post('/api/pay/:orderId/refiscalize', async (req, res) => {
-    if (!(await isAdminReq(req))) return res.status(403).json({ success: false })
+    if (!(await isPayStaffReq(req))) return res.status(403).json({ success: false })
     if (!adminDb) return res.status(503).json({ success: false })
     try {
       const order = await loadOrder(String(req.params.orderId))

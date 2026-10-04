@@ -4,7 +4,7 @@
 // (гілка `/start <токен>`): бот одразу знає клієнта, привʼязує чат і вмикає сповіщення.
 import axios from 'axios'
 import crypto from 'crypto'
-import { verifyFirebaseAdmin } from './adminAuth.js'
+import { verifyFirebaseStaff } from './adminAuth.js'
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''
 let cachedUsername = process.env.TELEGRAM_BOT_USERNAME || ''
@@ -30,8 +30,9 @@ export function registerTelegramLinks(app, deps) {
 
   // Створити (або повернути існуюче) Telegram-посилання для заявки.
   app.post('/api/telegram/link', async (req, res) => {
-    if (!(await verifyFirebaseAdmin(req))) {
-      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника' } })
+    const staff = await verifyFirebaseStaff(req, ['owner', 'director', 'master']) // RBAC 1b
+    if (!staff) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника, директора або майстра' } })
     }
     if (!adminDb) return res.status(503).json({ success: false })
     if (!TOKEN) return res.status(503).json({ success: false, error: { code: 'NO_BOT', message: 'TELEGRAM_BOT_TOKEN не задано' } })
@@ -42,6 +43,10 @@ export function registerTelegramLinks(app, deps) {
       const srSnap = await srRef.get()
       if (!srSnap.exists) return res.status(404).json({ success: false, error: { code: 'NO_SR', message: 'Заявку не знайдено' } })
       const sr = srSnap.data()
+      // Не-владелец — только заявки своих центров.
+      if (staff.role !== 'owner' && !(sr.serviceCenterId && staff.centers.some((c) => c && c.centerId === sr.serviceCenterId))) {
+        return res.status(403).json({ success: false, error: { code: 'OTHER_CENTER', message: 'Заявка іншого сервісного центру' } })
+      }
 
       const username = await botUsername()
       if (!username) return res.status(503).json({ success: false, error: { code: 'NO_USERNAME', message: 'Не вдалося отримати імʼя бота (getMe)' } })

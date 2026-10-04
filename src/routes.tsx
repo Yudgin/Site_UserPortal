@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { Box, CircularProgress } from '@mui/material'
 import { useAuthStore } from '@/store/authStore'
 import { useBoatStore } from '@/store/boatStore'
+import { useAccess } from '@/store/accessStore'
 import LoginPage from '@/pages/LoginPage'
 import RegisterPage from '@/pages/RegisterPage'
 import DashboardPage from '@/pages/DashboardPage'
@@ -60,6 +61,7 @@ interface ProtectedRouteProps {
 const ProtectedRoute = ({ children }: ProtectedRouteProps) => {
   const { user, isLoading: authLoading } = useAuthStore()
   const { boats, isLoading: boatsLoading, isSynced, loadFromServer } = useBoatStore()
+  const access = useAccess() // RBAC 1b: сотрудник без кораблика тоже проходит в кабинет
 
   // Trigger loading if user is authenticated but boats not synced
   React.useEffect(() => {
@@ -91,9 +93,17 @@ const ProtectedRoute = ({ children }: ProtectedRouteProps) => {
   }
 
   // Only redirect to connect-boat if boats are synced but empty.
-  // Администратор (developer) видит панель (и меню) даже без привязанной лодки.
+  // Администратор (developer) и сотрудники сервиса (роль из users/{uid}) видят панель (и меню)
+  // даже без привязанной лодки; до загрузки профиля — ждём, чтобы не редиректить мастера зря.
   if (isSynced && boats.length === 0) {
-    if (user.role === 'developer') return <>{children}</>
+    if (user.role === 'developer' || access.isStaff) return <>{children}</>
+    if (!access.loaded) {
+      return (
+        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
+          <CircularProgress />
+        </Box>
+      )
+    }
     return <Navigate to="/connect-boat" replace />
   }
 

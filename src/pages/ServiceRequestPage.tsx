@@ -17,7 +17,8 @@ import {
   Group as SpecialistsIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
-import { isAdminEmail } from '@/config/access'
+import { useAccess } from '@/store/accessStore'
+import { useStaffGate, centerVisible } from '@/hooks/useStaffGate'
 import { serviceRequestService } from '@/api/serviceRequestService'
 import { userProfileService } from '@/api/userProfileService'
 import { chatSessionService } from '@/api/chatSessionService'
@@ -45,6 +46,9 @@ export default function ServiceRequestPage() {
   const navigate = useNavigate()
   const { id = '' } = useParams<{ id: string }>()
   const { user } = useAuthStore()
+  // RBAC 1b: любой активный сотрудник; разрез по центрам — ниже, когда заявка загружена.
+  const access = useAccess()
+  const gate = useStaffGate((a) => a.isStaff)
   const [req, setReq] = useState<ServiceRequest | null>(null)
   const [offer, setOffer] = useState<EstimateOffer | null>(null)
   const [actual, setActual] = useState<Estimate | null>(null)
@@ -184,16 +188,13 @@ export default function ServiceRequestPage() {
     reloadNotifs()
   }
 
-  if (!user || !isAdminEmail(user.email)) {
-    return (
-      <Container maxWidth="sm" sx={{ py: 6 }}>
-        <Alert severity="error">Доступ лише для адміністратора.</Alert>
-        <Button startIcon={<HomeIcon />} onClick={() => navigate('/')} sx={{ mt: 2 }}>На головну</Button>
-      </Container>
-    )
-  }
+  if (gate) return gate
   if (loading) return <Box sx={{ display: 'flex', justifyContent: 'center', py: 10 }}><CircularProgress /></Box>
   if (!req) return <Container maxWidth="sm" sx={{ py: 8 }}><Alert severity="error">Заявку не знайдено.</Alert></Container>
+  // Директор/мастер — только заявки своих центров (заявки без центра им не видны).
+  if (!centerVisible(access, req.serviceCenterId)) {
+    return <Container maxWidth="sm" sx={{ py: 8 }}><Alert severity="error">Ця заявка належить іншому сервісному центру.</Alert></Container>
+  }
 
   const selectedVariantId = offer?.selectedVariantId || null
   const offerLink = req.offerId ? `${window.location.origin}/offer/${req.offerId}` : ''
@@ -426,19 +427,24 @@ export default function ServiceRequestPage() {
           <Button variant="contained" startIcon={<SendIcon />} disabled={sending || !notifText.trim()} onClick={sendCustom}>Надіслати</Button>
         </Stack>
 
-        {/* Создание ТТН по направлениям (шаблон центра) + оповещение об отправке */}
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1 }} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
-          <Button variant="contained" startIcon={<ShipIcon />} disabled={!center?.incomingTtnTemplateId}
-            onClick={() => openTtn(center?.incomingTtnTemplateId || undefined)}>ТТН: на ремонт</Button>
-          <Button variant="contained" startIcon={<ShipIcon />} disabled={!center?.returnTtnTemplateId}
-            onClick={() => openTtn(center?.returnTtnTemplateId || undefined)}>ТТН: з ремонту</Button>
-          <Button variant="text" startIcon={<ShipIcon />} onClick={() => openTtn(undefined)}>Інший шаблон…</Button>
-        </Stack>
-        {!req.serviceCenterId ? (
-          <Alert severity="info" sx={{ mb: 1.5 }}>Оберіть сервісний центр вище — тоді підтягнуться його шаблони ТТН («на ремонт» / «з ремонту»).</Alert>
-        ) : (!center?.incomingTtnTemplateId && !center?.returnTtnTemplateId) ? (
-          <Alert severity="info" sx={{ mb: 1.5 }}>У центру не задані шаблони ТТН — налаштуйте їх у «Доступ та центри» → центр.</Alert>
-        ) : null}
+        {/* Создание ТТН по направлениям (шаблон центра) — пока только владелец (ключи НП/ФОП;
+            backend /api/np/ttn/create owner-gated). Оповещение об отправке — всем сотрудникам. */}
+        {access.isOwner && (
+          <>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1 }} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
+              <Button variant="contained" startIcon={<ShipIcon />} disabled={!center?.incomingTtnTemplateId}
+                onClick={() => openTtn(center?.incomingTtnTemplateId || undefined)}>ТТН: на ремонт</Button>
+              <Button variant="contained" startIcon={<ShipIcon />} disabled={!center?.returnTtnTemplateId}
+                onClick={() => openTtn(center?.returnTtnTemplateId || undefined)}>ТТН: з ремонту</Button>
+              <Button variant="text" startIcon={<ShipIcon />} onClick={() => openTtn(undefined)}>Інший шаблон…</Button>
+            </Stack>
+            {!req.serviceCenterId ? (
+              <Alert severity="info" sx={{ mb: 1.5 }}>Оберіть сервісний центр вище — тоді підтягнуться його шаблони ТТН («на ремонт» / «з ремонту»).</Alert>
+            ) : (!center?.incomingTtnTemplateId && !center?.returnTtnTemplateId) ? (
+              <Alert severity="info" sx={{ mb: 1.5 }}>У центру не задані шаблони ТТН — налаштуйте їх у «Доступ та центри» → центр.</Alert>
+            ) : null}
+          </>
+        )}
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
           <TextField value={ttnInput} onChange={(e) => setTtnInput(e.target.value)} size="small"
             label="ТТН (номер накладної)" placeholder={req.waybillNumber || 'напр. 20450…'} sx={{ minWidth: 220 }} />

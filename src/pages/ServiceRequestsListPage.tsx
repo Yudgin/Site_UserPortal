@@ -8,8 +8,8 @@ import {
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
 } from '@mui/material'
 import { Home as HomeIcon, Refresh as RefreshIcon, CloudSync as SyncIcon } from '@mui/icons-material'
-import { useAuthStore } from '@/store/authStore'
-import { isAdminEmail } from '@/config/access'
+import { useAccess } from '@/store/accessStore'
+import { useStaffGate, centerVisible } from '@/hooks/useStaffGate'
 import { serviceRequestService } from '@/api/serviceRequestService'
 import { serviceCenterService } from '@/api/serviceCenterService'
 import { syncRepairsFrom1C } from '@/api/onecSyncApi'
@@ -30,7 +30,9 @@ const PAGE = 100
 
 export default function ServiceRequestsListPage() {
   const navigate = useNavigate()
-  const { user } = useAuthStore()
+  // RBAC 1b: любой активный сотрудник; директор/мастер видят только заявки своих центров.
+  const access = useAccess()
+  const gate = useStaffGate((a) => a.isStaff)
   const [rows, setRows] = useState<ServiceRequest[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState<ServiceRequestStatus | 'all'>('all')
@@ -85,9 +87,14 @@ export default function ServiceRequestsListPage() {
     )
   }
 
+  // Заявки, видимые этому сотруднику (директор/мастер — свои центры). Зависит от профиля:
+  // он может прийти ПОЗЖЕ списка — иначе мемо застыло бы пустым.
+  const visibleRows = useMemo(() => rows.filter((r) => centerVisible(access, r.serviceCenterId)),
+    [rows, access.profile, access.isOwner, access.loaded]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const filtered = useMemo(() => {
     const query = q.trim().toLowerCase()
-    return rows
+    return visibleRows
       .filter((r) => statusFilter === 'all' || r.status === statusFilter)
       .filter((r) => sourceFilter === 'all' || (sourceFilter === '1c6' ? is1c6(r) : !is1c6(r)))
       .filter((r) => !centerFilter || (centerFilter === 'none' ? !r.serviceCenterId : r.serviceCenterId === centerFilter))
@@ -99,25 +106,20 @@ export default function ServiceRequestsListPage() {
         || r.id.toLowerCase().includes(query)
         || (r.complaint || '').toLowerCase().includes(query))
       .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')) // нові зверху
-  }, [rows, statusFilter, sourceFilter, q, centerFilter])
+  }, [visibleRows, statusFilter, sourceFilter, q, centerFilter])
 
-  if (!user || !isAdminEmail(user.email)) {
-    return (
-      <Container maxWidth="sm" sx={{ py: 6 }}>
-        <Alert severity="error">Доступ лише для адміністратора.</Alert>
-        <Button startIcon={<HomeIcon />} onClick={() => navigate('/')} sx={{ mt: 2 }}>На головну</Button>
-      </Container>
-    )
-  }
+  if (gate) return gate
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h4">Заявки на обслуговування</Typography>
         <Box>
-          <Button startIcon={syncing ? <CircularProgress size={16} /> : <SyncIcon />} onClick={sync1c} disabled={syncing || loading}>
-            Синхронізувати з 1С
-          </Button>
+          {access.isOwner && (
+            <Button startIcon={syncing ? <CircularProgress size={16} /> : <SyncIcon />} onClick={sync1c} disabled={syncing || loading}>
+              Синхронізувати з 1С
+            </Button>
+          )}
           <Button startIcon={<RefreshIcon />} onClick={load} disabled={loading}>Оновити</Button>
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
         </Box>
@@ -125,9 +127,9 @@ export default function ServiceRequestsListPage() {
       {syncMsg && <Alert severity={syncMsg.ok ? 'success' : 'warning'} sx={{ mb: 2 }} onClose={() => setSyncMsg(null)}>{syncMsg.text}</Alert>}
 
       <Stack direction="row" spacing={0.5} sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap alignItems="center">
-        <Chip label={`Усі (${rows.length})`} size="small" color={statusFilter === 'all' ? 'primary' : 'default'} onClick={() => setStatusFilter('all')} />
+        <Chip label={`Усі (${visibleRows.length})`} size="small" color={statusFilter === 'all' ? 'primary' : 'default'} onClick={() => setStatusFilter('all')} />
         {STATUS_ORDER.map((s) => {
-          const n = rows.filter((r) => r.status === s).length
+          const n = visibleRows.filter((r) => r.status === s).length
           if (!n) return null
           return (
             <Chip key={s} label={`${SERVICE_REQUEST_STATUS_LABELS[s]} (${n})`} size="small"
@@ -146,9 +148,9 @@ export default function ServiceRequestsListPage() {
           <TextField select size="small" label="Сервісний центр" value={centerFilter}
             onChange={(e) => setCenterFilter(e.target.value)} sx={{ minWidth: 190 }}>
             <MenuItem value="">Усі центри</MenuItem>
-            <MenuItem value="none">Без центру</MenuItem>
-            {centers.map((c) => {
-              const n = rows.filter((r) => r.serviceCenterId === c.id).length
+            {access.visibleCenterIds() === 'all' && <MenuItem value="none">Без центру</MenuItem>}
+            {centers.filter((c) => centerVisible(access, c.id)).map((c) => {
+              const n = visibleRows.filter((r) => r.serviceCenterId === c.id).length
               return <MenuItem key={c.id} value={c.id}>{c.name}{n ? ` (${n})` : ''}</MenuItem>
             })}
           </TextField>

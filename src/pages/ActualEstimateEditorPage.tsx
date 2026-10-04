@@ -16,7 +16,8 @@ import {
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { usePricingStore } from '@/store/pricingStore'
-import { isAdminEmail } from '@/config/access'
+import { useAccess } from '@/store/accessStore'
+import { useStaffGate, centerVisible } from '@/hooks/useStaffGate'
 import { pricingService } from '@/api/pricingService'
 import { serviceRequestService } from '@/api/serviceRequestService'
 import { serviceCenterService } from '@/api/serviceCenterService'
@@ -45,6 +46,8 @@ export default function ActualEstimateEditorPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const { user } = useAuthStore()
+  const access = useAccess()
+  const gate = useStaffGate((a) => a.can('actual'), 'Потрібне право «фактична калькуляція».')
   const { catalog, indexed, loadFromServer, isLoading } = usePricingStore()
 
   const parentId = params.get('parent') || ''
@@ -189,7 +192,10 @@ export default function ActualEstimateEditorPage() {
 
   const clientLink = savedId ? `${window.location.origin}/estimate/${savedId}` : ''
 
-  const canSave = !!actual && !!user && isAdminEmail(user.email) && payOptions.length > 0 && payOptions.every((o) => o.fopId)
+  // Право «факт» именно по центру заявки; пока заявка (если она есть) не загружена — не сохраняем,
+  // чтобы не проскочить окно «центр ещё неизвестен».
+  const canActualHere = access.can('actual', request?.serviceCenterId || undefined) && (!effRequestId || !!request)
+  const canSave = !!actual && canActualHere && payOptions.length > 0 && payOptions.every((o) => o.fopId)
 
   // Надіслати клієнту сповіщення про фактичну калькуляцію (канал: Telegram/SMS — обирає сервер).
   // Перший раз — авто-подія 'actual' (ідемпотентна); повторно — та сама фраза як custom.
@@ -218,6 +224,7 @@ export default function ActualEstimateEditorPage() {
 
   const handleSave = async (): Promise<string | null> => {
     if (!actual) return null
+    if (!canActualHere) { notify('Немає права «фактична калькуляція» для центру цієї заявки', 'error'); return null }
     if (!payOptions.length) { notify('Оберіть хоча б один спосіб оплати', 'error'); return null }
     if (payOptions.some((o) => !o.fopId)) { notify('У кожного способу оплати має бути ФОП', 'error'); return null }
     setSaving(true)
@@ -296,14 +303,10 @@ export default function ActualEstimateEditorPage() {
     }
   }
 
-  // Гейт админа
-  if (!user || !isAdminEmail(user.email)) {
-    return (
-      <Container maxWidth="sm" sx={{ py: 6 }}>
-        <Alert severity="error">Доступ лише для адміністратора.</Alert>
-        <Button startIcon={<HomeIcon />} onClick={() => navigate('/')} sx={{ mt: 2 }}>На головну</Button>
-      </Container>
-    )
+  // RBAC 1b: право «фактична калькуляція» (по центру заявки, если она известна)
+  if (gate) return gate
+  if (request && (!centerVisible(access, request.serviceCenterId) || !access.can('actual', request.serviceCenterId || undefined))) {
+    return <Container maxWidth="sm" sx={{ py: 8 }}><Alert severity="error">Ця заявка належить іншому сервісному центру або у вас немає права «фактична калькуляція» для нього.</Alert></Container>
   }
   if (isLoading) {
     return <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress /></Box>

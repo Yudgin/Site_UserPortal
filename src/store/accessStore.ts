@@ -63,11 +63,13 @@ export const useAccess = () => {
     return false
   }
 
-  // Центры, к которым у пользователя есть хотя бы просмотр (для фильтрации списков).
+  // Центры, заявки которых видит пользователь (для фильтрации списков). Мастер — все центры,
+  // где у него есть ХОТЬ ОДНО право (флаги независимы: право «факт» без «просмотр» не должно
+  // прятать заявки центра — иначе редактор факта недостижим).
   const visibleCenterIds = (): string[] | 'all' => {
     if (isOwner || profile?.role === 'accountant') return 'all'
     if (profile?.role === 'director') return (profile.centers || []).map((c) => c.centerId)
-    if (profile?.role === 'master') return (profile.centers || []).filter((c) => c.perms.includes('view')).map((c) => c.centerId)
+    if (profile?.role === 'master') return (profile.centers || []).filter((c) => (c.perms || []).length > 0).map((c) => c.centerId)
     return []
   }
 

@@ -10,8 +10,7 @@ import {
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Stack, FormControlLabel, Switch, Link,
 } from '@mui/material'
 import { Home as HomeIcon, Refresh as RefreshIcon, Receipt as ReceiptIcon, Autorenew as ReconcileIcon } from '@mui/icons-material'
-import { useAuthStore } from '@/store/authStore'
-import { isAdminEmail } from '@/config/access'
+import { useStaffGate } from '@/hooks/useStaffGate'
 import { paymentsAdminService, PaymentRow } from '@/api/paymentsAdminService'
 import { paymentsApi } from '@/api/endpoints/payments'
 import { formatMoney } from '@/utils/pricing'
@@ -42,7 +41,7 @@ const fmtDate = (s?: string): string => {
 
 export default function PaymentsAdminPage() {
   const navigate = useNavigate()
-  const { user } = useAuthStore()
+  const gate = useStaffGate((a) => a.isOwner || a.role === 'accountant', 'Доступ лише для власника та бухгалтера.')
   const [rows, setRows] = useState<PaymentRow[]>([])
   const [loading, setLoading] = useState(true)
   const [onlyNoReceipt, setOnlyNoReceipt] = useState(false)
@@ -88,14 +87,7 @@ export default function PaymentsAdminPage() {
     }
   }
 
-  if (!user || !isAdminEmail(user.email)) {
-    return (
-      <Container maxWidth="sm" sx={{ py: 6 }}>
-        <Alert severity="error">Доступ лише для адміністратора.</Alert>
-        <Button startIcon={<HomeIcon />} onClick={() => navigate('/')} sx={{ mt: 2 }}>На головну</Button>
-      </Container>
-    )
-  }
+  if (gate) return gate // RBAC 1b: владелец и бухгалтер
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>

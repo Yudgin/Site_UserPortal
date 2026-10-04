@@ -45,6 +45,9 @@ function App() {
 
         // Саморегистрация identity (для реестра сотрудников) + загрузка роли/центров (RBAC).
         // Роль НЕ выдаём с клиента — только владелец назначает; здесь лишь читаем свой профиль.
+        // Профиль читаем СРАЗУ (одно чтение Firestore) — от него зависит маршрутизация сотрудника;
+        // после саморегистрации перечитываем (первый вход: документ только что создан).
+        useAccessStore.getState().load(firebaseUser.uid)
         userProfileService.registerSelf().finally(() => {
           useAccessStore.getState().load(firebaseUser.uid)
         })

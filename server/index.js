@@ -24,7 +24,7 @@ import { registerNpAccount } from './novaPoshtaAccount.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
 import { registerUserProfiles } from './userProfiles.js'
-import { verifyFirebaseAdmin } from './adminAuth.js'
+import { verifyFirebaseAdmin, verifyFirebaseStaff } from './adminAuth.js'
 import { rateLimit, combine } from './rateLimit.js'
 
 dotenv.config()
@@ -103,6 +103,13 @@ const SITE_URL = (process.env.SITE_URL || 'https://my.runferry.com').replace(/\/
 const adminOnly = async (req, res, next) => {
   if (await verifyFirebaseAdmin(req)) return next()
   return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для адміністратора' } })
+}
+// RBAC 1b: любой АКТИВНЫЙ сотрудник (роль из users/{uid}) — для инструментов мастера
+// (ИИ-подбор позиций и т.п.). Владелец проходит всегда.
+const staffOnly = async (req, res, next) => {
+  const staff = await verifyFirebaseStaff(req)
+  if (staff) { req.staff = staff; return next() }
+  return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для співробітників сервісу' } })
 }
 const phoneKey = (req) => formatPhoneNumber(String(req.body?.phone || 'nophone'))
 // SMS-код: не чаще 1/мин и 5/час на номер + 20/час на IP (анти-бомбер, защита баланса TurboSMS).
@@ -803,7 +810,7 @@ app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
 
 // ============ AI-подбор позиций прайса для МАСТЕРА (редакторы предложения/факта) ============
 // Мастер описывает, что планирует выставить клиенту, ИИ подбирает позиции ИЗ ПРАЙСА (по кодам).
-app.post('/api/ai/pick-works', adminOnly, async (req, res) => {
+app.post('/api/ai/pick-works', staffOnly, async (req, res) => {
   try {
     const { description = '', priceContext = '', knowledgeContext = '' } = req.body
     if (!anthropic) return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })

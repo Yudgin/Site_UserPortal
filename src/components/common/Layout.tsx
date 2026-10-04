@@ -54,6 +54,7 @@ import {
   ExpandLess as ExpandLessIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
+import { useAccess } from '@/store/accessStore'
 import { useBoatStore } from '@/store/boatStore'
 import { firebaseAuth } from '@/api/firebase'
 import LanguageSelector from './LanguageSelector'
@@ -68,6 +69,7 @@ export default function Layout() {
   const navigate = useNavigate()
   const location = useLocation()
   const { user, logout } = useAuthStore()
+  const access = useAccess() // RBAC 1b: разделы сотрудников (мастер/директор/бухгалтер)
   const { getSelectedBoat } = useBoatStore()
   const selectedBoat = getSelectedBoat()
 
@@ -110,6 +112,16 @@ export default function Layout() {
 
   if (user?.role === 'developer' || user?.role === 'distributor') {
     nav.push({ text: t('distributor.title') || 'Distributor', icon: <DistributorIcon />, path: '/distributor' })
+  }
+
+  // Сотрудники сервиса (не владелец): заявки своих центров, калькуляции по правам,
+  // оплаты — бухгалтеру. Владелец (developer) получает полное меню ниже.
+  if (user?.role !== 'developer' && access.isStaff && !access.isOwner) {
+    const items = [{ text: 'Заявки', icon: <RequestIcon />, path: '/service-requests' }]
+    if (access.can('preliminary')) items.push({ text: 'Пропозиція клієнту', icon: <EstimateIcon />, path: '/offer-editor' })
+    if (access.can('actual')) items.push({ text: 'Фактична калькуляція', icon: <EstimateIcon />, path: '/actual-estimate' })
+    if (access.role === 'accountant') items.push({ text: 'Оплати та чеки', icon: <PaymentsIcon />, path: '/payments-admin' })
+    nav.push({ group: 'Сервіс', icon: <InboxIcon />, items })
   }
 
   // Разделы для владельца — сгруппированы, чтобы меню не было длинной простынёй.

@@ -4,7 +4,7 @@
 // чтобы клиент не мог сам выдать себе роль.
 import axios from 'axios'
 import { db, auth } from './firebase'
-import { doc, getDoc, collection, getDocs, setDoc, query, orderBy } from 'firebase/firestore'
+import { doc, getDoc, collection, getDocs, setDoc, query, orderBy, where } from 'firebase/firestore'
 import type { UserProfile, Role, CenterAccess } from '@/types/access'
 
 const COLLECTION = 'users'
@@ -40,10 +40,24 @@ export const userProfileService = {
     }
   },
 
+  // Активные сотрудники — доступно персоналу. where('active','==',true) ОБЯЗАТЕЛЕН: правило list
+  // для не-владельца пропускает только такой запрос (users содержит и клиентов — их PII не отдаём).
+  // Без orderBy — иначе нужен составной индекс; сортируем в JS.
+  listActive: async (): Promise<UserProfile[]> => {
+    if (!db) return []
+    try {
+      const snap = await getDocs(query(collection(db, COLLECTION), where('active', '==', true)))
+      return snap.docs.map((d) => d.data() as UserProfile).sort((a, b) => (a.email || '').localeCompare(b.email || ''))
+    } catch (error) {
+      console.error('Error listing active profiles:', error)
+      return []
+    }
+  },
+
   // Специалисты сервиса (активные майстер/директор) — для назначения на заявку и распределения
-  // выплат. Опционально фильтруем по центру (кто закреплён за этим центром). Только владелец (list).
+  // выплат. Опционально фильтруем по центру (кто закреплён за этим центром). Владелец и персонал.
   listSpecialists: async (centerId?: string | null): Promise<{ uid: string; name: string }[]> => {
-    const all = await userProfileService.list()
+    const all = await userProfileService.listActive()
     return all
       .filter((u) => u.active && (u.role === 'master' || u.role === 'director'))
       .filter((u) => !centerId || (u.centers || []).some((c) => c.centerId === centerId))
