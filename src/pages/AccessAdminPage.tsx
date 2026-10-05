@@ -25,7 +25,7 @@ import {
 
 // Назначаемые роли. 'owner' пока не назначается: делегированный владелец заработает на уровне
 // данных лише у фазі 1b (правила/сервер почнуть читати роль); власник — акаунт за email.
-const ROLES: Role[] = ['director', 'accountant', 'master']
+const ROLES: Role[] = ['director', 'accountant', 'master', 'operator']
 
 export default function AccessAdminPage() {
   const navigate = useNavigate()
@@ -252,6 +252,7 @@ export default function AccessAdminPage() {
             </TextField>
             <FormControlLabel control={<Switch checked={uActive} onChange={(e) => setUActive(e.target.checked)} />} label="Доступ активний" />
             {uRole === 'accountant' && <Alert severity="info">Бухгалтер: перегляд + виставлення на оплату по всіх центрах.</Alert>}
+            {uRole === 'operator' && <Alert severity="info">Оператор: лише «Дошка оператора» у розділі «Дзвінки» (необроблені/оброблені, коментар автоматично йде в 1С). Заявок, калькуляцій та оплат не бачить.</Alert>}
             {uRole === 'owner' && <Alert severity="warning">Власник: повний доступ до всього.</Alert>}
             {uRole === 'director' && (
               <Box>

@@ -5,7 +5,8 @@
 // Auth: заголовок X-Calls-Token === CALLS_INGEST_TOKEN (env). Чтение журнала — фронт напрямую
 // из Firestore (правила: только владелец).
 import axios from 'axios'
-import { verifyFirebaseAdmin } from './adminAuth.js'
+import { verifyFirebaseStaff } from './adminAuth.js'
+import { rateLimit } from './rateLimit.js'
 
 const nowIso = () => new Date().toISOString()
 
@@ -152,14 +153,30 @@ export function registerCalls(app, deps) {
 
   // Комментарий к звонку с ПОРТАЛА (владелец/оператор в вебе): сохраняем в документ журнала
   // И автоматически отправляем в 1С как результат разговора. body: { kind, docId, text, by? }
-  app.post('/api/calls/note', async (req, res) => {
-    if (!(await verifyFirebaseAdmin(req))) {
-      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника' } })
+  // RBAC: владелец или оператор дзвінків (роль из users/{uid}). Каждый комментарий уходит в 1С,
+  // поэтому лимиты: 20/мин на сотрудника (ключ — uid, операторы могут сидеть за одним NAT),
+  // длина ≤ 2000 символов, ≤ 100 комментариев на карточку (документ Firestore ≤ 1 МиБ).
+  const NOTE_MAX_LEN = 2000
+  const NOTES_MAX = 100
+  const noteStaff = async (req, res, next) => {
+    const staff = await verifyFirebaseStaff(req, ['owner', 'operator'])
+    if (!staff) {
+      return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника або оператора' } })
     }
+    req.staff = staff
+    next()
+  }
+  const noteLimiter = rateLimit({ name: 'calls-note', windowMs: 60 * 1000, max: 20, keyFn: (req) => req.staff.uid })
+
+  app.post('/api/calls/note', noteStaff, noteLimiter, async (req, res) => {
+    const staff = req.staff
     if (!adminDb) return res.status(503).json({ success: false })
     try {
-      const { kind, docId, text, by } = req.body || {}
-      if (!docId || !text || !String(text).trim()) {
+      const { kind, docId } = req.body || {}
+      const text = String(req.body?.text || '').trim().slice(0, NOTE_MAX_LEN)
+      // Автор — из проверенного токена, а не из тела: оператор не может подписаться чужим именем.
+      const by = staff.role === 'owner' ? (req.body?.by || 'власник') : (staff.email || `оператор ${staff.uid.slice(0, 6)}`)
+      if (!docId || !text || !/^[\w.:-]{1,200}$/.test(String(docId))) {
         return res.status(400).json({ success: false, error: { code: 'BAD_REQ', message: 'docId і text обовʼязкові' } })
       }
       const coll = kind === 'result' ? 'callResults' : 'callEvents'
@@ -167,6 +184,12 @@ export function registerCalls(app, deps) {
       const snap = await ref.get()
       if (!snap.exists) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Запис не знайдено' } })
       const d = snap.data()
+      if (staff.role === 'operator' && d.workflowStatus === 'archived') {
+        return res.status(409).json({ success: false, error: { code: 'ARCHIVED', message: 'Картка в архіві — коментарі додає лише власник' } })
+      }
+      if ((d.notes || []).length >= NOTES_MAX) {
+        return res.status(409).json({ success: false, error: { code: 'TOO_MANY_NOTES', message: 'Забагато коментарів до цієї картки' } })
+      }
 
       // 1С-шный id звонка: у события он в sourceCallId; у «сирітського» результата пробуем
       // найти связанное событие по callId (боту 1С отдаёт свой id только через событие).
@@ -178,8 +201,9 @@ export function registerCalls(app, deps) {
         } catch { /* некритично */ }
       }
 
-      const sentTo1C = await sendNoteTo1C({ sourceCallId, phone: d.phone, text: String(text).trim(), by })
-      const note = { text: String(text).trim(), at: nowIso(), by: by || 'власник', sentTo1C }
+      const sentTo1C = await sendNoteTo1C({ sourceCallId, phone: d.phone, text, by })
+      // byUid/byRole — неизменяемый след автора (email в Firebase Auth можно сменить).
+      const note = { text, at: nowIso(), by: by || 'власник', byUid: staff.uid, byRole: staff.role, sentTo1C }
       await adminDb.runTransaction(async (tx) => {
         const s = await tx.get(ref)
         const cur = s.exists ? s.data() : {}

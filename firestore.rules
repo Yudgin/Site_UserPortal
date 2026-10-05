@@ -305,14 +305,27 @@ service cloud.firestore {
     // Журнал дзвінків (зеркало операторского бота + вебхук Kyivstar): СОЗДАЁТ только backend
     // (Admin SDK). Владелец на канбане «Дзвінки» может ОБНОВЛЯТЬ карточки (workflowStatus,
     // notes — рабочий процесс: нові → оброблені → архів), но не создавать/удалять.
+    // Оператор дзвінків (роль operator в users/{uid}) читает журнал и может ТОЛЬКО двигать
+    // карточку между «необроблені» и «оброблені» (workflowStatus); архив/прочие поля — владелец.
+    // Комментарии пишет backend (/api/calls/note) — он же шлёт их в 1С.
+    function isCallsStaff() {
+      return isPriceAdmin()
+        || (hasStaffDoc() && staffDoc().active == true && staffDoc().role in ['owner', 'operator']);
+    }
+    function operatorWorkflowOnly() {
+      // Исходный статус тоже проверяем: из архива карточку возвращает только владелец.
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['workflowStatus'])
+        && request.resource.data.workflowStatus in ['new', 'processed']
+        && resource.data.get('workflowStatus', 'new') != 'archived';
+    }
     match /callEvents/{id} {
-      allow read, list: if isPriceAdmin();
-      allow update: if isPriceAdmin();
+      allow read, list: if isCallsStaff();
+      allow update: if isPriceAdmin() || (isCallsStaff() && operatorWorkflowOnly());
       allow create, delete: if false;
     }
     match /callResults/{id} {
-      allow read, list: if isPriceAdmin();
-      allow update: if isPriceAdmin();
+      allow read, list: if isCallsStaff();
+      allow update: if isPriceAdmin() || (isCallsStaff() && operatorWorkflowOnly());
       allow create, delete: if false;
     }
     // Задачи: зеркало бота (создаёт backend) + задачи, созданные владельцем прямо на канбане

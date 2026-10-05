@@ -16,8 +16,8 @@ import {
   AssignmentTurnedIn as TaskDoneIcon, Assignment as TaskIcon, Add as AddIcon, Done as DoneIcon,
   History as HistoryIcon, Sailing as BoatIcon,
 } from '@mui/icons-material'
-import { useAuthStore } from '@/store/authStore'
-import { isAdminEmail } from '@/config/access'
+import { useAccess } from '@/store/accessStore'
+import { useStaffGate } from '@/hooks/useStaffGate'
 import {
   callsService, type BotTask, type CallEvent, type CallResult, type CallNote, type CallWorkflowStatus,
 } from '@/api/callsService'
@@ -55,7 +55,9 @@ const COLUMNS: { key: CallWorkflowStatus; title: string; hint: string }[] = [
 
 export default function CallsJournalPage() {
   const navigate = useNavigate()
-  const { user } = useAuthStore()
+  // RBAC: владелец — всё (канбан, доска оператора, журнал); оператор — ТОЛЬКО доска оператора.
+  const access = useAccess()
+  const gate = useStaffGate((a) => a.canCalls, 'Доступ лише для власника або оператора дзвінків.')
   const [events, setEvents] = useState<CallEvent[]>([])
   const [results, setResults] = useState<CallResult[]>([])
   const [tasks, setTasks] = useState<BotTask[]>([])
@@ -66,15 +68,23 @@ export default function CallsJournalPage() {
   const [shown, setShown] = useState(PAGE)
   const [noteDraft, setNoteDraft] = useState<Record<string, string>>({})
   const [busyKey, setBusyKey] = useState('')
+  const [noteError, setNoteError] = useState('')
 
+  // Оператору задачи не грузим (доска оператора их не показывает, правила — только владелец).
+  const isOperator = access.isOperator
+  const viewEff: 0 | 1 | 2 = isOperator ? 1 : view
   const load = useCallback(async () => {
     setLoading(true)
-    const [e, r, t] = await Promise.all([callsService.listEvents(), callsService.listResults(), callsService.listTasks()])
+    const [e, r, t] = await Promise.all([
+      callsService.listEvents(), callsService.listResults(),
+      isOperator ? Promise.resolve([] as BotTask[]) : callsService.listTasks(),
+    ])
     setEvents(e); setResults(r); setTasks(t)
     setLoading(false)
-  }, [])
-  useEffect(() => { load() }, [load])
-  useEffect(() => { setShown(PAGE) }, [q, employeeFilter, view])
+  }, [isOperator])
+  // Ждём профиль (роль), чтобы не дёргать недоступные оператору коллекции.
+  useEffect(() => { if (access.loaded || access.isOwner) load() }, [load, access.loaded, access.isOwner])
+  useEffect(() => { setShown(PAGE) }, [q, employeeFilter, viewEff])
 
   const rows = useMemo<Row[]>(() => {
     // call.incoming і call.completed одного дзвінка приходять з РІЗНИМИ callId (бот генерує
@@ -239,18 +249,22 @@ export default function CallsJournalPage() {
   // відправляється в 1С як результат розмови (рішення власника — КОЖЕН коментар).
   const postCallNote = async (row: Row, text: string): Promise<boolean> => {
     setBusyKey(row.key)
+    setNoteError('')
     const r = await callsAdminApi.addNote({ kind: row.kind, docId: row.docId, text })
     if (r.ok && r.note) applyLocal(row, { notes: [...row.notes, r.note] })
+    if (!r.ok) setNoteError(`Коментар не збережено: ${r.error || 'помилка сервера'}. Статус картки не змінено — спробуйте ще раз.`)
     setBusyKey('')
     return r.ok
   }
 
   // Перемещение: если в поле набрана дія — она сохраняется (и уходит в 1С) тем же действием.
+  // Комментарий не сохранился → статус НЕ меняем (иначе результат разговора потерялся бы молча).
   const moveTo = async (row: Row, status: CallWorkflowStatus) => {
     const draft = (noteDraft[row.key] || '').trim()
     if (draft) {
       const ok = await postCallNote(row, draft)
-      if (ok) setNoteDraft((d) => ({ ...d, [row.key]: '' }))
+      if (!ok) return
+      setNoteDraft((d) => ({ ...d, [row.key]: '' }))
     }
     await saveWorkflow(row, { workflowStatus: status })
   }
@@ -293,13 +307,7 @@ export default function CallsJournalPage() {
     setBusyKey('')
   }
 
-  if (!user || !isAdminEmail(user.email)) {
-    return (
-      <Container maxWidth="sm" sx={{ py: 6 }}>
-        <Alert severity="error">Доступ лише для адміністратора.</Alert>
-      </Container>
-    )
-  }
+  if (gate) return gate
 
   // operatorMode — спрощена дошка оператора: лише коментар і «Обробити», без архіву/задач.
   const renderCard = (r: Row, inKanban: boolean, operatorMode = false) => (
@@ -462,6 +470,11 @@ export default function CallsJournalPage() {
         <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>Головна</Button>
       </Stack>
 
+      {isOperator ? (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Дошка оператора: зафіксуйте результат розмови в коментарі (він автоматично піде в 1С) і натисніть «Обробити».
+        </Alert>
+      ) : (
       <Paper sx={{ mb: 2 }}>
         <Tabs value={view} onChange={(_, v) => setView(v)} variant="fullWidth">
           <Tab label={`Мій канбан (${rows.filter((r) => r.status !== 'archived').length + tasks.filter((t) => t.workflowStatus !== 'archived').length})`} />
@@ -469,6 +482,7 @@ export default function CallsJournalPage() {
           <Tab label={`Журнал (${rows.length})`} />
         </Tabs>
       </Paper>
+      )}
 
       <Stack direction="row" spacing={1} sx={{ mb: 2 }} flexWrap="wrap" useFlexGap alignItems="center">
         {employees.length > 0 && (
@@ -481,11 +495,13 @@ export default function CallsJournalPage() {
           onChange={(e) => setQ(e.target.value)} sx={{ minWidth: 260, flexGrow: 1 }} />
       </Stack>
 
+      {noteError && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setNoteError('')}>{noteError}</Alert>}
+
       {loading ? (
         <Box sx={{ textAlign: 'center', py: 6 }}><CircularProgress /></Box>
       ) : rows.length === 0 ? (
         <Alert severity="info">Журнал порожній — дзвінки зʼявляться автоматично (1С/бот та Kyivstar).</Alert>
-      ) : view === 0 ? (
+      ) : viewEff === 0 ? (
         /* ---- КАНБАН ---- */
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="stretch">
           {COLUMNS.map((col) => {
@@ -555,7 +571,7 @@ export default function CallsJournalPage() {
             )
           })()}
         </Stack>
-      ) : view === 1 ? (
+      ) : viewEff === 1 ? (
         /* ---- ДОШКА ОПЕРАТОРА: лише необроблені/оброблені, без архіву і задач ---- */
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="stretch">
           {([

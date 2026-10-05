@@ -124,6 +124,11 @@ export default function Layout() {
     nav.push({ group: 'Сервіс', icon: <InboxIcon />, items })
   }
 
+  // Оператор дзвінків: единственный служебный раздел — доска звонков.
+  if (user?.role !== 'developer' && access.isOperator) {
+    nav.push({ text: 'Дзвінки', icon: <InboxIcon />, path: '/calls' })
+  }
+
   // Разделы для владельца — сгруппированы, чтобы меню не было длинной простынёй.
   if (user?.role === 'developer') {
     nav.push({ text: 'Панель власника', icon: <OwnerDashIcon />, path: '/owner' })

@@ -16,7 +16,9 @@ import type { PayMethodKey } from '@/types/pricing'
 //  • actual      — формировать фактические калькуляции (что реально сделано);
 //  • payment     — выставлять на оплату (выбор ФОП/способа). Обычно у бухгалтера/владельца.
 // У директора в пределах его центров — все права независимо от набора флагов.
-export type Role = 'owner' | 'director' | 'accountant' | 'master'
+// operator — оператор дзвінків: ТІЛЬКИ дошка оператора (необроблені/оброблені дзвінки,
+// коментар → 1С). До заявок/калькуляцій/оплат доступу не має (не входить в «персонал сервісу»).
+export type Role = 'owner' | 'director' | 'accountant' | 'master' | 'operator'
 
 export type CenterPermission = 'view' | 'preliminary' | 'actual' | 'payment'
 
@@ -34,6 +36,7 @@ export const ROLE_LABELS: Record<Role, string> = {
   director: 'Директор сервісу',
   accountant: 'Бухгалтер',
   master: 'Майстер (спеціаліст)',
+  operator: 'Оператор (дзвінки)',
 }
 
 // Доступ мастера к одному центру: набор прав.
@@ -44,7 +47,7 @@ export interface CenterAccess {
 
 // ==== Видимость карточки заявки/калькуляции по ролям (для превью «Показати як…») ====
 // Роли просмотра: сотрудники + клиент. Определяют, что видно в карточке.
-export type ViewRole = Role | 'client'
+export type ViewRole = Exclude<Role, 'operator'> | 'client' // оператор карточек заявок не видит
 export const VIEW_ROLES: ViewRole[] = ['owner', 'director', 'accountant', 'master', 'client']
 export const VIEW_ROLE_LABELS: Record<ViewRole, string> = {
   owner: 'Власник',

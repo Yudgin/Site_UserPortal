@@ -75,6 +75,11 @@ export const useAccess = () => {
 
   // Есть ли вообще доступ в служебную часть (не клиент).
   const isStaff = isOwner || (!!profile?.active && (profile.role === 'accountant' || profile.role === 'director' || profile.role === 'master'))
+  // Оператор дзвінків — ОТДЕЛЬНО от персонала сервиса: только доска звонков.
+  const isOperator = !isOwner && !!profile?.active && profile.role === 'operator'
+  const canCalls = isOwner || isOperator
+  // Любой сотрудник (персонал или оператор) — пропускаем в кабинет без привязанной лодки.
+  const isEmployee = isStaff || isOperator
 
-  return { isOwner, role, can, visibleCenterIds, isStaff, centers, loaded, profile }
+  return { isOwner, role, can, visibleCenterIds, isStaff, isOperator, canCalls, isEmployee, centers, loaded, profile }
 }

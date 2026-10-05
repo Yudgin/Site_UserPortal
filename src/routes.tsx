@@ -96,7 +96,7 @@ const ProtectedRoute = ({ children }: ProtectedRouteProps) => {
   // Администратор (developer) и сотрудники сервиса (роль из users/{uid}) видят панель (и меню)
   // даже без привязанной лодки; до загрузки профиля — ждём, чтобы не редиректить мастера зря.
   if (isSynced && boats.length === 0) {
-    if (user.role === 'developer' || access.isStaff) return <>{children}</>
+    if (user.role === 'developer' || access.isEmployee) return <>{children}</>
     if (!access.loaded) {
       return (
         <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh' }}>
