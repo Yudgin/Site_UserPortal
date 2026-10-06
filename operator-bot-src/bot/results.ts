@@ -1,3 +1,4 @@
+import { mirrorCallResult } from '../portalMirror.js';
 import { InlineKeyboard, type Bot } from 'grammy';
 import type { Store } from '../store/store.js';
 import type { CallResultRecord, User } from '../types.js';
@@ -105,6 +106,7 @@ export async function markResultReviewed(
     reviewedByName: reviewerName,
   });
   if (!updated) return null;
+  mirrorCallResult(updated); // зеркало «Принято» в портал RunFerry (fire-and-forget)
 
   const refs = [...(updated.resultMessages ?? [])];
   if (

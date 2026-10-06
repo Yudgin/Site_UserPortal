@@ -42,59 +42,66 @@ const DEFAULT_LIMIT = 100;
 export class FirestoreStore implements Store {
   private readonly db: Firestore;
 
-  constructor(projectId?: string) {
+  // RunFerry-портал: имена коллекций переопределяются (префикс + явная карта), чтобы бот,
+  // живущий в одном Firestore с порталом, не пересекался с его коллекциями (users, callResults…).
+  private readonly names: Record<string, string>;
+
+  constructor(projectId?: string, opts: { collectionPrefix?: string; collectionNames?: Record<string, string> } = {}) {
     if (getApps().length === 0) {
       initializeApp({ credential: applicationDefault(), projectId });
     }
     this.db = getFirestore();
+    const prefix = opts.collectionPrefix ?? '';
+    const base = ['chats','threads','callCards','callResults','reminders','prompts','consultations','clientLinks','userLanguages','users','tasks','telegramLinkTokens'];
+    this.names = Object.fromEntries(base.map((n) => [n, opts.collectionNames?.[n] ?? `${prefix}${n}`]));
   }
 
   private get chats(): CollectionReference {
-    return this.db.collection('chats');
+    return this.db.collection(this.names['chats']);
   }
 
   private get threads(): CollectionReference {
-    return this.db.collection('threads');
+    return this.db.collection(this.names['threads']);
   }
 
   private get callCards(): CollectionReference {
-    return this.db.collection('callCards');
+    return this.db.collection(this.names['callCards']);
   }
 
   private get callResults(): CollectionReference {
-    return this.db.collection('callResults');
+    return this.db.collection(this.names['callResults']);
   }
 
   private get reminders(): CollectionReference {
-    return this.db.collection('reminders');
+    return this.db.collection(this.names['reminders']);
   }
 
   private get prompts(): CollectionReference {
-    return this.db.collection('prompts');
+    return this.db.collection(this.names['prompts']);
   }
 
   private get consultations(): CollectionReference {
-    return this.db.collection('consultations');
+    return this.db.collection(this.names['consultations']);
   }
 
   private get clientLinks(): CollectionReference {
-    return this.db.collection('clientLinks');
+    return this.db.collection(this.names['clientLinks']);
   }
 
   private get userLanguages(): CollectionReference {
-    return this.db.collection('userLanguages');
+    return this.db.collection(this.names['userLanguages']);
   }
 
   private get users(): CollectionReference {
-    return this.db.collection('users');
+    return this.db.collection(this.names['users']);
   }
 
   private get tasks(): CollectionReference {
-    return this.db.collection('tasks');
+    return this.db.collection(this.names['tasks']);
   }
 
   private get linkTokens(): CollectionReference {
-    return this.db.collection('telegramLinkTokens');
+    return this.db.collection(this.names['telegramLinkTokens']);
   }
 
   private cardDocId(chatId: number, messageId: number): string {

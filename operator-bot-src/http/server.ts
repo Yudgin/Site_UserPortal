@@ -1,3 +1,4 @@
+import { mirrorCallEvent, mirrorTask } from '../portalMirror.js';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import type { AppConfig } from '../config.js';
@@ -28,6 +29,8 @@ export interface ServerDeps {
   webhookCallback?: express.RequestHandler;
   /** Username бота (для ссылки привязки Telegram), напр. RunferryAssistanceBot. */
   botUsername?: string;
+  /** Каталог статики админки (по умолчанию public/admin относительно cwd). */
+  adminStaticDir?: string;
 }
 
 // Известные поля тела /api/events/call; всё остальное складываем в extra.
@@ -305,7 +308,8 @@ function parseCallEvent(body: unknown): ParseCallEventResult {
   if (clientName) event.clientName = clientName;
   const clientId = optionalString(record.clientId);
   if (clientId) event.clientId = clientId;
-  const line = optionalString(record.line);
+  // 1С шлёт линию и числом (line: 1), и строкой — принимаем обе (как employeeId).
+  const line = optionalIdString(record.line);
   if (line) event.line = line;
   const employee = optionalString(record.employee);
   if (employee) event.employee = employee;
@@ -318,9 +322,12 @@ function parseCallEvent(body: unknown): ParseCallEventResult {
   return { ok: true, event };
 }
 
-export function createServer(deps: ServerDeps): express.Express {
+// Роутер со всеми маршрутами бота — его можно смонтировать в чужое Express-приложение под
+// префиксом (портал RunFerry: app.use('/operator-bot', createRouter(deps))). createServer
+// оборачивает его в самостоятельное приложение (standalone-запуск, как раньше).
+export function createRouter(deps: ServerDeps): express.Router {
   const { config, store, dispatcher } = deps;
-  const app = express();
+  const app = express.Router();
 
   app.use(express.json({ limit: '1mb' }));
 
@@ -343,6 +350,7 @@ export function createServer(deps: ServerDeps): express.Express {
         res.status(400).json({ ok: false, error: parsed.error });
         return;
       }
+      mirrorCallEvent(parsed.event); // зеркало в портал RunFerry (fire-and-forget)
       const { delivered } = await dispatcher.dispatchIncomingCall(parsed.event);
       res.json({ ok: true, delivered });
     }),
@@ -609,6 +617,7 @@ export function createServer(deps: ServerDeps): express.Express {
       if (delivered) task.notifiedAt = nowIso;
     }
     await store.saveTask(task);
+    mirrorTask(store, task); // зеркало в канбан портала (fire-and-forget)
     return task;
   }
 
@@ -666,6 +675,7 @@ export function createServer(deps: ServerDeps): express.Express {
         if (result) patch.result = result;
       }
       const updated = await store.updateTask(req.params.id, patch);
+      if (updated) mirrorTask(store, updated); // зеркало в канбан портала
       if (updated && patch.status === 'done') {
         void dispatcher.archiveCompletedTask(updated).catch((err) => {
           console.error('Ошибка архивации задачи:', err);
@@ -710,6 +720,7 @@ export function createServer(deps: ServerDeps): express.Express {
         doneByName: user.name,
         ...(result ? { result } : {}),
       });
+      if (updated) mirrorTask(store, updated); // зеркало в канбан портала
       if (updated) {
         void dispatcher.archiveCompletedTask(updated).catch((err) => {
           console.error('Ошибка архивации задачи:', err);
@@ -720,18 +731,36 @@ export function createServer(deps: ServerDeps): express.Express {
   );
 
   // Ссылка привязки Telegram к своему аккаунту.
+  // Ссылка привязки Telegram: токен на 15 минут, deep-link t.me/<bot>?start=link_<token>.
+  const issueTelegramLink = async (user: User) => {
+    const token = randomUUID().replace(/-/g, '').slice(0, 20);
+    const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+    await store.saveLinkToken({ token, userId: user.id, expiresAt });
+    const url = deps.botUsername ? `https://t.me/${deps.botUsername}?start=link_${token}` : null;
+    return { token, url, expiresAt };
+  };
+
   app.post(
     '/api/me/telegram-link',
     requireUser,
     asyncRoute(async (req, res) => {
-      const user = (req as AuthedRequest).user as User;
-      const token = randomUUID().replace(/-/g, '').slice(0, 20);
-      const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
-      await store.saveLinkToken({ token, userId: user.id, expiresAt });
-      const url = deps.botUsername
-        ? `https://t.me/${deps.botUsername}?start=link_${token}`
-        : null;
-      res.json({ token, url, expiresAt });
+      res.json(await issueTelegramLink((req as AuthedRequest).user as User));
+    }),
+  );
+
+  // Портал RunFerry: Google-вход в админку отключён, сессий нет — ссылку привязки для
+  // сотрудника выдаёт админ (по Bearer-токену). Личность Telegram по-прежнему подтверждает
+  // сам сотрудник, открывая deep-link в боте.
+  app.post(
+    '/api/admin/users/:id/telegram-link',
+    adminAuth,
+    asyncRoute(async (req, res) => {
+      const user = await store.getUser(String(req.params.id));
+      if (!user) {
+        res.status(404).json({ ok: false, error: 'Пользователь не найден' });
+        return;
+      }
+      res.json(await issueTelegramLink(user));
     }),
   );
 
@@ -844,12 +873,12 @@ export function createServer(deps: ServerDeps): express.Express {
     }),
   );
 
-  app.get('/', (_req, res) => {
-    res.redirect('/admin/');
+  app.get('/', (req, res) => {
+    res.redirect(`${req.baseUrl || ''}/admin/`);
   });
   app.use(
     '/admin',
-    express.static('public/admin', {
+    express.static(deps.adminStaticDir || 'public/admin', {
       // Заставляем браузер каждый раз сверяться с сервером (ETag), чтобы после
       // деплоя не залипала старая версия app.js/index.html (как было в Safari).
       setHeaders: (res, filePath) => {
@@ -875,5 +904,11 @@ export function createServer(deps: ServerDeps): express.Express {
     },
   );
 
+  return app;
+}
+
+export function createServer(deps: ServerDeps): express.Express {
+  const app = express();
+  app.use(createRouter(deps));
   return app;
 }

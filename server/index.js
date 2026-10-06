@@ -58,10 +58,15 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }))
+// Любой ответ сервера — без MIME-sniffing (на этом origin живут и статика json-server, и админка бота).
+app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); next() })
+// Операторский бот под /operator-bot разбирает тело САМ (лимит 1mb + свой JSON-ответ на битый JSON,
+// как в standalone) — глобальные парсеры его пропускают, иначе его express.json стал бы no-op.
+const notOperatorBot = (mw) => (req, res, next) => (req.path.startsWith('/operator-bot') ? next() : mw(req, res, next))
 // rawBody сохраняем для проверки подписи Viber-/monobank-вебхуков (HMAC-SHA256 сырого тела).
-app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf } }))
+app.use(notOperatorBot(express.json({ verify: (req, _res, buf) => { req.rawBody = buf } })))
 // LiqPay шлёт вебхук form-urlencoded (поля data + signature)
-app.use(express.urlencoded({ extended: true }))
+app.use(notOperatorBot(express.urlencoded({ extended: true })))
 
 // TurboSMS API configuration
 const TURBOSMS_API_URL = 'https://api.turbosms.ua'

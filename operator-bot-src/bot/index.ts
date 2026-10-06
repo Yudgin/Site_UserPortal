@@ -1,3 +1,4 @@
+import { mirrorCallResult, mirrorTask } from '../portalMirror.js';
 import { randomUUID } from 'node:crypto';
 import { Bot, GrammyError, InlineKeyboard, type Context } from 'grammy';
 import type { AppConfig } from '../config.js';
@@ -44,6 +45,8 @@ export interface BotDeps {
   config: AppConfig;
   store: Store;
   onec: OnecClient;
+  /** Портал RunFerry: вызывается после успешного создания ремонта в 1С (GUID документа). */
+  onRepairCreated?: (info: { id: string; phone: string; clientName?: string }) => void;
 }
 
 const ACTION_RE = /^a:(\w+):(\d+)$/;
@@ -109,6 +112,17 @@ function extractDocNumber(result: unknown): string | null {
 // Реальный ответ repair_NEW: { ID, Status: "Успешно", TTN: <номер Новой Почты> }
 function extractTtn(result: unknown): string | null {
   return extractField(result, ['TTN', 'Ttn', 'ttn']);
+}
+
+// GUID созданного документа 1С (ответ repair_NEW: { ID, Status, TTN }).
+function extractCreatedId(result: unknown): string | null {
+  if (typeof result !== 'object' || result === null) return null;
+  const r = result as Record<string, unknown>;
+  for (const key of ['ID', 'Id', 'id', 'GUID', 'guid']) {
+    const v = r[key];
+    if (typeof v === 'string' && v.trim() !== '') return v.trim();
+  }
+  return null;
 }
 
 function extractStatus(result: unknown): string | null {
@@ -496,6 +510,7 @@ export function createBot(deps: BotDeps): Bot {
         doneAt: new Date().toISOString(),
         doneByName,
       });
+      if (updated) mirrorTask(store, updated); // зеркало в канбан портала
       await ctx.answerCallbackQuery({ text: 'Отмечено выполненным' });
       try {
         await ctx.editMessageText(`✅ <b>Выполнено</b>\n${escapeHtml(task.title)}`, {
@@ -1153,6 +1168,10 @@ export function createBot(deps: BotDeps): Bot {
             replyText = `⚠️ 1С не приняла заявку: ${status}`;
           } else {
             created = true;
+            const createdId = extractCreatedId(result);
+            if (createdId !== null && deps.onRepairCreated) {
+              try { deps.onRepairCreated({ id: createdId, phone, clientName: prompt.payload.clientName }); } catch (hookErr) { console.error('onRepairCreated:', hookErr); }
+            }
             const parts = ['✅ Заявка на ремонт создана'];
             if (chosenServiceName !== null) parts.push(`Сервис-центр: ${chosenServiceName}`);
             const docNumber = extractDocNumber(result);
@@ -1270,6 +1289,7 @@ export function createBot(deps: BotDeps): Bot {
         if (delivered) {
           await store.updateTask(task.id, { notifiedAt: nowIso });
         }
+        mirrorTask(store, task); // зеркало в канбан портала
         await deletePromptSafe(prompt.id);
         await deleteMessageSafe(chatId, prompt.promptMessageId);
         const deliveryNote = delivered
@@ -1301,6 +1321,7 @@ export function createBot(deps: BotDeps): Bot {
         await ctx.reply('✅ Задание выполнено, результат записан.', {
           reply_parameters: { message_id: message.message_id },
         });
+        if (updatedTask) mirrorTask(store, updatedTask); // зеркало в канбан портала
         if (updatedTask) await archiveTask(bot, store, updatedTask);
         return;
       }
@@ -1409,6 +1430,7 @@ export function createBot(deps: BotDeps): Bot {
       sentTo1C,
     };
     await store.saveCallResult(resultRecord);
+    mirrorCallResult(resultRecord); // зеркало в портал RunFerry (fire-and-forget)
 
     // Публикуем карточку результата в каналы «Результаты» (best-effort):
     // руководитель просматривает резюме и помечает их «Принято».

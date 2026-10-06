@@ -1,0 +1,711 @@
+import { mirrorCallEvent, mirrorTask } from '../portalMirror.js';
+import { randomUUID } from 'node:crypto';
+import express from 'express';
+import { ALL_EVENT_TYPES, normalizePhone } from '../types.js';
+import { SESSION_COOKIE, readCookie, signSession, verifyGoogleIdToken, verifySession, } from './auth.js';
+// Известные поля тела /api/events/call; всё остальное складываем в extra.
+const CALL_EVENT_FIELDS = new Set([
+    'type',
+    'callId',
+    'phone',
+    'clientName',
+    'clientId',
+    'line',
+    'employee',
+    'employeeId',
+    'timestamp',
+    'extra',
+]);
+// Express 4 не ловит ошибки async-обработчиков сам — пробрасываем в next().
+function asyncRoute(handler) {
+    return (req, res, next) => {
+        handler(req, res).catch(next);
+    };
+}
+function headerTokenAuth(headerName, expectedToken) {
+    return (req, res, next) => {
+        if (!expectedToken || req.get(headerName) !== expectedToken) {
+            res
+                .status(401)
+                .json({ ok: false, error: `Неверный или отсутствующий токен в заголовке ${headerName}` });
+            return;
+        }
+        next();
+    };
+}
+function isEventType(value) {
+    return typeof value === 'string' && ALL_EVENT_TYPES.includes(value);
+}
+function isUserRole(value) {
+    return value === 'admin' || value === 'member';
+}
+function isTaskKind(value) {
+    return value === 'reminder' || value === 'task';
+}
+/** Разбор тела создания задачи. */
+function parseTaskCreate(body) {
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return { error: 'Тело запроса должно быть JSON-объектом' };
+    }
+    const r = body;
+    if (!isTaskKind(r.kind))
+        return { error: 'Поле kind должно быть reminder или task' };
+    if (typeof r.title !== 'string' || r.title.trim() === '') {
+        return { error: 'Поле title должно быть непустой строкой' };
+    }
+    if (typeof r.assigneeUserId !== 'string' || r.assigneeUserId.trim() === '') {
+        return { error: 'Поле assigneeUserId обязательно' };
+    }
+    let dueAt;
+    if (r.dueAt !== undefined && r.dueAt !== null && r.dueAt !== '') {
+        if (typeof r.dueAt !== 'string' || Number.isNaN(Date.parse(r.dueAt))) {
+            return { error: 'Поле dueAt должно быть датой ISO 8601' };
+        }
+        dueAt = new Date(r.dueAt).toISOString();
+    }
+    if (r.kind === 'reminder' && dueAt === undefined) {
+        return { error: 'Для напоминания нужно указать время (dueAt)' };
+    }
+    return { fields: { kind: r.kind, title: r.title.trim(), assigneeUserId: r.assigneeUserId, dueAt } };
+}
+/** Разбор тела создания/обновления пользователя. */
+function parseUserBody(body, isCreate) {
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return { error: 'Тело запроса должно быть JSON-объектом' };
+    }
+    const record = body;
+    const fields = {};
+    if (record.name !== undefined) {
+        if (typeof record.name !== 'string' || record.name.trim() === '') {
+            return { error: 'Поле name должно быть непустой строкой' };
+        }
+        fields.name = record.name.trim();
+    }
+    if (record.email !== undefined && record.email !== null && record.email !== '') {
+        if (typeof record.email !== 'string' || !record.email.includes('@')) {
+            return { error: 'Поле email указано некорректно' };
+        }
+        fields.email = record.email.trim().toLowerCase();
+    }
+    if (record.role !== undefined) {
+        if (!isUserRole(record.role)) {
+            return { error: 'Поле role должно быть admin или member' };
+        }
+        fields.role = record.role;
+    }
+    if (record.active !== undefined) {
+        if (typeof record.active !== 'boolean') {
+            return { error: 'Поле active должно быть булевым (true/false)' };
+        }
+        fields.active = record.active;
+    }
+    if (isCreate && fields.name === undefined && fields.email === undefined) {
+        return { error: 'Укажите имя или e-mail пользователя' };
+    }
+    return { fields };
+}
+function optionalString(value) {
+    return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+/** Как optionalString, но принимает и число (номер сотрудника 1С может прийти числом). */
+function optionalIdString(value) {
+    if (typeof value === 'string')
+        return value.trim() !== '' ? value.trim() : undefined;
+    if (typeof value === 'number' && Number.isFinite(value))
+        return String(value);
+    return undefined;
+}
+/** Разбор тела PATCH для цели маршрутизации (чат или ветка): active + events + isArchive. */
+function parseRoutePatch(body) {
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return { error: 'Тело запроса должно быть JSON-объектом' };
+    }
+    const record = body;
+    const patch = {};
+    if (record.active !== undefined) {
+        if (typeof record.active !== 'boolean') {
+            return { error: 'Поле active должно быть булевым (true/false)' };
+        }
+        patch.active = record.active;
+    }
+    if (record.isArchive !== undefined) {
+        if (typeof record.isArchive !== 'boolean') {
+            return { error: 'Поле isArchive должно быть булевым (true/false)' };
+        }
+        patch.isArchive = record.isArchive;
+    }
+    if (record.isResults !== undefined) {
+        if (typeof record.isResults !== 'boolean') {
+            return { error: 'Поле isResults должно быть булевым (true/false)' };
+        }
+        patch.isResults = record.isResults;
+    }
+    if (record.events !== undefined) {
+        if (!Array.isArray(record.events)) {
+            return { error: `Поле events должно быть массивом из значений: ${ALL_EVENT_TYPES.join(', ')}` };
+        }
+        const valid = record.events.filter(isEventType);
+        if (valid.length !== record.events.length) {
+            return {
+                error: `Поле events содержит недопустимые значения. Допустимые: ${ALL_EVENT_TYPES.join(', ')}`,
+            };
+        }
+        patch.events = [...new Set(valid)];
+    }
+    // employeeIds: массив строк/чисел ИЛИ строка с номерами через запятую.
+    // Пустой результат = канал общий (фильтра по сотруднику нет).
+    if (record.employeeIds !== undefined) {
+        let raw;
+        if (Array.isArray(record.employeeIds)) {
+            raw = record.employeeIds;
+        }
+        else if (typeof record.employeeIds === 'string') {
+            raw = record.employeeIds.split(',');
+        }
+        else {
+            return { error: 'Поле employeeIds должно быть массивом номеров или строкой через запятую' };
+        }
+        const ids = [];
+        for (const item of raw) {
+            const id = optionalIdString(item);
+            if (id && !ids.includes(id))
+                ids.push(id);
+        }
+        patch.employeeIds = ids;
+    }
+    return { patch };
+}
+function parseLimit(raw, fallback) {
+    if (typeof raw === 'string' && raw.trim() !== '') {
+        const n = Number(raw);
+        if (Number.isFinite(n) && n > 0)
+            return Math.min(Math.floor(n), 500);
+    }
+    return fallback;
+}
+function parsePhone(raw) {
+    if (raw === undefined || raw === null || String(raw).trim() === '') {
+        return { error: 'Не указан телефон клиента: поле phone обязательно' };
+    }
+    const phone = normalizePhone(String(raw));
+    if (!phone) {
+        return { error: 'Поле phone не содержит цифр — телефон невозможно распознать' };
+    }
+    return { phone };
+}
+function parseCallEvent(body) {
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return { ok: false, error: 'Тело запроса должно быть JSON-объектом' };
+    }
+    const record = body;
+    const phoneResult = parsePhone(record.phone);
+    if ('error' in phoneResult)
+        return { ok: false, error: phoneResult.error };
+    let type = 'call.incoming';
+    if (record.type !== undefined) {
+        if (!isEventType(record.type)) {
+            return {
+                ok: false,
+                error: `Недопустимый тип события «${String(record.type)}». Допустимые: ${ALL_EVENT_TYPES.join(', ')}`,
+            };
+        }
+        type = record.type;
+    }
+    // Внутренний id события ВСЕГДА уникальный — не доверяем значению из 1С (оно
+    // бывает константным), иначе закрытие одного звонка стирает все одноимённые.
+    // Оригинал из 1С сохраняем отдельно (sourceCallId) и вернём его в 1С при фиксации.
+    const callId = randomUUID();
+    let sourceCallId;
+    if (typeof record.callId === 'string' && record.callId.trim() !== '') {
+        sourceCallId = record.callId;
+    }
+    else if (typeof record.callId === 'number' && Number.isFinite(record.callId)) {
+        sourceCallId = String(record.callId);
+    }
+    const extra = {};
+    for (const [key, value] of Object.entries(record)) {
+        if (!CALL_EVENT_FIELDS.has(key))
+            extra[key] = value;
+    }
+    if (typeof record.extra === 'object' && record.extra !== null && !Array.isArray(record.extra)) {
+        Object.assign(extra, record.extra);
+    }
+    const event = { type, callId, phone: phoneResult.phone };
+    if (sourceCallId)
+        event.sourceCallId = sourceCallId;
+    const clientName = optionalString(record.clientName);
+    if (clientName)
+        event.clientName = clientName;
+    const clientId = optionalString(record.clientId);
+    if (clientId)
+        event.clientId = clientId;
+    // 1С шлёт линию и числом (line: 1), и строкой — принимаем обе (как employeeId).
+    const line = optionalIdString(record.line);
+    if (line)
+        event.line = line;
+    const employee = optionalString(record.employee);
+    if (employee)
+        event.employee = employee;
+    const employeeId = optionalIdString(record.employeeId);
+    if (employeeId)
+        event.employeeId = employeeId;
+    const timestamp = optionalString(record.timestamp);
+    if (timestamp)
+        event.timestamp = timestamp;
+    if (Object.keys(extra).length > 0)
+        event.extra = extra;
+    return { ok: true, event };
+}
+// Роутер со всеми маршрутами бота — его можно смонтировать в чужое Express-приложение под
+// префиксом (портал RunFerry: app.use('/operator-bot', createRouter(deps))). createServer
+// оборачивает его в самостоятельное приложение (standalone-запуск, как раньше).
+export function createRouter(deps) {
+    const { config, store, dispatcher } = deps;
+    const app = express.Router();
+    app.use(express.json({ limit: '1mb' }));
+    if (deps.webhookCallback) {
+        app.use('/api/telegram/webhook', deps.webhookCallback);
+    }
+    // Путь /healthz перехватывается инфраструктурой Google Cloud (отдаёт свой 404),
+    // поэтому health-check живёт на /health.
+    app.get('/health', (_req, res) => {
+        res.json({ ok: true });
+    });
+    app.post('/api/events/call', headerTokenAuth('X-Auth-Token', config.eventsAuthToken), asyncRoute(async (req, res) => {
+        const parsed = parseCallEvent(req.body);
+        if (!parsed.ok) {
+            res.status(400).json({ ok: false, error: parsed.error });
+            return;
+        }
+        mirrorCallEvent(parsed.event); // зеркало в портал RunFerry (fire-and-forget)
+        const { delivered } = await dispatcher.dispatchIncomingCall(parsed.event);
+        res.json({ ok: true, delivered });
+    }));
+    app.post('/api/cron/reminders', headerTokenAuth('X-Auth-Token', config.cronAuthToken), asyncRoute(async (_req, res) => {
+        // Сбой одного вида напоминаний не должен валить весь cron.
+        const [reminders, tasks] = await Promise.allSettled([
+            dispatcher.processDueReminders(),
+            dispatcher.processDueTaskReminders(),
+        ]);
+        if (reminders.status === 'rejected') {
+            console.error('Ошибка обработки напоминаний:', reminders.reason);
+        }
+        if (tasks.status === 'rejected') {
+            console.error('Ошибка обработки напоминаний-задач:', tasks.reason);
+        }
+        res.json({
+            ok: true,
+            sent: reminders.status === 'fulfilled' ? reminders.value : 0,
+            tasksSent: tasks.status === 'fulfilled' ? tasks.value : 0,
+        });
+    }));
+    // Событие от 1С: статус ремонта изменился -> уведомляем связанных клиентов.
+    app.post('/api/events/repair-status', headerTokenAuth('X-Auth-Token', config.eventsAuthToken), asyncRoute(async (req, res) => {
+        const body = req.body;
+        if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+            res.status(400).json({ ok: false, error: 'Тело запроса должно быть JSON-объектом' });
+            return;
+        }
+        const record = body;
+        const phoneResult = parsePhone(record.phone);
+        if ('error' in phoneResult) {
+            res.status(400).json({ ok: false, error: phoneResult.error });
+            return;
+        }
+        const status = optionalString(record.status);
+        if (!status) {
+            res.status(400).json({ ok: false, error: 'Поле status обязательно' });
+            return;
+        }
+        const event = { phone: phoneResult.phone, status };
+        const repairNumber = optionalString(record.repairNumber);
+        if (repairNumber)
+            event.repairNumber = repairNumber;
+        const message = optionalString(record.message);
+        if (message)
+            event.message = message;
+        const timestamp = optionalString(record.timestamp);
+        if (timestamp)
+            event.timestamp = timestamp;
+        const { delivered } = await dispatcher.notifyRepairStatus(event);
+        res.json({ ok: true, delivered });
+    }));
+    const cookieSecure = config.mode === 'webhook';
+    function setSessionCookie(res, userId) {
+        res.cookie(SESSION_COOKIE, signSession(userId, config.sessionSecret), {
+            httpOnly: true,
+            secure: cookieSecure,
+            sameSite: 'lax',
+            path: '/',
+            maxAge: 7 * 24 * 60 * 60_000,
+        });
+    }
+    async function sessionUser(req) {
+        const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+        if (!token)
+            return null;
+        const session = verifySession(token, config.sessionSecret);
+        if (!session)
+            return null;
+        const user = await store.getUser(session.uid);
+        return user && user.active ? user : null;
+    }
+    // Доступ к админ-API: сессия админа ИЛИ аварийный токен ADMIN_TOKEN.
+    const adminAuth = (req, res, next) => {
+        void (async () => {
+            if (req.get('Authorization') === `Bearer ${config.adminToken}`) {
+                next();
+                return;
+            }
+            const user = await sessionUser(req);
+            if (user && user.role === 'admin') {
+                req.user = user;
+                next();
+                return;
+            }
+            res
+                .status(401)
+                .json({ ok: false, error: 'Требуется вход через Google или токен администратора' });
+        })().catch(next);
+    };
+    // Публичная конфигурация для фронтенда (нужен Client ID, чтобы показать кнопку Google).
+    app.get('/api/auth/config', (_req, res) => {
+        res.json({ googleClientId: config.googleClientId ?? null });
+    });
+    // Текущий пользователь по сессии.
+    app.get('/api/auth/me', asyncRoute(async (req, res) => {
+        const user = await sessionUser(req);
+        if (!user) {
+            res.status(401).json({ ok: false });
+            return;
+        }
+        res.json({ user });
+    }));
+    // Вход через Google: фронт присылает ID-token, ищем пользователя по e-mail.
+    app.post('/api/auth/google', asyncRoute(async (req, res) => {
+        if (!config.googleClientId) {
+            res.status(503).json({ ok: false, error: 'Вход через Google не настроен' });
+            return;
+        }
+        const credential = typeof req.body === 'object' && req.body !== null
+            ? req.body.credential
+            : undefined;
+        if (typeof credential !== 'string' || credential === '') {
+            res.status(400).json({ ok: false, error: 'Не передан Google credential' });
+            return;
+        }
+        const identity = await verifyGoogleIdToken(credential, config.googleClientId);
+        if (!identity || !identity.emailVerified) {
+            res.status(401).json({ ok: false, error: 'Не удалось проверить аккаунт Google' });
+            return;
+        }
+        const user = await store.getUserByEmail(identity.email);
+        if (!user || !user.active) {
+            res.status(403).json({
+                ok: false,
+                error: 'Доступ не предоставлен. Обратитесь к администратору, чтобы он добавил ваш e-mail.',
+            });
+            return;
+        }
+        // Досвязываем Google и обновляем имя при первом входе.
+        const patch = {};
+        if (!user.googleId)
+            patch.googleId = identity.googleId;
+        if (identity.name && user.name !== identity.name && user.name === user.email) {
+            patch.name = identity.name;
+        }
+        const finalUser = Object.keys(patch).length > 0 ? await store.updateUser(user.id, patch) : user;
+        setSessionCookie(res, user.id);
+        res.json({ user: finalUser ?? user });
+    }));
+    app.post('/api/auth/logout', (_req, res) => {
+        res.clearCookie(SESSION_COOKIE, { path: '/' });
+        res.json({ ok: true });
+    });
+    // --- Управление пользователями (только админ) ---
+    app.get('/api/admin/users', adminAuth, asyncRoute(async (_req, res) => {
+        res.json({ users: await store.listUsers() });
+    }));
+    app.post('/api/admin/users', adminAuth, asyncRoute(async (req, res) => {
+        const parsed = parseUserBody(req.body, true);
+        if ('error' in parsed) {
+            res.status(400).json({ ok: false, error: parsed.error });
+            return;
+        }
+        const nowIso = new Date().toISOString();
+        const user = {
+            id: randomUUID(),
+            name: parsed.fields.name ?? parsed.fields.email ?? 'Пользователь',
+            email: parsed.fields.email,
+            role: parsed.fields.role ?? 'member',
+            active: parsed.fields.active ?? true,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+        };
+        if (user.email) {
+            const existing = await store.getUserByEmail(user.email);
+            if (existing) {
+                res.status(409).json({ ok: false, error: 'Пользователь с таким e-mail уже есть' });
+                return;
+            }
+        }
+        await store.saveUser(user);
+        res.json({ user });
+    }));
+    app.patch('/api/admin/users/:id', adminAuth, asyncRoute(async (req, res) => {
+        const parsed = parseUserBody(req.body, false);
+        if ('error' in parsed) {
+            res.status(400).json({ ok: false, error: parsed.error });
+            return;
+        }
+        const updated = await store.updateUser(req.params.id, parsed.fields);
+        if (!updated) {
+            res.status(404).json({ ok: false, error: 'Пользователь не найден' });
+            return;
+        }
+        res.json({ user: updated });
+    }));
+    // --- Задачи (напоминания/задания) ---
+    // Любой вошедший пользователь (для личных эндпоинтов /api/me/*).
+    const requireUser = (req, res, next) => {
+        void (async () => {
+            const user = await sessionUser(req);
+            if (user) {
+                req.user = user;
+                next();
+                return;
+            }
+            res.status(401).json({ ok: false, error: 'Требуется вход в портал' });
+        })().catch(next);
+    };
+    async function createTask(fields, creator) {
+        const nowIso = new Date().toISOString();
+        const task = {
+            id: randomUUID(),
+            kind: fields.kind,
+            title: fields.title,
+            assigneeUserId: fields.assigneeUserId,
+            creatorUserId: creator?.id,
+            creatorName: creator?.name ?? 'Администратор',
+            dueAt: fields.dueAt,
+            status: 'open',
+            createdAt: nowIso,
+            updatedAt: nowIso,
+        };
+        // Задание доставляем исполнителю сразу; напоминание — по сроку через cron.
+        if (task.kind === 'task') {
+            const delivered = await dispatcher.deliverTask(task);
+            if (delivered)
+                task.notifiedAt = nowIso;
+        }
+        await store.saveTask(task);
+        mirrorTask(store, task); // зеркало в канбан портала (fire-and-forget)
+        return task;
+    }
+    app.get('/api/admin/tasks', adminAuth, asyncRoute(async (_req, res) => {
+        res.json({ tasks: await store.listTasks(), users: await store.listUsers() });
+    }));
+    app.post('/api/admin/tasks', adminAuth, asyncRoute(async (req, res) => {
+        const parsed = parseTaskCreate(req.body);
+        if ('error' in parsed) {
+            res.status(400).json({ ok: false, error: parsed.error });
+            return;
+        }
+        const assignee = await store.getUser(parsed.fields.assigneeUserId);
+        if (!assignee) {
+            res.status(400).json({ ok: false, error: 'Исполнитель не найден' });
+            return;
+        }
+        const task = await createTask(parsed.fields, req.user);
+        res.json({ task });
+    }));
+    app.patch('/api/admin/tasks/:id', adminAuth, asyncRoute(async (req, res) => {
+        const task = await store.getTask(req.params.id);
+        if (!task) {
+            res.status(404).json({ ok: false, error: 'Задача не найдена' });
+            return;
+        }
+        const body = (typeof req.body === 'object' && req.body !== null ? req.body : {});
+        const patch = {};
+        if (typeof body.title === 'string' && body.title.trim() !== '')
+            patch.title = body.title.trim();
+        if (body.status === 'done' && task.status !== 'done') {
+            const result = optionalString(body.result);
+            if (task.kind === 'task' && !result) {
+                res.status(400).json({ ok: false, error: 'Для задания нужен результат выполнения' });
+                return;
+            }
+            patch.status = 'done';
+            patch.doneAt = new Date().toISOString();
+            patch.doneByName = req.user?.name ?? 'Администратор';
+            if (result)
+                patch.result = result;
+        }
+        const updated = await store.updateTask(req.params.id, patch);
+        if (updated)
+            mirrorTask(store, updated); // зеркало в канбан портала
+        if (updated && patch.status === 'done') {
+            void dispatcher.archiveCompletedTask(updated).catch((err) => {
+                console.error('Ошибка архивации задачи:', err);
+            });
+        }
+        res.json({ task: updated });
+    }));
+    // Личные задачи вошедшего пользователя.
+    app.get('/api/me/tasks', requireUser, asyncRoute(async (req, res) => {
+        const user = req.user;
+        res.json({ tasks: await store.listTasksByAssignee(user.id) });
+    }));
+    app.post('/api/me/tasks/:id/done', requireUser, asyncRoute(async (req, res) => {
+        const user = req.user;
+        const task = await store.getTask(req.params.id);
+        if (!task || task.assigneeUserId !== user.id) {
+            res.status(404).json({ ok: false, error: 'Задача не найдена' });
+            return;
+        }
+        const result = optionalString(typeof req.body === 'object' && req.body !== null
+            ? req.body.result
+            : undefined);
+        if (task.kind === 'task' && !result) {
+            res.status(400).json({ ok: false, error: 'Для задания нужен результат выполнения' });
+            return;
+        }
+        const updated = await store.updateTask(task.id, {
+            status: 'done',
+            doneAt: new Date().toISOString(),
+            doneByName: user.name,
+            ...(result ? { result } : {}),
+        });
+        if (updated)
+            mirrorTask(store, updated); // зеркало в канбан портала
+        if (updated) {
+            void dispatcher.archiveCompletedTask(updated).catch((err) => {
+                console.error('Ошибка архивации задачи:', err);
+            });
+        }
+        res.json({ task: updated });
+    }));
+    // Ссылка привязки Telegram к своему аккаунту.
+    // Ссылка привязки Telegram: токен на 15 минут, deep-link t.me/<bot>?start=link_<token>.
+    const issueTelegramLink = async (user) => {
+        const token = randomUUID().replace(/-/g, '').slice(0, 20);
+        const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+        await store.saveLinkToken({ token, userId: user.id, expiresAt });
+        const url = deps.botUsername ? `https://t.me/${deps.botUsername}?start=link_${token}` : null;
+        return { token, url, expiresAt };
+    };
+    app.post('/api/me/telegram-link', requireUser, asyncRoute(async (req, res) => {
+        res.json(await issueTelegramLink(req.user));
+    }));
+    // Портал RunFerry: Google-вход в админку отключён, сессий нет — ссылку привязки для
+    // сотрудника выдаёт админ (по Bearer-токену). Личность Telegram по-прежнему подтверждает
+    // сам сотрудник, открывая deep-link в боте.
+    app.post('/api/admin/users/:id/telegram-link', adminAuth, asyncRoute(async (req, res) => {
+        const user = await store.getUser(String(req.params.id));
+        if (!user) {
+            res.status(404).json({ ok: false, error: 'Пользователь не найден' });
+            return;
+        }
+        res.json(await issueTelegramLink(user));
+    }));
+    app.get('/api/admin/chats', adminAuth, asyncRoute(async (_req, res) => {
+        const [chats, threads] = await Promise.all([store.listChats(), store.listThreads()]);
+        res.json({ chats, threads });
+    }));
+    app.patch('/api/admin/chats/:id', adminAuth, asyncRoute(async (req, res) => {
+        const id = Number(req.params.id);
+        if (!Number.isInteger(id)) {
+            res.status(400).json({ ok: false, error: 'Некорректный идентификатор чата' });
+            return;
+        }
+        const parsed = parseRoutePatch(req.body);
+        if ('error' in parsed) {
+            res.status(400).json({ ok: false, error: parsed.error });
+            return;
+        }
+        const chat = await store.updateChat(id, parsed.patch);
+        if (!chat) {
+            res.status(404).json({ ok: false, error: 'Чат не найден' });
+            return;
+        }
+        res.json({ chat });
+    }));
+    app.patch('/api/admin/threads/:chatId/:threadId', adminAuth, asyncRoute(async (req, res) => {
+        const chatId = Number(req.params.chatId);
+        const threadId = Number(req.params.threadId);
+        if (!Number.isInteger(chatId) || !Number.isInteger(threadId)) {
+            res.status(400).json({ ok: false, error: 'Некорректный идентификатор чата или ветки' });
+            return;
+        }
+        const parsed = parseRoutePatch(req.body);
+        if ('error' in parsed) {
+            res.status(400).json({ ok: false, error: parsed.error });
+            return;
+        }
+        const thread = await store.updateThread(chatId, threadId, parsed.patch);
+        if (!thread) {
+            res.status(404).json({ ok: false, error: 'Ветка не найдена' });
+            return;
+        }
+        res.json({ thread });
+    }));
+    app.get('/api/admin/call-results', adminAuth, asyncRoute(async (req, res) => {
+        const limit = parseLimit(req.query.limit, 50);
+        res.json({ results: await store.listCallResults(limit) });
+    }));
+    app.get('/api/admin/reminders', adminAuth, asyncRoute(async (_req, res) => {
+        res.json({ reminders: await store.listReminders() });
+    }));
+    app.get('/api/admin/consultations', adminAuth, asyncRoute(async (_req, res) => {
+        res.json({ consultations: await store.listConsultations() });
+    }));
+    app.post('/api/admin/test-call', adminAuth, asyncRoute(async (req, res) => {
+        const body = req.body;
+        const record = (typeof body === 'object' && body !== null && !Array.isArray(body) ? body : {});
+        const phoneResult = parsePhone(record.phone);
+        if ('error' in phoneResult) {
+            res.status(400).json({ ok: false, error: phoneResult.error });
+            return;
+        }
+        const event = {
+            type: 'call.incoming',
+            callId: `test-${randomUUID()}`,
+            phone: phoneResult.phone,
+        };
+        const clientName = optionalString(record.clientName);
+        if (clientName)
+            event.clientName = clientName;
+        const { delivered } = await dispatcher.dispatchIncomingCall(event);
+        res.json({ ok: true, delivered });
+    }));
+    app.get('/', (req, res) => {
+        res.redirect(`${req.baseUrl || ''}/admin/`);
+    });
+    app.use('/admin', express.static(deps.adminStaticDir || 'public/admin', {
+        // Заставляем браузер каждый раз сверяться с сервером (ETag), чтобы после
+        // деплоя не залипала старая версия app.js/index.html (как было в Safari).
+        setHeaders: (res, filePath) => {
+            if (/\.(html|js|css)$/.test(filePath)) {
+                res.setHeader('Cache-Control', 'no-cache');
+            }
+        },
+    }));
+    app.use((err, _req, res, _next) => {
+        console.error('Ошибка при обработке HTTP-запроса:', err);
+        if (res.headersSent)
+            return;
+        const isParseError = typeof err === 'object' && err !== null && err.type === 'entity.parse.failed';
+        if (isParseError) {
+            res.status(400).json({ ok: false, error: 'Некорректный JSON в теле запроса' });
+            return;
+        }
+        // Детали исключения остаются в логах — клиенту только общий текст.
+        res.status(500).json({ ok: false, error: 'Внутренняя ошибка сервера' });
+    });
+    return app;
+}
+export function createServer(deps) {
+    const app = express();
+    app.use(createRouter(deps));
+    return app;
+}

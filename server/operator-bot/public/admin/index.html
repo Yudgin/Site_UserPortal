@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RunFerry — панель администратора</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <div id="login-screen" class="login-screen hidden">
+    <div class="login-card">
+      <h1>🚤 RunFerry</h1>
+      <p class="login-subtitle">Панель администратора</p>
+      <div id="g-signin" class="g-signin"></div>
+      <p id="google-unavailable" class="login-hint hidden">Вход через Google ещё не настроен.</p>
+      <details class="token-fallback">
+        <summary>Вход по токену администратора</summary>
+        <form id="login-form" autocomplete="off">
+          <input type="password" id="token-input" placeholder="Токен администратора" autocomplete="current-password">
+          <button type="submit" id="login-submit" class="btn btn-primary">Войти</button>
+        </form>
+      </details>
+      <p id="login-error" class="login-error hidden"></p>
+    </div>
+  </div>
+
+  <div id="app-screen" class="hidden">
+    <header class="app-header">
+      <div class="brand">🚤 RunFerry — панель администратора</div>
+      <button id="logout-btn" class="btn btn-ghost">Выйти</button>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="chats" data-admin-only>Чаты</button>
+      <button class="tab-btn" data-tab="results" data-admin-only>Результаты звонков</button>
+      <button class="tab-btn" data-tab="reminders" data-admin-only>Напоминания</button>
+      <button class="tab-btn" data-tab="consultations" data-admin-only>Консультации</button>
+      <button class="tab-btn" data-tab="tasks">Задачи</button>
+      <button class="tab-btn" data-tab="users" data-admin-only>Пользователи</button>
+    </nav>
+
+    <main class="content">
+
+      <section id="tab-chats" class="tab-panel">
+        <div class="panel-header">
+          <h2>Чаты</h2>
+          <button id="refresh-chats" class="btn">🔄 Обновить</button>
+        </div>
+        <p class="hint">
+          Чтобы бот появился в списке: откройте группу в Telegram → «Добавить участника» →
+          найдите бота по имени и добавьте его. Затем нажмите «🔄 Обновить».
+          Включите чат переключателем «Активен» и отметьте, какие события в него отправлять. У форум-чатов под чатом показываются их ветки (темы) — события можно направлять и в конкретную ветку. В поле «Сотрудники» укажите внутренние номера операторов через запятую — тогда канал получит только адресованные им звонки; пусто — канал общий (все звонки). Переключатель «Результаты» — сюда будут публиковаться резюме разговоров с кнопками истории клиента и кнопкой «Принять» (виден статус, что уже просмотрено). Переключатель «Архив» — сюда будут публиковаться выполненные задачи и напоминания (журнал).
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Название</th>
+                <th>Тип</th>
+                <th>Бот в чате</th>
+                <th>Активен</th>
+                <th>События</th>
+                <th>Сотрудники</th>
+                <th>Результаты</th>
+                <th>Архив</th>
+              </tr>
+            </thead>
+            <tbody id="chats-tbody"></tbody>
+          </table>
+        </div>
+
+        <div class="card test-call-card">
+          <h3>Тестовый звонок</h3>
+          <p class="hint">
+            Событие придёт только в активные чаты с включённым типом «Тестовые».
+          </p>
+          <form id="test-call-form" class="test-call-form">
+            <input type="tel" id="test-phone" placeholder="Телефон, напр. +380671234567" required>
+            <input type="text" id="test-name" placeholder="Имя клиента (необязательно)">
+            <button type="submit" id="test-call-submit" class="btn btn-primary">Отправить тестовое событие</button>
+          </form>
+          <p id="test-call-result" class="test-result"></p>
+        </div>
+      </section>
+
+      <section id="tab-results" class="tab-panel hidden">
+        <div class="panel-header">
+          <h2>Результаты звонков</h2>
+          <span id="results-updated" class="updated-at"></span>
+          <button id="refresh-results" class="btn">🔄 Обновить</button>
+        </div>
+        <p class="hint">Список обновляется автоматически каждые 30 секунд.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Когда</th>
+                <th>Телефон</th>
+                <th>Оператор</th>
+                <th>Результат</th>
+                <th>В 1С</th>
+              </tr>
+            </thead>
+            <tbody id="results-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tab-reminders" class="tab-panel hidden">
+        <div class="panel-header">
+          <h2>Напоминания</h2>
+          <button id="refresh-reminders" class="btn">🔄 Обновить</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Когда сработает</th>
+                <th>Текст</th>
+                <th>Кто создал</th>
+                <th>Статус</th>
+              </tr>
+            </thead>
+            <tbody id="reminders-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tab-consultations" class="tab-panel hidden">
+        <div class="panel-header">
+          <h2>Консультации</h2>
+          <button id="refresh-consultations" class="btn">🔄 Обновить</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Когда</th>
+                <th>Телефон</th>
+                <th>Клиент</th>
+                <th>Текст</th>
+                <th>Кто создал</th>
+              </tr>
+            </thead>
+            <tbody id="consultations-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tab-tasks" class="tab-panel hidden">
+        <div class="panel-header">
+          <h2>Задачи</h2>
+          <button id="link-telegram" class="btn">🔗 Привязать Telegram</button>
+          <button id="refresh-tasks" class="btn">🔄 Обновить</button>
+        </div>
+        <p id="tasks-link-info" class="hint hidden"></p>
+        <p class="hint">
+          Напоминание — просто «выполнено». Задание — при выполнении нужен результат.
+          Задачи приходят исполнителю в Telegram (привяжите его кнопкой выше) и видны здесь.
+        </p>
+
+        <div id="task-create-card" class="card admin-only">
+          <h3>Новая задача</h3>
+          <form id="add-task-form" class="task-form">
+            <select id="task-kind">
+              <option value="reminder">Напоминание</option>
+              <option value="task">Задание</option>
+            </select>
+            <input type="text" id="task-title" placeholder="Что нужно сделать">
+            <select id="task-assignee"></select>
+            <input type="datetime-local" id="task-due" title="Когда напомнить / срок">
+            <button type="submit" class="btn btn-primary">Создать</button>
+          </form>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Тип</th>
+                <th>Текст</th>
+                <th>Исполнитель</th>
+                <th>Срок</th>
+                <th>Статус</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tasks-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tab-users" class="tab-panel hidden">
+        <div class="panel-header">
+          <h2>Пользователи</h2>
+          <button id="refresh-users" class="btn">🔄 Обновить</button>
+        </div>
+        <p class="hint">
+          Вход в портал через Google разрешён только тем, чей e-mail добавлен здесь.
+          «Самостоятельные» пользователи (без e-mail) — это исполнители для назначения
+          задач и напоминаний (этап C).
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Имя</th>
+                <th>E-mail</th>
+                <th>Роль</th>
+                <th>Google</th>
+                <th>Активен</th>
+              <th>Telegram</th></tr>
+            </thead>
+            <tbody id="users-tbody"></tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <h3>Добавить пользователя</h3>
+          <form id="add-user-form" class="test-call-form">
+            <input type="text" id="user-name" placeholder="Имя">
+            <input type="email" id="user-email" placeholder="E-mail (для входа через Google)">
+            <select id="user-role">
+              <option value="member">Сотрудник</option>
+              <option value="admin">Администратор</option>
+            </select>
+            <button type="submit" class="btn btn-primary">Добавить</button>
+          </form>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="https://accounts.google.com/gsi/client" async></script>
+  <script src="app.js?v=4"></script>
+</body>
+</html>

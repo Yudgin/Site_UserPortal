@@ -106,6 +106,11 @@ const inferStatus = (raw) => {
   return 'new'
 }
 
+// Внешний вход для других модулей (операторский бот после создания ремонта в 1С): подтянуть
+// конкретные ремонты в наши заявки, не дожидаясь ежедневного прогона.
+let syncGuidsImpl = null
+export const syncRepairGuids = async (guids) => (syncGuidsImpl ? syncGuidsImpl(guids) : null)
+
 export function registerOnecSync(app, deps) {
   const { adminDb } = deps
   const ADMIN_TOKEN = process.env.PAYMENTS_ADMIN_TOKEN || ''
@@ -307,4 +312,15 @@ export function registerOnecSync(app, deps) {
       res.status(502).json({ success: false, error: String(e?.message || e).slice(0, 200) })
     }
   })
+
+  syncGuidsImpl = async (guids) => {
+    if (!adminDb) return null
+    const list = [...new Set((guids || []).map((g) => String(g).trim().toLowerCase()))].filter((g) => GUID_RE.test(g))
+    const resolveCenter = makeCenterResolver()
+    const out = { created: 0, updated: 0, unchanged: 0, errors: [] }
+    for (const id of list) {
+      try { out[await syncOne({ id }, resolveCenter)]++ } catch (e) { out.errors.push({ guid: id, error: String(e?.message || e).slice(0, 200) }) }
+    }
+    return out
+  }
 }
