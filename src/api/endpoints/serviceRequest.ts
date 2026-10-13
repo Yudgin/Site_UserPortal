@@ -15,6 +15,7 @@ export interface CreateLocalRequestInput {
   clientWarehouseName?: string
   boat?: string
   complaint?: string
+  serviceCenterExternalId?: string | null // центр 1С, обраний клієнтом у формі → serviceCenters.externalId
 }
 
 export const serviceRequestApi = {

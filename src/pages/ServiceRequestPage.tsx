@@ -15,6 +15,7 @@ import {
   Biotech as DiagIcon, NotificationsActive as NotifyIcon, LocalShipping as ShipIcon, Send as SendIcon,
   Telegram as TelegramIcon,
   Group as SpecialistsIcon,
+  Flag as StageIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { useAccess } from '@/store/accessStore'
@@ -26,7 +27,10 @@ import { notificationService } from '@/api/notificationService'
 import { notificationApi } from '@/api/endpoints/notification'
 import { pricingService } from '@/api/pricingService'
 import { formatMoney } from '@/utils/pricing'
-import { SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequestStatus } from '@/types/serviceRequest'
+import {
+  SERVICE_REQUEST_STATUS_LABELS, REPAIR_STAGE_LABELS, REPAIR_STAGE_ORDER, nextRepairStage,
+  type ServiceRequest, type ServiceRequestStatus, type RepairStage,
+} from '@/types/serviceRequest'
 import type { EstimateOffer, Estimate } from '@/types/pricing'
 import type { PreliminaryEstimate, ChatMessage } from '@/types/chat'
 import type { AiHistoryEntry } from '@/api/endpoints/ai'
@@ -39,8 +43,12 @@ import NpAddressPicker from '@/components/NpAddressPicker'
 import type { NpAddress } from '@/types/npTemplate'
 import CreateTtnDialog from '@/components/CreateTtnDialog'
 import ViewAsButton from '@/components/ViewAsButton'
+import { canonicalPhone } from '@/utils/phone'
+import { secureId } from '@/utils/id'
 
 const STATUSES = Object.keys(SERVICE_REQUEST_STATUS_LABELS) as ServiceRequestStatus[]
+// Ліміт довільного повідомлення клієнту — як NOTIFY_CUSTOM_MAX_LEN на сервері (платний SMS-шлюз).
+const CUSTOM_MAX_LEN = 300
 
 export default function ServiceRequestPage() {
   const navigate = useNavigate()
@@ -72,6 +80,9 @@ export default function ServiceRequestPage() {
   const [viewAs, setViewAs] = useState<ViewRole>('owner') // превью «Показати як…»
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]) // переписка обращения (для ИИ-диагностики)
   const [diagAiHistory, setDiagAiHistory] = useState<AiHistoryEntry[]>([]) // локальная история ИИ-правок диагностики
+  const [stagePick, setStagePick] = useState<RepairStage | ''>('') // «Інший етап» (waiting_parts просить нотатку)
+  const [stageNote, setStageNote] = useState('') // нотатка до етапу «Чекаємо запчастини»
+  const [customKey, setCustomKey] = useState(() => secureId(16)) // ключ ідемпотентності довільного повідомлення
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
   // Telegram deep-link: получить (стабильную) ссылку и скопировать в буфер — отправить клиенту.
@@ -152,6 +163,26 @@ export default function ServiceRequestPage() {
     return false
   }
 
+  // Етап ремонту (фізичний шлях кораблика) — окремо від комерційного статусу. Запис через
+  // arrayUnion в історію; оплата етап НЕ блокує (після оплати кораблик ще пакують і відправляють).
+  const applyStage = async (stage: RepairStage, note?: string, opts: { silent?: boolean } = {}) => {
+    if (!req) return false
+    // Той самий етап без нової нотатки — нічого не пишемо (інакше скидається stageSince і дублюється історія).
+    if (stage === req.stage && !note?.trim()) { setStagePick(''); return true }
+    setSaving(true)
+    const item = { stage, at: new Date().toISOString(), by: user?.email || null, ...(note?.trim() ? { note: note.trim() } : {}) }
+    const ok = await serviceRequestService.setStage(id, item)
+    setSaving(false)
+    if (!ok) { notify('Не вдалося зберегти етап', 'error'); return false }
+    setReq((r) => (r ? {
+      ...r, stage, stageSince: item.at, stageHistory: [...(r.stageHistory || []), item],
+      waitingParts: stage === 'waiting_parts' ? { note: item.note || '', since: item.at } : null,
+    } : r))
+    setStagePick(''); setStageNote('')
+    if (!opts.silent) notify(`Етап: ${REPAIR_STAGE_LABELS[stage]}`)
+    return true
+  }
+
   // Сохранить диагностику. Первое сохранение с текстом продвигает статус new → diagnostics.
   const saveDiag = () => {
     const text = diag.trim()
@@ -159,7 +190,12 @@ export default function ServiceRequestPage() {
       diagnostics: text ? { text, at: new Date().toISOString(), by: user?.email || null } : null,
     }
     if (text && req?.status === 'new' && !req?.paymentId) fields.status = 'diagnostics'
-    patch(fields).then((ok) => { if (ok) notify('Діагностику збережено') })
+    patch(fields).then(async (ok) => {
+      if (!ok) return
+      // Етап: є текст діагностики, а кораблик ще «Отримано»/без етапу → «Діагностовано» (одним снекбаром).
+      const stepped = text && (!req?.stage || req.stage === 'received') ? await applyStage('diagnosed', undefined, { silent: true }) : false
+      notify(stepped ? 'Діагностику збережено · етап: Діагностовано' : 'Діагностику збережено')
+    })
   }
 
   const reloadNotifs = () => notificationService.listByRequest(id).then(setNotifs)
@@ -169,22 +205,29 @@ export default function ServiceRequestPage() {
     const text = notifText.trim()
     if (!text) return
     setSending(true)
-    const rec = await notificationApi.notify({ serviceRequestId: id, event: 'custom', text })
+    // clientKey — ідемпотентність на сервері: повторний тап/ретрай з тим самим ключем не шле другий SMS.
+    const rec = await notificationApi.notify({ serviceRequestId: id, event: 'custom', text, clientKey: customKey })
     setSending(false)
-    if (rec?.status === 'sent') { notify(`Надіслано (${rec.via === 'sms' ? 'SMS' : rec.channel})`); setNotifText('') }
+    if (rec?.status === 'sent') { notify(`Надіслано (${rec.via === 'sms' ? 'SMS' : rec.channel})`); setNotifText(''); setCustomKey(secureId(16)) }
     else notify(rec?.error || 'Не вдалося надіслати', 'error')
     reloadNotifs()
   }
 
-  // Оповещение об отправке кораблика (ТТН). Сохраняем номер на заявке и шлём клиенту.
+  // Оповещение об отправке кораблика клиенту (ТТН). Номер — у returnTtn («→ клієнту»; waybillNumber —
+  // ТТН «→ нам»), лише цифри; після успішної відправки етап → «Відправлено».
   const sendTtn = async () => {
-    const ttn = ttnInput.trim()
+    const ttn = ttnInput.replace(/\D/g, '')
+    if (!ttn && !req?.returnTtn) { notify('Вкажіть ТТН відправлення клієнту', 'error'); return }
     setSending(true)
-    if (ttn) await patch({ waybillNumber: ttn })
+    if (ttn) await patch({ returnTtn: ttn })
     const rec = await notificationApi.notify({ serviceRequestId: id, event: 'ttn', ttn: ttn || undefined })
     setSending(false)
-    if (rec?.status === 'sent') { notify(`Повідомлення про відправку надіслано (${rec.via === 'sms' ? 'SMS' : rec.channel})`); setTtnInput('') }
-    else notify(rec?.error || 'Не вдалося надіслати', 'error')
+    if (rec?.status === 'sent') {
+      setTtnInput('')
+      const shippedTtn = ttn || req?.returnTtn || ''
+      const stepped = req?.stage !== 'shipped' ? await applyStage('shipped', shippedTtn ? `ТТН ${shippedTtn}` : undefined, { silent: true }) : false
+      notify(`Повідомлення про відправку надіслано (${rec.via === 'sms' ? 'SMS' : rec.channel})${stepped ? ' · етап: Відправлено' : ''}`)
+    } else notify(rec?.error || 'Не вдалося надіслати', 'error')
     reloadNotifs()
   }
 
@@ -253,13 +296,74 @@ export default function ServiceRequestPage() {
           <TextField label="Кораблик" value={boat} onChange={(e) => setBoat(e.target.value)} size="small" sx={{ minWidth: 200 }} />
           <TextField label="Скарга / опис" value={complaint} onChange={(e) => setComplaint(e.target.value)} size="small" fullWidth multiline />
           <Button variant="outlined" startIcon={<SaveIcon />} disabled={saving}
-            onClick={() => patch({ complaint, boat, clientName: clientName.trim(), clientPhone: clientPhone.trim() }).then((ok) => { if (ok) notify('Збережено') })}>Зберегти</Button>
+            onClick={() => patch({ complaint, boat, clientName: clientName.trim(), clientPhone: canonicalPhone(clientPhone) }).then((ok) => { if (ok) { setClientPhone(canonicalPhone(clientPhone)); notify('Збережено') } })}>Зберегти</Button>
         </Stack>
         {(req.onec?.number || req.externalRequestId) && (
           <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
             {req.onec?.number ? `Ремонт 1С №${req.onec.number.replace(/^0+/, '')} · ` : ''}Заявка 1С: {req.externalRequestId || req.onec?.guid}
           </Typography>
         )}
+      </Paper>
+
+      {/* Етап ремонту — фізичний шлях кораблика (окремо від комерційного статусу, який рухає система) */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1, flexWrap: 'wrap' }} useFlexGap>
+          <StageIcon fontSize="small" color="primary" />
+          <Typography variant="subtitle1">Етап ремонту</Typography>
+          {req.stage
+            ? <Chip size="small" color="primary" label={REPAIR_STAGE_LABELS[req.stage]} />
+            : <Chip size="small" variant="outlined" label="не вказано" />}
+          {req.stageSince && <Typography variant="caption" color="text.secondary">з {new Date(req.stageSince).toLocaleString('uk-UA')}</Typography>}
+        </Stack>
+        <Stack direction="row" spacing={0.5} sx={{ mb: 1.5, flexWrap: 'wrap' }} useFlexGap>
+          {REPAIR_STAGE_ORDER.map((s) => {
+            const cur = req.stage ? REPAIR_STAGE_ORDER.indexOf(req.stage) : -1
+            const idx = REPAIR_STAGE_ORDER.indexOf(s)
+            return (
+              <Chip key={s} size="small" label={REPAIR_STAGE_LABELS[s]}
+                variant={s === req.stage ? 'filled' : 'outlined'}
+                color={s === req.stage ? 'primary' : idx < cur ? 'success' : 'default'} />
+            )
+          })}
+        </Stack>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
+          {nextRepairStage(req.stage) && (
+            <Button variant="contained" disabled={saving} onClick={() => applyStage(nextRepairStage(req.stage)!)}>
+              Наступний етап: {REPAIR_STAGE_LABELS[nextRepairStage(req.stage)!]}
+            </Button>
+          )}
+          <TextField select size="small" label="Інший етап" value={stagePick} sx={{ minWidth: 200 }} disabled={saving}
+            onChange={(e) => {
+              const s = e.target.value as RepairStage
+              if (s === 'waiting_parts') setStagePick(s)
+              else { setStagePick(''); applyStage(s) }
+            }}>
+            {REPAIR_STAGE_ORDER.map((s) => (
+              <MenuItem key={s} value={s} disabled={s === req.stage && s !== 'waiting_parts'}>{REPAIR_STAGE_LABELS[s]}</MenuItem>
+            ))}
+          </TextField>
+          {stagePick === 'waiting_parts' && (
+            <>
+              <TextField size="small" label="Що чекаємо / орієнтовно до" value={stageNote} onChange={(e) => setStageNote(e.target.value)} sx={{ minWidth: 240 }} />
+              <Button variant="outlined" disabled={saving} onClick={() => applyStage('waiting_parts', stageNote)}>Зберегти етап</Button>
+            </>
+          )}
+        </Stack>
+        {req.stage === 'waiting_parts' && req.waitingParts?.note && (
+          <Typography variant="body2" color="warning.main" sx={{ mt: 1 }}>Чекаємо: {req.waitingParts.note}</Typography>
+        )}
+        {(req.stageHistory?.length || 0) > 0 && (
+          <Stack spacing={0.25} sx={{ mt: 1.5 }}>
+            {[...(req.stageHistory || [])].slice(-5).reverse().map((h, i) => (
+              <Typography key={`${h.at}-${i}`} variant="caption" color="text.secondary">
+                {new Date(h.at).toLocaleString('uk-UA')} · {REPAIR_STAGE_LABELS[h.stage] || h.stage}{h.note ? ` — ${h.note}` : ''}{h.by ? ` · ${h.by}` : ''}
+              </Typography>
+            ))}
+          </Stack>
+        )}
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+          Етап — фізичний стан кораблика в майстерні; статус вище рухає система (пропозиція → погоджено → факт → оплата). У 1С відмітки етапу не потрапляють.
+        </Typography>
       </Paper>
 
       {/* Предварительная оценка ИИ — та, что клиент видел в переписке (ориентировочная, до диагностики) */}
@@ -422,7 +526,10 @@ export default function ServiceRequestPage() {
 
         {/* Произвольное сообщение клиенту */}
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} alignItems={{ sm: 'flex-start' }}>
-          <TextField value={notifText} onChange={(e) => setNotifText(e.target.value)} size="small" fullWidth multiline
+          <TextField value={notifText} size="small" fullWidth multiline
+            onChange={(e) => { setNotifText(e.target.value); setCustomKey(secureId(16)) /* новий текст — новий ключ ідемпотентності */ }}
+            inputProps={{ maxLength: CUSTOM_MAX_LEN }}
+            helperText={`${notifText.length}/${CUSTOM_MAX_LEN} · SMS платний, 1 сегмент ≈ 70 символів`}
             placeholder="Повідомлення клієнту (напр. потрібна доплата, уточнення по ремонту)" />
           <Button variant="contained" startIcon={<SendIcon />} disabled={sending || !notifText.trim()} onClick={sendCustom}>Надіслати</Button>
         </Stack>
@@ -447,8 +554,9 @@ export default function ServiceRequestPage() {
         )}
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
           <TextField value={ttnInput} onChange={(e) => setTtnInput(e.target.value)} size="small"
-            label="ТТН (номер накладної)" placeholder={req.waybillNumber || 'напр. 20450…'} sx={{ minWidth: 220 }} />
-          <Button variant="outlined" startIcon={<ShipIcon />} disabled={sending} onClick={sendTtn}>Повідомити про відправку</Button>
+            label="ТТН відправлення клієнту" placeholder={req.returnTtn || 'напр. 20450…'} sx={{ minWidth: 220 }}
+            helperText={req.waybillNumber ? `ТТН до нас: ${req.waybillNumber}` : undefined} />
+          <Button variant="outlined" startIcon={<ShipIcon />} disabled={sending || (!ttnInput.replace(/\D/g, '') && !req.returnTtn)} onClick={sendTtn}>Повідомити про відправку</Button>
         </Stack>
 
         {/* История оповещений */}
@@ -478,7 +586,21 @@ export default function ServiceRequestPage() {
         clientCityRef={req.clientCityRef} clientCityName={req.clientCityName}
         clientWarehouseRef={req.clientWarehouseRef} clientWarehouseName={req.clientWarehouseName}
         presetTemplateId={ttnTemplateId}
-        onCreated={(ttn) => { setTtnInput(ttn); setReq((r) => (r ? { ...r, waybillNumber: ttn } : r)); notify(`ТТН створено: ${ttn}`) }} />
+        onCreated={(ttn, scenario) => {
+          // incoming — ТТН «до нас» (waybillNumber); інші сценарії — відправка клієнту (returnTtn); сервер
+          // при відправці клієнту також ставить етап «Відправлено».
+          const toClient = scenario !== 'incoming'
+          if (toClient) setTtnInput(ttn)
+          const at = new Date().toISOString()
+          setReq((r) => (r ? {
+            ...r, ...(toClient ? { returnTtn: ttn } : { waybillNumber: ttn }), npScenario: scenario,
+            ...(toClient && r.stage !== 'shipped' ? {
+              stage: 'shipped' as RepairStage, stageSince: at, waitingParts: null,
+              stageHistory: [...(r.stageHistory || []), { stage: 'shipped' as RepairStage, at, by: 'np-ttn', note: `ТТН ${ttn}` }],
+            } : {}),
+          } : r))
+          notify(`ТТН створено: ${ttn}`)
+        }} />
 
       <Snackbar open={snack.open} autoHideDuration={5000} onClose={() => setSnack({ ...snack, open: false })} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
         <Alert severity={snack.sev} onClose={() => setSnack({ ...snack, open: false })}>{snack.msg}</Alert>

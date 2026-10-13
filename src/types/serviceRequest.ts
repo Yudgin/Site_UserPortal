@@ -22,6 +22,46 @@ export const SERVICE_REQUEST_STATUS_LABELS: Record<ServiceRequestStatus, string>
   cancelled: 'Скасовано',
 }
 
+// Фізичний етап ремонту (рішення власника 2026-10-08): окремо від комерційного статусу, який
+// рухає система (offered/approved/in_work/done). Етап ставить людина (хаб, мобільний додаток)
+// або синхронізація 1С за ТТН (fill-only). Порядок — фізичний шлях кораблика через майстерню.
+export type RepairStage = 'received' | 'diagnosed' | 'waiting_parts' | 'repaired' | 'packed' | 'shipped'
+
+export const REPAIR_STAGE_ORDER: RepairStage[] = ['received', 'diagnosed', 'waiting_parts', 'repaired', 'packed', 'shipped']
+
+export const REPAIR_STAGE_LABELS: Record<RepairStage, string> = {
+  received: 'Отримано',
+  diagnosed: 'Діагностовано',
+  waiting_parts: 'Чекаємо запчастини',
+  repaired: 'Відремонтовано',
+  packed: 'Запаковано',
+  shipped: 'Відправлено',
+}
+
+// Наступний «звичайний» етап для кнопки «Наступний етап». waiting_parts — бічна гілка: з неї
+// далі — repaired; після shipped наступного немає.
+export const nextRepairStage = (stage?: RepairStage | null): RepairStage | null => {
+  switch (stage) {
+    case undefined:
+    case null: return 'received'
+    case 'received': return 'diagnosed'
+    case 'diagnosed': return 'repaired'
+    case 'waiting_parts': return 'repaired'
+    case 'repaired': return 'packed'
+    case 'packed': return 'shipped'
+    default: return null
+  }
+}
+
+// Запис історії етапів. at — ISO з клієнта (усередині arrayUnion серверний час неможливий);
+// by — email/uid співробітника або технічний маркер ('1c-sync', 'np-ttn', 'backfill').
+export interface StageHistoryItem {
+  stage: RepairStage
+  at: string
+  by: string | null
+  note?: string
+}
+
 // Специалист, назначенный на заявку (портальный пользователь центра). Снимок имени — чтобы
 // показывать без загрузки users. При создании финальной калькуляции список подставляется в неё.
 export interface RequestSpecialist {
@@ -36,6 +76,7 @@ export interface ServiceRequest {
   createdBy: string | null
   serviceCenterId?: string | null // сервисный центр (наш реестр) — для гейтинга/дефолтов ФОП
   specialists?: RequestSpecialist[] // назначенные специалисты (несколько на заявку)
+  specialistUids?: string[] // денормалізація specialists[].uid — вибірка «Мої заявки» (array-contains)
   sessionId: string | null // обращение (ChatSession), из которого создана заявка
   externalRequestId: string | null // ссылка на заявку 1С (выгрузка/связь позже)
   clientName?: string
@@ -53,6 +94,12 @@ export interface ServiceRequest {
   diagnostics?: { text: string; at: string; by: string | null } | null
   waybillNumber?: string | null // номер транспортной накладной (ТТН) — для оповещения об отправке
   returnTtn?: string | null // ТТН відправлення клієнту (з ремонту) — импорт 1С6 и исходящие ТТН
+  npScenario?: 'incoming' | 'return' | 'purchase' | 'parts' | null // сценарій останньої ТТН, створеної порталом
+  // Фізичний етап ремонту (окремо від status): поточний етап, з якого часу, історія переходів.
+  stage?: RepairStage | null
+  stageSince?: string | null
+  stageHistory?: StageHistoryItem[]
+  waitingParts?: { note?: string; since: string } | null // деталі етапу «Чекаємо запчастини»
   // Telegram deep-link: стабильный токен ссылки t.me/<бот>?start=<токен> и привязанная
   // Telegram-сессия клиента (пишет бот при клике; оповещения идут в неё приоритетно).
   tgLinkToken?: string | null

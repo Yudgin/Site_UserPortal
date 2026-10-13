@@ -7,6 +7,7 @@
 //    платёж (COD) = сумма фактической сметы, если она ещё НЕ оплачена (иначе COD снимаем).
 // Ключ НП и refs берём у ФОП (write-only секреты). Ошибки НП отдаём текстом — доточить маппинг.
 import axios from 'axios'
+import { FieldValue } from 'firebase-admin/firestore'
 import { verifyFirebaseAdmin } from './adminAuth.js'
 import { getFop } from './fops.js'
 
@@ -215,13 +216,27 @@ export function registerNpTtn(app, deps) {
       const doc = npResp.data[0]
       const ttn = doc.IntDocNumber || doc.Number || ''
 
-      // Куда писать номер: заявка — waybillNumber; замовлення кораблика — ttn.
+      // Куди писати номер: заявка — за напрямком (incoming → waybillNumber «до нас»; return/purchase/
+      // parts → returnTtn «клієнту», щоб не затирати вхідну ТТН із 1С); замовлення кораблика — ttn.
+      // Для відправки клієнту етап ремонту → «Відправлено» (якщо ще не); сума наложки і ФОП —
+      // для майбутнього закриття оплати за післяплатою.
       if (srId) {
-        await adminDb.collection('serviceRequests').doc(srId).set({
-          waybillNumber: ttn, npDocRef: doc.Ref || null, npScenario: scenario,
+        const toClient = scenario !== 'incoming'
+        const now = nowIso()
+        const patch = {
+          [toClient ? 'returnTtn' : 'waybillNumber']: ttn,
+          npDocRef: doc.Ref || null, npScenario: scenario,
           npCostOnSite: doc.CostOnSite || null, npEstimatedDelivery: doc.EstimatedDeliveryDate || null,
-          updatedAt: nowIso(),
-        }, { merge: true })
+          npCodAmount: codAmount > 0 ? codAmount : 0, npFopId: fop.id || null,
+          updatedAt: now,
+        }
+        if (toClient && sr.stage !== 'shipped') {
+          patch.stage = 'shipped'
+          patch.stageSince = now
+          patch.stageHistory = FieldValue.arrayUnion({ stage: 'shipped', at: now, by: 'np-ttn', note: `ТТН ${ttn}` })
+          patch.waitingParts = null
+        }
+        await adminDb.collection('serviceRequests').doc(srId).set(patch, { merge: true })
       } else {
         await adminDb.collection('boatOrders').doc(boId).set({
           ttn, npDocRef: doc.Ref || null, npScenario: scenario,

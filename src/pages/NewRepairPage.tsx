@@ -474,6 +474,9 @@ export default function NewRepairPage() {
         clientWarehouseRef: selectedWarehouse?.Ref,
         clientWarehouseName: selectedWarehouse?.Description,
         complaint,
+        // Центр 1С, обраний клієнтом — сервер резолвить у наш реєстр serviceCenters (інакше заявка
+        // «без центру» і майстри/директори її не бачать).
+        serviceCenterExternalId: selectedServiceCenter || null,
       }).catch(() => {})
       setSuccess({ id: requestId })
     } else {

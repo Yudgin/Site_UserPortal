@@ -15,7 +15,7 @@ import { serviceCenterService } from '@/api/serviceCenterService'
 import { syncRepairsFrom1C } from '@/api/onecSyncApi'
 import { useTtnStatuses, ttnChipColor } from '@/hooks/useTtnStatuses'
 import {
-  SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequestStatus,
+  SERVICE_REQUEST_STATUS_LABELS, REPAIR_STAGE_LABELS, type ServiceRequest, type ServiceRequestStatus,
 } from '@/types/serviceRequest'
 import type { ServiceCenter } from '@/types/access'
 
@@ -104,6 +104,8 @@ export default function ServiceRequestsListPage() {
         || (r.externalRequestId || '').toLowerCase().includes(query)
         || (r.onec?.number || '').replace(/^0+/, '').includes(query.replace(/^0+/, '') || ' ')
         || r.id.toLowerCase().includes(query)
+        || (r.waybillNumber || '').includes(query)
+        || (r.returnTtn || '').includes(query)
         || (r.complaint || '').toLowerCase().includes(query))
       .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')) // нові зверху
   }, [visibleRows, statusFilter, sourceFilter, q, centerFilter])
@@ -156,7 +158,7 @@ export default function ServiceRequestsListPage() {
           </TextField>
         )}
         <Box sx={{ flexGrow: 1 }} />
-        <TextField size="small" placeholder="Пошук: клієнт / телефон / № ремонту / скарга" value={q}
+        <TextField size="small" placeholder="Пошук: клієнт / телефон / № ремонту / ТТН / скарга" value={q}
           onChange={(e) => setQ(e.target.value)} sx={{ minWidth: 280 }} />
       </Stack>
 
@@ -191,6 +193,7 @@ export default function ServiceRequestsListPage() {
                     <TableCell sx={{ maxWidth: 280, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.complaint || '—'}</TableCell>
                     <TableCell>
                       <Chip size="small" color={statusColor(r.status)} label={SERVICE_REQUEST_STATUS_LABELS[r.status]} />
+                      {r.stage && <Chip size="small" variant="outlined" color="primary" label={REPAIR_STAGE_LABELS[r.stage]} sx={{ ml: 0.5 }} />}
                       {is1c6(r) && <Chip size="small" variant="outlined" label="1С6" sx={{ ml: 0.5 }} />}
                       {centerName(r.serviceCenterId) && (
                         <Chip size="small" variant="outlined" label={centerName(r.serviceCenterId)} sx={{ ml: 0.5, maxWidth: 140 }} />

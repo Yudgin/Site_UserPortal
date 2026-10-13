@@ -3,6 +3,7 @@
 // КОНТРОЛИРУЕТ сервер — клиент НЕ может задать статус/связи с калькуляциями/оплатой.
 import crypto from 'crypto'
 import { rateLimit } from './rateLimit.js'
+import { normPhone } from './phone.js'
 
 const nowIso = () => new Date().toISOString()
 const clip = (v, n) => (v ? String(v).slice(0, n) : undefined)
@@ -24,6 +25,19 @@ export function registerServiceRequests(app, deps) {
       const id = sessionId ? `sr-${sessionId}` : externalRequestId ? `sr-ext-${externalRequestId}` : `sr-${crypto.randomUUID().slice(0, 16)}`
       const ref = adminDb.collection('serviceRequests').doc(id)
 
+      // Центр 1С, обраний клієнтом у формі (repair_ServoceList ID) → наш реєстр serviceCenters за
+      // externalId (той самий код, що пише синк). Не знайдено — центр не ставимо і НЕ створюємо.
+      let centerId = ''
+      const centerExt = clip(b.serviceCenterExternalId, 32)
+      if (centerExt) {
+        try {
+          const cs = await adminDb.collection('serviceCenters').where('externalId', '==', centerExt).limit(1).get()
+          if (!cs.empty) centerId = cs.docs[0].id
+        } catch (e) { console.warn('service-requests: center lookup failed:', e.message) }
+      }
+      // Телефон — канонічний +380…; нерозпізнаний лишаємо як ввів клієнт (обрізаний).
+      const phone = normPhone(b.clientPhone) || clip(b.clientPhone, 32)
+
       const finalId = await adminDb.runTransaction(async (tx) => {
         const s = await tx.get(ref)
         const cur = s.exists ? s.data() : null
@@ -39,7 +53,8 @@ export function registerServiceRequests(app, deps) {
         fill('sessionId', sessionId || undefined)
         fill('externalRequestId', externalRequestId || undefined)
         fill('clientName', clip(b.clientName, 120))
-        fill('clientPhone', clip(b.clientPhone, 32))
+        fill('clientPhone', phone)
+        fill('serviceCenterId', centerId || undefined)
         fill('clientCityRef', clip(b.clientCityRef, 64))
         fill('clientCityName', clip(b.clientCityName, 120))
         fill('clientWarehouseRef', clip(b.clientWarehouseRef, 64))

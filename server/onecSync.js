@@ -15,7 +15,9 @@
 // параллельных прогонов — Firestore-замок system/onecSyncRepairs (протухает за 10 мин).
 import axios from 'axios'
 import crypto from 'crypto'
+import { FieldValue } from 'firebase-admin/firestore'
 import { verifyFirebaseAdmin } from './adminAuth.js'
+import { normPhone } from './phone.js'
 
 const AD_BASE = (process.env.ONEC_AD_BASE_URL || 'https://portal.runferry.com/login/hs/ad').replace(/\/+$/, '')
 const API_BASE = (process.env.ONEC_PORTAL_API_BASE || 'https://portal.runferry.com/api/hs/facebook').replace(/\/+$/, '')
@@ -63,19 +65,8 @@ const parse1cDate = (s) => {
   return new Date(guess - kyivOffsetMin(new Date(guess)) * 60000).toISOString()
 }
 
-// Телефон 1С приходит ЧИСЛОМ (676181511 — потерян ведущий ноль) или строкой в вольном
-// формате → каноничный +380…; мусор (склейка двух номеров и т.п.) не пишем вовсе,
-// поле останется пустым и заполнится позже чистым значением.
-const normPhone = (raw) => {
-  const d = String(raw ?? '').replace(/\D/g, '')
-  if (!d || d === '0') return ''
-  if (d.length === 9) return '+380' + d
-  if (d.length === 10 && d.startsWith('0')) return '+38' + d
-  if (d.length === 11 && d.startsWith('80')) return '+3' + d
-  if (d.length === 12 && d.startsWith('380')) return '+' + d
-  const m = d.match(/380\d{9}/)
-  return m ? '+' + m[0] : ''
-}
+// Телефон 1С → канонічний +380… (спільний server/phone.js); сміття не пишемо — поле лишиться
+// порожнім і заповниться пізніше чистим значенням.
 
 // 1С иногда кладёт телефон клиента прямо в поля ПІБ (см. normalizeClientInfo в
 // src/api/endpoints/service.ts) — в имя такие части не берём, но используем как
@@ -104,6 +95,17 @@ const inferStatus = (raw) => {
     if (/не знайдено/i.test(last)) return 'cancelled'
   }
   return 'new'
+}
+
+// Фізичний етап ремонту (serviceRequests.stage) за даними 1С — лише те, що видно по ТТН:
+// є зворотна ТТН → 'shipped'; в історії посилки «отримано» → кораблик у нас → 'received';
+// інакше невідомо (null — нічого не ставимо). Статус (status) цим НЕ зачіпається.
+const inferStage = (raw) => {
+  if (normTtn(raw?.returnTtn)) return 'shipped'
+  const hist = Array.isArray(raw?.shipment?.statusHistory) ? raw.shipment.statusHistory : []
+  const all = hist.map((h) => String(h?.status || '')).join(' ')
+  if (normTtn(raw?.shipment?.ttn) && /отримано|вручен/i.test(all)) return 'received'
+  return null
 }
 
 // Внешний вход для других модулей (операторский бот после создания ремонта в 1С): подтянуть
@@ -218,6 +220,24 @@ export function registerOnecSync(app, deps) {
       if (!exists || (isEmpty(cur.clientCityName) && isEmpty(cur.clientCityRef))) {
         if (!isEmpty(ci.City)) patch.clientCityName = String(ci.City)
         if (!isEmpty(ci.tWarehouse)) patch.clientWarehouseName = String(ci.tWarehouse)
+      }
+      // Етап (рішення власника 2026-10-08, fill-only): порожній → ставимо виведений за ТТН; у 1С
+      // зʼявилась НОВА для нас зворотна ТТН → 'shipped'. Саме «нова» (номер відрізняється від уже
+      // відомого нам returnTtn і не записаний в історії етапів): returnTtn у 1С — стан, а не подія,
+      // інакше нічний прогін щодня повертав би ручний етап майстра (гарантійний повтор, повернення
+      // посилки) назад у «Відправлено».
+      const inferredStage = inferStage(raw)
+      const curStage = exists ? cur.stage : null
+      const rt = normTtn(raw?.returnTtn)
+      const shipNote = rt ? `ТТН ${rt}` : ''
+      const rtKnown = exists && (normTtn(cur.returnTtn) === rt
+        || (Array.isArray(cur.stageHistory) && cur.stageHistory.some((h) => h && h.stage === 'shipped' && h.note === shipNote)))
+      if (inferredStage && (isEmpty(curStage) || (inferredStage === 'shipped' && curStage !== 'shipped' && !rtKnown))) {
+        const item = { stage: inferredStage, at: now, by: '1c-sync', ...(inferredStage === 'shipped' && shipNote ? { note: shipNote } : {}) }
+        patch.stage = inferredStage
+        patch.stageSince = now
+        patch.stageHistory = exists ? FieldValue.arrayUnion(item) : [item]
+        if (inferredStage === 'shipped') patch.waitingParts = null
       }
 
       const rawJson = JSON.stringify(raw)

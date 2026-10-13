@@ -1,8 +1,8 @@
 // Хранилище заявок на обслуживание (Firestore, коллекция serviceRequests). Доступ — админ
 // (см. firestore.rules). Заявка — наша локальная сущность-хаб (обращение → калькуляции → оплата).
 import { db, auth } from './firebase'
-import { doc, getDoc, runTransaction, collection, query, where, getDocs, limit, orderBy } from 'firebase/firestore'
-import type { ServiceRequest } from '@/types/serviceRequest'
+import { doc, getDoc, setDoc, runTransaction, collection, query, where, getDocs, limit, orderBy, arrayUnion } from 'firebase/firestore'
+import type { ServiceRequest, StageHistoryItem } from '@/types/serviceRequest'
 import { secureId } from '@/utils/id'
 
 const COLLECTION = 'serviceRequests'
@@ -22,6 +22,8 @@ export const serviceRequestService = {
       await runTransaction(database, async (tx) => {
         const snap = await tx.get(ref)
         const payload: Record<string, unknown> = { ...req, id, updatedAt: now }
+        // Денормалізація для вибірки «Мої заявки»: specialistUids завжди = specialists[].uid.
+        if (Array.isArray(req.specialists)) payload.specialistUids = req.specialists.map((s) => s.uid)
         if (snap.exists()) {
           // существующая заявка — не переписываем дату/автора создания
           delete payload.createdAt
@@ -36,6 +38,26 @@ export const serviceRequestService = {
     } catch (error) {
       console.error('Error saving service request:', error)
       return null
+    }
+  },
+
+  // Етап ремонту: merge-патч + запис в історію через arrayUnion — той самий шлях, що й у мобільного
+  // додатка (без транзакції, щоб працювало з офлайн-черги SDK). waitingParts живе лише на етапі
+  // «Чекаємо запчастини», при будь-якому іншому переході очищується.
+  setStage: async (id: string, item: StageHistoryItem): Promise<boolean> => {
+    if (!db || !auth?.currentUser) return false
+    try {
+      await setDoc(doc(db, COLLECTION, id), {
+        stage: item.stage,
+        stageSince: item.at,
+        stageHistory: arrayUnion(item),
+        waitingParts: item.stage === 'waiting_parts' ? { note: item.note || '', since: item.at } : null,
+        updatedAt: item.at,
+      }, { merge: true })
+      return true
+    } catch (error) {
+      console.error('Error setting repair stage:', error)
+      return false
     }
   },
 

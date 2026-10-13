@@ -129,6 +129,19 @@ const smsVerifyLimiter = rateLimit({ name: 'sms-verify', windowMs: 10 * 60 * 100
 const aiPublicLimiter = rateLimit({ name: 'ai', windowMs: 60 * 1000, max: 20 })
 // Прокси к внешним сервисам (Nova Poshta, 1С-settings): 40/мин на IP (защита квоты/абьюза).
 const proxyLimiter = rateLimit({ name: 'proxy', windowMs: 60 * 1000, max: 40 })
+// improve-text лишається ПУБЛІЧНИМ (анонімні форми /questionnaire, /repair/new), але при валідному
+// токені співробітника ліміт ключиться по uid — інакше майстри за одним Wi-Fi мастерської ділять
+// 20/хв по IP з клієнтськими чатами. Фронт і мобільний додаток уже шлють Bearer.
+const aiStaffLimiter = rateLimit({ name: 'ai-staff', windowMs: 60 * 1000, max: 30, keyFn: (req) => req.staff.uid })
+const aiPublicOrStaffLimiter = async (req, res, next) => {
+  try {
+    if (/^Bearer /.test(req.get('authorization') || '')) {
+      const staff = await verifyFirebaseStaff(req)
+      if (staff) { req.staff = staff; return aiStaffLimiter(req, res, next) }
+    }
+  } catch { /* невалідний токен → як анонім */ }
+  return aiPublicLimiter(req, res, next)
+}
 
 // Отправить произвольный SMS через TurboSMS. Возвращает { ok, messageId?, error? }.
 // В DEV (без токена) — логируем и считаем успехом, чтобы поток не падал.
@@ -593,7 +606,7 @@ const AI_CONTEXTS = {
 }
 
 // Публичный: используется анонимными клиентами на /questionnaire и /repair/new (не гейтить!).
-app.post('/api/ai/improve-text', aiPublicLimiter, async (req, res) => {
+app.post('/api/ai/improve-text', aiPublicOrStaffLimiter, async (req, res) => {
   try {
     const { currentText = '', userPrompt = '', history = [], context = 'generic', lang = 'uk' } = req.body
     // Доп. справочный контекст (напр. скарга клієнта + переписка) — ИИ опирается, но не копирует дословно.
