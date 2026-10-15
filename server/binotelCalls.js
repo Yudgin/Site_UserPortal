@@ -501,7 +501,9 @@ export function registerBinotelCalls(app, deps) {
         clientName: doc.clientName, employee: doc.employeeName || 'співробітник', employeeId: staff.uid, serviceRequestId: srId,
         direction: 'outbound', at: nowIso(), lastType: 'call.originate', updatedAt: nowIso(),
       }, { merge: true }).catch(() => {})
-      return res.json({ success: true, data: { callId, serviceRequestId: srId, provider: 'binotel', method, status: 'dialing', employeePhone: doc.employeePhone, employeeLine: doc.employeeLine, clientPhone: doc.clientPhone } })
+      // Документ дзвінка вже записаний (ref.set вище) — перший снапшот підписки доступний одразу після 200.
+      // pbxNumber — щоб застосунок одразу показав «вам зателефонує АТС з номера …».
+      return res.json({ success: true, data: { callId, serviceRequestId: srId, provider: 'binotel', method, status: 'dialing', pbxNumber: PBX_NUMBER, employeePhone: doc.employeePhone, employeeLine: doc.employeeLine, clientPhone: doc.clientPhone } })
     } catch (e) {
       if (reserved) activeByUid.delete(staff.uid)
       console.error('calls/originate:', e.message)
