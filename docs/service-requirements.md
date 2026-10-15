@@ -796,3 +796,33 @@
   `runferry-briefs/portal/operator-bot-cutover.md`; единственный шаг владельца — URL событий в 1С.
 - Старая веб-админка бота доступна под `/operator-bot/admin/` по Bearer `OPERATOR_BOT_ADMIN_TOKEN`
   (Google-вход отключён); перенос её функций в портал — отдельная задача.
+
+## 28. Дзвінки клієнту з застосунку через АТС Binotel: запис → розшифровка → резюме (2026-10-15)
+
+**Требование.** Мастер в приложении «RunFerry Сервіс» нажимает «Подзвонити»: АТС Binotel сначала набирает сотрудника,
+после ответа — клиента из заявки; разговор записывается, запись расшифровывается по говорящим и получает резюме на
+украинском, результат прикреплён к заявке. Київстар FMC — запасной канал (ключ пока даёт 403).
+
+**Реализация (сервер, `server/binotelCalls.js`).** `POST /api/calls/originate {serviceRequestId}` (owner/director/master,
+не-владелец — только заявка своего центра; номер клиента из заявки; номер сотрудника из `users/{uid}.pbxLine` →
+`calls/internal-number-to-external-number` или `pbxPhone`/`fmcPhone` → `calls/external-number-to-external-number`,
+исходящая линия `BINOTEL_PBX_NUMBER`, для ext2ext нужна линия с двумя каналами — `0443338049`). Документ звонка
+`serviceRequests/{srId}/calls/{callId}` пишет только бэкенд: `dialing → connected → finished → recorded` (mp3 в бакете
+`droidmaps-runferry.firebasestorage.app`, `call-recordings/{srId}/{callId}.mp3`) `→ transcribed` (ElevenLabs Scribe v2,
+`use_multi_channel`, стерео канал = сторона) `→ summarized` (Claude `claude-opus-5-5`, три строки «Суть / Домовилися /
+Далі»); отказы `no_answer` (с `failedParty`), `failed`, `skipped` (< 8 с), `no_recording`, `error`. Конвейер гонит таймер
+в процессе + `POST /api/calls/reconcile` от Cloud Scheduler (`calls-reconcile`, раз в 2 мин, `x-admin-token`).
+`GET /api/calls/:srId/:callId/recording` отдаёт mp3 персоналу. Запросы к Binotel — одна очередь, ≤ 1 запрос в 3 с.
+Секреты `BINOTEL_KEY/SECRET`, `ELEVENLABS_API_KEY` — в Secret Manager (`--set-secrets`).
+
+**Правила/индексы.** `firestore.rules`: подколлекция `calls` читается `isStaff()`, запись запрещена; collection-group
+`match /{path=**}/calls`. `firestore.indexes.json`: `fieldOverrides` для `calls.nextCheckAt` (COLLECTION_GROUP ASC) и
+`calls.startedAt` (COLLECTION_GROUP DESC).
+
+**Проверено 2026-10-15.** Полный цикл через задеплоенный сервер (ревизии 00061-lzk/00062-hlq): разговор 46 с → резюме
+через 29 с после отбоя; стоимость ≈ $0,015 на звонок без минут АТС (≈ $10–12/мес при июльском объёме). Контракт для
+приложения: `runferry-briefs/telephony/call-bridge-contract-2026-10-15.md`. Тестовая заявка `sr-test-pbx-call` с
+документом-образцом оставлена для отладки приложения.
+
+**Открыто.** Фраза ожидания Binotel на русском (`BINOTEL_PLAYBACK_WAITING`), тариф линии `0443338049`, вебхуки API PUSH
+вместо опроса (с сессией «1С телефония миграция»), перевод мастеров на внутренние линии (`pbxLine`).
