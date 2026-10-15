@@ -168,6 +168,16 @@ service cloud.firestore {
         allow read: if isStaff();
         allow write: if false;
       }
+      // Дзвінки по заявці через АТС (Binotel): стан, запис, розшифровка, резюме. Пише ТОЛЬКО
+      // backend (/api/calls/originate + конвейер). Персонал читает (телефон клиента уже в заявке).
+      match /calls/{callId} {
+        allow read, list: if isStaff();
+        allow write: if false;
+      }
+    }
+    // Те же документы звонков через collection group (экран «мои дзвінки»/журнал владельца).
+    match /{path=**}/calls/{callId} {
+      allow read, list: if isStaff();
     }
 
     // Редактируемые тексты сервиса (соглашение и т.п.) — публичное чтение,
