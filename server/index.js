@@ -23,6 +23,7 @@ import { registerFmcCalls } from './fmcCalls.js'
 import { registerBinotelCalls } from './binotelCalls.js'
 import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
+import { registerVoiceTranscribe } from './voiceTranscribe.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
 import { registerUserProfiles } from './userProfiles.js'
@@ -1225,6 +1226,9 @@ if (process.env.BINOTEL_KEY && process.env.BINOTEL_SECRET) {
 }
 // Синхронизация картотеки ремонтов из 1С (admin/scheduler): upsert в serviceRequests.
 registerOnecSync(app, { adminDb })
+// Голосова надиктовка з застосунку сервісу: POST /api/ai/transcribe (staff, аудіо → текст; рушій у stt.js,
+// ключ ELEVENLABS_API_KEY у Secret Manager). Далі текст іде в існуючий /api/ai/improve-text без змін.
+registerVoiceTranscribe(app, { adminDb })
 
 // Справочники НП по ключу конкретного ФОП (отправители/контакты + добавление) — owner-gated.
 registerNpAccount(app)
