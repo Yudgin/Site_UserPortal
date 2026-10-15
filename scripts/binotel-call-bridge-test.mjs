@@ -275,7 +275,13 @@ async function summarize(turns) {
   console.log(`\nElevenLabs Scribe v2 (${multichannel ? 'multichannel' : 'diarize'})…`);
   const result = await transcribe(filePath, { multichannel });
   timeline.transcribedAt = Date.now();
-  const labels = multichannel ? { channel_0: 'Співробітник', channel_1: 'Клієнт' } : { speaker_0: 'Спікер 0', speaker_1: 'Спікер 1' };
+  // Раскладка каналов (проверено 2026-10-15): запись с внутренней линии — канал 0 = сотрудник, канал 1 = клиент;
+  // запись первой ноги external-number-to-external-number — канал 0 = то, что слышит сотрудник (подсказка АТС + клиент),
+  // канал 1 = голос сотрудника. --channel-map int2ext|ext2ext переопределяет авто-выбор по --method.
+  const chMap = String(opt('channel-map', FROM_CALLID || LOCAL_FILE ? 'ext2ext' : METHOD)) === 'ext2ext'
+    ? { channel_0: 'Клієнт', channel_1: 'Співробітник' }
+    : { channel_0: 'Співробітник', channel_1: 'Клієнт' };
+  const labels = multichannel ? chMap : { speaker_0: 'Спікер 0', speaker_1: 'Спікер 1' };
   const turns = toTurns(result, labels);
   const base = filePath.replace(/\.[^.]+$/, '');
   fs.writeFileSync(base + '.scribe.json', JSON.stringify(result, null, 2));
