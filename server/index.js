@@ -29,6 +29,7 @@ import { registerClientProfiles } from './clientProfiles.js'
 import { registerUserProfiles } from './userProfiles.js'
 import { verifyFirebaseAdmin, verifyFirebaseStaff } from './adminAuth.js'
 import { rateLimit, combine } from './rateLimit.js'
+import { resolveAiMode, expandSystem, expandUserContent, MODEL_PRICES } from './aiModes.js'
 
 dotenv.config()
 
@@ -567,20 +568,22 @@ if (!ANTHROPIC_API_KEY) {
 const AI_MODEL = 'claude-opus-4-8'
 const AI_PRICE = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }
 
-// Собрать сведения об использовании токенов и стоимости из ответа Claude
-const buildUsage = (usage = {}) => {
+// Собрать сведения об использовании токенов и стоимости из ответа Claude.
+// model — фактическая модель ответа (режим expand идёт на другой модели, см. aiModes.js).
+const buildUsage = (usage = {}, model = AI_MODEL) => {
+  const price = MODEL_PRICES[model] || AI_PRICE
   const inputTokens = usage.input_tokens || 0
   const outputTokens = usage.output_tokens || 0
   const cacheRead = usage.cache_read_input_tokens || 0
   const cacheWrite = usage.cache_creation_input_tokens || 0
   const costUsd =
-    (inputTokens * AI_PRICE.input +
-      outputTokens * AI_PRICE.output +
-      cacheRead * AI_PRICE.cacheRead +
-      cacheWrite * AI_PRICE.cacheWrite) /
+    (inputTokens * price.input +
+      outputTokens * price.output +
+      cacheRead * price.cacheRead +
+      cacheWrite * price.cacheWrite) /
     1e6
   return {
-    model: AI_MODEL,
+    model,
     inputTokens,
     outputTokens,
     cacheRead,
@@ -621,10 +624,18 @@ app.post('/api/ai/improve-text', aiPublicOrStaffLimiter, async (req, res) => {
         error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано (ANTHROPIC_API_KEY відсутній)' },
       })
     }
-    if (!userPrompt || !String(userPrompt).trim()) {
+    // mode: 'expand' — «розгорнути для клієнта» (короткі нотатки → повний текст), власний промпт і модель.
+    const mode = resolveAiMode(req.body)
+    if (mode.name !== 'expand' && (!userPrompt || !String(userPrompt).trim())) {
       return res.status(400).json({
         success: false,
         error: { code: 'MISSING_PROMPT', message: 'Опишіть, що потрібно змінити' },
+      })
+    }
+    if (mode.name === 'expand' && !String(currentText).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_TEXT', message: 'Спочатку надиктуйте або напишіть нотатки діагностики' },
       })
     }
 
@@ -634,7 +645,7 @@ app.post('/api/ai/improve-text', aiPublicOrStaffLimiter, async (req, res) => {
       .map((h, i) => `${i + 1}. Запит: ${h.prompt}${h.resultPreview ? `\n   Результат: ${h.resultPreview}` : ''}`)
       .join('\n')
 
-    const system = [
+    const system = mode.name === 'expand' ? expandSystem(contextNote) : [
       'Ти — редактор ділових текстів для українського сервісного центру.',
       contextNote,
       'Пиши завжди УКРАЇНСЬКОЮ мовою, незалежно від мови запиту користувача (навіть якщо запит російською). ' +
@@ -644,20 +655,27 @@ app.post('/api/ai/improve-text', aiPublicOrStaffLimiter, async (req, res) => {
     ].join('\n')
     void lang // мова відповіді завжди українська; параметр lang — на майбутнє (мультимовність)
 
-    const userContent = [
+    const userContent = mode.name === 'expand' ? expandUserContent({ currentText, userPrompt, reference }) : [
       historyText ? `Історія попередніх правок (для наступності):\n${historyText}\n` : '',
       reference ? `Довідкові матеріали (скарга клієнта та переписка) — спирайся на них, але НЕ копіюй дослівно:\n"""\n${reference}\n"""\n` : '',
       `Поточний текст:\n"""\n${currentText}\n"""\n`,
       `Що потрібно змінити:\n${userPrompt}`,
     ].filter(Boolean).join('\n')
 
-    const message = await anthropic.messages.create({
-      model: 'claude-opus-4-8',
-      max_tokens: 4096,
-      output_config: { effort: 'low' },
+    const request = {
+      model: mode.model,
+      max_tokens: mode.maxTokens,
+      output_config: { effort: mode.effort },
       system,
       messages: [{ role: 'user', content: userContent }],
-    })
+    }
+    let message = await anthropic.messages.create(request)
+    // Класифікатори новішої моделі можуть відмовити (stop_reason refusal) — тоді та сама задача на
+    // звичній моделі редактора, щоб майстер не лишився без тексту.
+    if (message.stop_reason === 'refusal' && mode.model !== AI_MODEL) {
+      console.warn('AI improve-text: refusal on', mode.model, '→ retry on', AI_MODEL)
+      message = await anthropic.messages.create({ ...request, model: AI_MODEL, max_tokens: 4096, output_config: { effort: 'low' } })
+    }
 
     const text = (message.content || [])
       .filter((b) => b.type === 'text')
@@ -665,7 +683,7 @@ app.post('/api/ai/improve-text', aiPublicOrStaffLimiter, async (req, res) => {
       .join('')
       .trim()
 
-    res.json({ success: true, data: { text, usage: buildUsage(message.usage) } })
+    res.json({ success: true, data: { text, usage: buildUsage(message.usage, message.model || mode.model), mode: mode.name } })
   } catch (error) {
     console.error('AI improve-text error:', error?.message || error)
     res.status(500).json({
