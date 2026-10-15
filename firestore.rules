@@ -104,9 +104,11 @@ service cloud.firestore {
     // Своё — читать можно; список — владелец. RBAC-поля (role/centers/active/createdBy) пишет
     // ТОЛЬКО владелец (или backend Admin SDK, минуя правила). Пользователь может писать СВОЙ
     // документ (легаси boats/settings/updatedAt), но НЕ трогая RBAC-поля — иначе self-escalation.
+    // pbxLine (внутренняя линия Binotel для звонков из приложения) — тоже только владелец: иначе
+    // сотрудник мог бы назначить себе чужую линию. Свой мобильный (pbxPhone) сотрудник пишет сам.
     function touchesRbacKeys() {
       return request.resource.data.diff(resource.data).affectedKeys()
-        .hasAny(['role', 'centers', 'active', 'createdBy']);
+        .hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine']);
     }
     match /users/{userId} {
       allow get: if isPriceAdmin() || (request.auth != null && request.auth.uid == userId);
@@ -117,7 +119,7 @@ service cloud.firestore {
       // Создание: владелец — что угодно; сам пользователь — только БЕЗ RBAC-полей.
       allow create: if isPriceAdmin()
         || (request.auth != null && request.auth.uid == userId
-            && !request.resource.data.keys().hasAny(['role', 'centers', 'active', 'createdBy']));
+            && !request.resource.data.keys().hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine']));
       // Обновление: владелец — что угодно; сам пользователь — только не меняя RBAC-полей.
       allow update: if isPriceAdmin()
         || (request.auth != null && request.auth.uid == userId && !touchesRbacKeys());
