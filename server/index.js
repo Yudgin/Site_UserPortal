@@ -19,6 +19,7 @@ import { registerNpTtn } from './novaPoshtaTtn.js'
 import { registerTelegramLinks } from './telegramLinks.js'
 import { registerOperatorBot } from './operatorBot.js'
 import { registerCalls } from './calls.js'
+import { registerFmcCalls } from './fmcCalls.js'
 import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
 import { refreshFops } from './fops.js'
@@ -1213,6 +1214,8 @@ registerTelegramLinks(app, { adminDb })
 registerOperatorBot(app, { adminDb })
 // Журнал дзвінків: зеркальные события/результаты от операторского бота (X-Calls-Token).
 registerCalls(app, { adminDb })
+// Дзвінок через АТС Київстар (FMC originate) — ключі в env KYIVSTAR_FMC_*
+registerFmcCalls(app, { adminDb })
 // Синхронизация картотеки ремонтов из 1С (admin/scheduler): upsert в serviceRequests.
 registerOnecSync(app, { adminDb })
 
