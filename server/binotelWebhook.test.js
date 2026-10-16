@@ -510,3 +510,21 @@ test('ревʼю дельти: перехід 1c-sync у shipped — подія 
   assert.deepEqual(normalizeRouting({ lines: [] }).lines, [])
   assert.deepEqual(normalizeRouting({ lines: [679278039] }).lines, ['+380679278039'])
 })
+
+test('пріоритет: override з force → заголовок X-Runferry-Route-Priority: override; без force і без routeData — без заголовка', async () => {
+  const r1 = decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all', overrides: { '0675499555': { id: 466367, force: true } } }), lookup, nowMs: NOW })
+  assert.equal(r1.priority, 'override')
+  assert.deepEqual(r1.response.routeData, { type: 'route', id: 466367 })
+  assert.equal(decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all', overrides: { '0675499555': 466367 } }), lookup, nowMs: NOW }).priority, undefined)
+  assert.equal(decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all', overrides: { '0675499555': { id: 0, force: true } } }), lookup, nowMs: NOW }).priority, undefined)
+  const db = fakeDb({ routing: { scope: 'all', overrides: { '0675499555': { id: 466367, force: true } } } })
+  await withServer(db, async (base) => {
+    const r = await fetch(`${base}/api/binotel/call-settings`, { method: 'POST', body: FORM, headers: { 'x-binotel-token': 'test-token' } })
+    assert.equal(r.headers.get('x-runferry-route-priority'), 'override')
+    assert.deepEqual((await r.json()).routeData, { type: 'route', id: 466367 })
+    const r2 = await fetch(`${base}/api/binotel/call-settings`, { method: 'POST', body: FORM.replace('0675499555', '0631234567'), headers: { 'x-binotel-token': 'test-token' } })
+    assert.equal(r2.headers.get('x-runferry-route-priority'), null)
+    await r2.json()
+    assert.equal(db.writes.find((w) => w.coll === 'binotelEvents').data.priority, 'override')
+  })
+})

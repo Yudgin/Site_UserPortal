@@ -166,7 +166,8 @@ export function normalizeRouting(doc) {
   for (const [k, v] of Object.entries(src)) {
     const p = normPhone(k)
     if (!p) continue
-    overrides[p] = routeEntry(v, d.routeType)
+    // force: true — наш routeData важливіший за Клиенты.Сценарий 1С (заголовок X-Runferry-Route-Priority: override)
+    overrides[p] = { ...routeEntry(v, d.routeType), ...(v && typeof v === 'object' && v.force === true ? { force: true } : {}) }
   }
   const categoryRoutes = {}
   const cr = d.categoryRoutes && typeof d.categoryRoutes === 'object' ? d.categoryRoutes : {}
@@ -346,6 +347,10 @@ export function decideCallSettings({ fields, routing, lookup, siteUrl, nowMs = D
   }
   let routeId = null
   let category = null
+  // Пріоритет нашого routeData над Клиенты.Сценарий 1С: відповідь несе заголовок X-Runferry-Route-Priority, фрагмент 1С
+  // тоді не підміняє маршрут своїм. Значення: 'override' (ручний виняток з force), 'discussion' (режим обговорення,
+  // runferry-briefs/telephony/discussion-mode-2026-10-16.md, розділ 5.6 — його додасть сесія «Режим обговорення»).
+  let priority = null
   let routeType = routing.routeType
   let decision = incoming ? 'passthrough' : 'outgoing'
   if (incoming) {
@@ -354,6 +359,7 @@ export function decideCallSettings({ fields, routing, lookup, siteUrl, nowMs = D
       routeId = ov.id
       routeType = ov.type
       decision = routeId ? 'override' : 'override-none'
+      if (routeId && ov.force) priority = 'override'
     } else if (routing.mode === 'route' && routing.routeId) {
       routeId = routing.routeId
       decision = 'route'
@@ -369,7 +375,7 @@ export function decideCallSettings({ fields, routing, lookup, siteUrl, nowMs = D
   }
   if (routeId) response.routeData = { type: routeType, id: routeId }
   if (!lookup && routing.sendCustomerData) decision += '+lookup-timeout'
-  return { response, decision, routeId, category }
+  return { response, decision, routeId, category, ...(priority && response.routeData ? { priority } : {}) }
 }
 
 // ---------- маршрут ----------
@@ -496,6 +502,7 @@ export function registerBinotelWebhook(app, deps) {
           decision: result.decision,
           routingMode: routing?.mode || null,
           routeId: result.routeId || null,
+          priority: result.priority || null,
           category: result.category || null,
           serviceRequestId: main?.id || null,
           latencyMs,
@@ -513,7 +520,7 @@ export function registerBinotelWebhook(app, deps) {
         console.error('binotel/call-settings journal:', e.message)
       }
     }
-    reply(result.response)
+    reply(result.response, result.priority && result.response.routeData ? { 'X-Runferry-Route-Priority': result.priority } : null)
 
     // Дзеркало в callEvents — некритичне, після відповіді; лише для вхідних, на які ми відповіли по суті (інакше
     // дублювали б картки старого бота).
@@ -533,9 +540,10 @@ export function registerBinotelWebhook(app, deps) {
   // необроблене відхилення промісу (Express 4 не ловить async-обробники, Node 20 на ньому завершує процес).
   app.post('/api/binotel/call-settings', guard, rawBody, async (req, res) => {
     let sent = false
-    const reply = (body) => {
+    const reply = (body, headers = null) => {
       if (sent) return
       sent = true
+      if (headers) res.set(headers)
       res.status(200).json(body)
     }
     try {

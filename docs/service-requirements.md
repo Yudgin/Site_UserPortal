@@ -861,7 +861,10 @@ Binotel ещё не присвоил), `openMaxAgeDays` (180), `doneGraceDays` (
 `openMaxAgeDays`) или (`done` либо этап `shipped`, и действие ≤ `doneGraceDays`). S1 — любая заявка, кроме `cancelled` без ТТН, или заказ
 `boatOrders` не `lead`/`cancelled`; один `clientProfiles` не считается (создаётся из любой формы). Номер пустой,
 скрытый, короче 9 цифр или иностранный → `{}`. Пока работает 1С-прокси, `Клиенты.Сценарий` 1С главнее нашего
-`routeData` (фрагмент 1С берёт от нас только `customerData`). Управление: `node server/scripts/binotel-routing.mjs show | set | test-add | override | log`.
+`routeData` (фрагмент 1С берёт от нас только `customerData`), кроме ответа с заголовком `X-Runferry-Route-Priority`
+(ставится только вместе с `routeData`: `override` — ручное исключение `overrides.{телефон}.force: true`; `discussion` —
+режим обсуждения, `runferry-briefs/telephony/discussion-mode-2026-10-16.md` §5.6); фрагмент 1С читает заголовок без
+учёта регистра. Управление: `node server/scripts/binotel-routing.mjs show | set | test-add | override | log`.
 Известные сценарии: 466367 sticky-903 (HAPP), 220956 нерабочее время, 270182 рабочее время, 73622 график 24/7.
 
 **Журнал.** `binotelEvents/{autoId}` (`kind: 'call-settings'`, сырое тело ≤ 8 КБ, разобранные поля, ответ, решение,
