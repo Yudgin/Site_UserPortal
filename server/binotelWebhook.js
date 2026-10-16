@@ -125,6 +125,9 @@ export const DEFAULT_ROUTING = {
   enabled: true, // false → завжди {} (повністю логіка 1С)
   scope: 'test', // 'test' — відповідаємо лише номерам з testNumbers; 'all' — усім
   testNumbers: [],
+  // Білий список ліній Runferry (pbxNumber вхідного). Решта ліній АТС (camarad 0679468531 — близько третини вхідних)
+  // → {} 'bypass-line': інакше наш routeData перебив би сценарій чужої лінії. [] у документі — без фільтра.
+  lines: ['+380679278039', '+380443338049'],
   // 'passthrough' — routeData не віддаємо (сценарій лінії); 'route' — routeId; 'byClient' — сценарій за категорією
   // клієнта з categoryRoutes (схема сесії «Голосові заглушки для сценаріїв Binotel», 2026-10-16)
   mode: 'passthrough',
@@ -174,10 +177,18 @@ export function normalizeRouting(doc) {
   if (categoryRoutes.knownClient == null && sc.S1 != null) categoryRoutes.knownClient = routeEntry(sc.S1, 'routeWithTime')
   const days = (v, def) => (Number.isFinite(Number(v)) && Number(v) >= 0 && v !== null && v !== '' ? Number(v) : def)
   const assigned = d.assignedToEmployeeNumber == null ? '' : String(d.assignedToEmployeeNumber).trim()
+  // lines: [] — свідомо без фільтра; непорожній масив без жодного валідного номера (опечатка, «a, b» одним рядком)
+  // — НЕ вимикає фільтр, а лишає типовий список (інакше лінія camarad отримала б наш routeData).
+  let lines = DEFAULT_ROUTING.lines
+  if (Array.isArray(d.lines)) {
+    const parsed = d.lines.flatMap((x) => str(x).split(/[,;]/)).map((x) => normPhone(x)).filter(Boolean)
+    lines = d.lines.length === 0 ? [] : parsed.length ? parsed : DEFAULT_ROUTING.lines
+  }
   return {
     enabled: d.enabled !== false,
     scope: d.scope === 'all' ? 'all' : 'test',
     testNumbers,
+    lines,
     mode: d.mode === 'route' || d.mode === 'byClient' ? d.mode : 'passthrough',
     routeId: posInt(d.routeId),
     routeType: routeTypeOf(d.routeType),
@@ -218,6 +229,10 @@ const DAY_MS = 86400 * 1000
 // Записи stageHistory, які пишуться автоматично з часом прогону, а не події: синхронізація 1С і бекфіл.
 // np-ttn (рух посилки Новою Поштою) — справжня подія, її рахуємо.
 const AUTO_STAGE_BY = new Set(['1c-sync', 'backfill'])
+// Виняток: перехід у 'shipped' від 1c-sync (НЕ перший запис історії) — справжня подія. Щоденна синхронізація пише його,
+// коли в 1С з'являється нова зворотна ТТН (onecSync.js, rtKnown), а np-ttn тоді вже нічого не додає. Перший запис
+// 'shipped' ставлять масові прогони старим ремонтам — його не рахуємо. На 2026-10-16 таких записів 1c-sync немає.
+const isRealStageEvent = (h, i) => !!h && (!AUTO_STAGE_BY.has(h.by) || (h.by === '1c-sync' && h.stage === 'shipped' && i > 0))
 const msOf = (iso) => {
   const t = Date.parse(iso || '')
   return Number.isFinite(t) ? t : 0
@@ -232,21 +247,26 @@ export const lastActivityMs = (sr) => Math.max(
   msOf(sr?.doneAt),
   msOf(sr?.statusChangedAt),
   msOf(sr?.paidAt),
-  ...(Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).filter((h) => h && !AUTO_STAGE_BY.has(h.by)).map((h) => msOf(h.at)),
+  ...(Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).filter(isRealStageEvent).map((h) => msOf(h.at)),
 )
 // Незакрита заявка (узгоджено з сесією «1С телефонія міграція», 2026-10-16). Не скасована і:
 //   - не виконана, а остання дія не старша за openMaxAgeDays (180): ~560 ремонтів з 1С отримали статус один раз при
 //     імпорті (inferStatus), покинуті старі назавжди лишилися б 'new' — поріг лише страховка на майбутнє;
-//   - або виконана, але остання дія не старша за doneGraceDays: клієнт дзвонить «де мій кораблик».
+//   - або виконана чи вже відправлена (stage 'shipped'), але остання дія не старша за doneGraceDays: клієнт дзвонить
+//     «де мій кораблик». Без цього відправка через np-ttn (жива дія) тримала б заявку відкритою ще 180 днів.
 export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   if (!sr || sr.status === 'cancelled') return false
   const ageDays = (nowMs - lastActivityMs(sr)) / DAY_MS
-  return sr.status === 'done' ? ageDays <= cfg.doneGraceDays : ageDays <= cfg.openMaxAgeDays
+  return sr.status === 'done' || sr.stage === 'shipped' ? ageDays <= cfg.doneGraceDays : ageDays <= cfg.openMaxAgeDays
 }
 // Справжня історія з клієнтом: будь-яка заявка, крім скасованої без жодної ТТН; або купівля кораблика (не лід і не
 // скасоване замовлення). Самого clientProfiles НЕ досить: профіль створюється автоматично з будь-якої форми чи чату.
+// returnTtn буває й накладною купівлі/запчастин (npScenario purchase/parts), а не поверненням — для «справжньої
+// історії» це однаково: щось фізично їхало цьому клієнту.
 const isHistory = (sr) => !!sr && !(sr.status === 'cancelled' && !sr.waybillNumber && !sr.returnTtn)
 const isPurchase = (o) => !!o && !['lead', 'cancelled'].includes(o.status)
+// Дата купівлі — лише soldAt: у імпорту продажів 18.07 createdAt = дата імпорту, а не продажу. createdAt — тільки
+// для порядку, коли soldAt немає.
 const purchaseTs = (o) => msOf(o.soldAt) || msOf(o.createdAt)
 
 // Головна заявка: спершу незакриті, серед них — з найсвіжішою дією; інакше найсвіжіша будь-яка.
@@ -291,14 +311,15 @@ export function buildCustomerData({ phone, requests, orders, profile, siteUrl, a
     linkToCrmUrl = `${base}/service-request/${encodeURIComponent(main.id)}`
     linkToCrmTitle = clip(`Заявка${no ? ` №${no}` : ''}${total > 1 ? ` (усього ${total})` : ''}`, DESC_MAX)
   } else if (purchase) {
-    const date = ddmmyyyy(purchase.soldAt || purchase.createdAt)
-    description = clip(`Купив кораблик${date ? ` ${date}` : ''}, ремонтів не було`, DESC_MAX)
+    const date = ddmmyyyy(purchase.soldAt)
+    description = clip(`Купив кораблик${date ? ` ${date}` : ''}, ремонтів у базі немає`, DESC_MAX)
     if (purchase.id) {
       linkToCrmUrl = `${base}/boat-orders/${encodeURIComponent(purchase.id)}`
       linkToCrmTitle = 'Замовлення кораблика'
     }
   } else {
-    description = profile ? 'Звертався, заявок немає' : 'Новий номер, заявок немає'
+    // База порталу бачить лише з 2025-06: «новий» номер може бути давнім власником — тому «немає в базі».
+    description = profile ? 'Звертався, заявок у базі немає' : 'Немає в базі порталу'
   }
   const cd = { name, description, linkToCrmUrl, linkToCrmTitle }
   if (assignedToEmployeeNumber) cd.assignedToEmployeeNumber = assignedToEmployeeNumber
@@ -312,8 +333,10 @@ export function decideCallSettings({ fields, routing, lookup, siteUrl, nowMs = D
   if (requestType && requestType !== 'apiCallSettings') return { response: {}, decision: 'not-call-settings' }
   if (!phone) return { response: {}, decision: 'no-phone' }
   if (!routing || !routing.enabled) return { response: {}, decision: routing?.missing ? 'no-routing-doc' : 'disabled' }
-  if (routing.scope === 'test' && !routing.testNumbers.includes(phone)) return { response: {}, decision: 'out-of-scope' }
   const incoming = str(fields.callType).trim() !== '1'
+  // Чужа лінія АТС (не з білого списку) — нічого не відповідаємо, навіть customerData.
+  if (incoming && routing.lines.length && !routing.lines.includes(normPhone(str(fields.pbxNumber)))) return { response: {}, decision: 'bypass-line' }
+  if (routing.scope === 'test' && !routing.testNumbers.includes(phone)) return { response: {}, decision: 'out-of-scope' }
   const response = {}
   if (routing.sendCustomerData && lookup) {
     response.customerData = buildCustomerData({

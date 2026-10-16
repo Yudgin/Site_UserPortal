@@ -849,14 +849,16 @@ Firestore параллельно с бюджетом 1,2 с, без внешни
 `byClient` — по категории клиента), `routeType`, `overrides{телефон: routeId | {id,type} | 0}`, `categoryRoutes`
 (`openRequest` → S2, `knownClient` → S1, неизвестный номер — без `routeData`, сценарий линии S0; тип по умолчанию
 `routeWithTime`; синоним `scenarioIds {S1, S2}`; схема сессии «Голосовые заглушки для сценариев Binotel», ID S1/S2
-Binotel ещё не присвоил), `openMaxAgeDays` (180), `doneGraceDays` (14), `sendCustomerData`, `assignedToEmployeeNumber`
-(1С шлёт 906), `mirrorCallEvents`. Порядок для входящего: `override` → режим; исходящему `routeData` никогда.
+Binotel ещё не присвоил), `openMaxAgeDays` (180), `doneGraceDays` (14), `lines` (белый список линий Runferry, по
+умолчанию 0679278039 и 0443338049: входящий на чужую линию — camarad 0679468531 — или без `pbxNumber` → `{}`
+`bypass-line`), `sendCustomerData`, `assignedToEmployeeNumber` (1С шлёт 906), `mirrorCallEvents`. Порядок для входящего:
+фильтр линии → `scope` → `override` → режим; исходящему `routeData` никогда.
 
 **Правила S1/S2 (с сессией «1С телефония миграция», 2026-10-16).** Последнее действие по заявке — самое позднее из
 `createdAt` (у ремонтов из 1С — дата документа 1С), `diagnostics.at`, `stageHistory[].at` кроме `by: '1c-sync'` и
-`'backfill'`; `updatedAt` не годится (массовые синхронизации 1С и бекфил освежили его почти всем 574 заявкам, а ~560
+`'backfill'` (но переход `1c-sync` в `shipped`, не первый в истории, — событие: новая обратная ТТН из 1С); `updatedAt` не годится (массовые синхронизации 1С и бекфил освежили его почти всем 574 заявкам, а ~560
 ремонтов из 1С получили статус один раз при импорте). S2 — заявка не `cancelled` и (не `done` и действие ≤
-`openMaxAgeDays`) или (`done` и действие ≤ `doneGraceDays`). S1 — любая заявка, кроме `cancelled` без ТТН, или заказ
+`openMaxAgeDays`) или (`done` либо этап `shipped`, и действие ≤ `doneGraceDays`). S1 — любая заявка, кроме `cancelled` без ТТН, или заказ
 `boatOrders` не `lead`/`cancelled`; один `clientProfiles` не считается (создаётся из любой формы). Номер пустой,
 скрытый, короче 9 цифр или иностранный → `{}`. Пока работает 1С-прокси, `Клиенты.Сценарий` 1С главнее нашего
 `routeData` (фрагмент 1С берёт от нас только `customerData`). Управление: `node server/scripts/binotel-routing.mjs show | set | test-add | override | log`.
