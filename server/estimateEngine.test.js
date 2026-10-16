@@ -3,9 +3,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   round2, tName, recomputeTotals, applyEstimateDiscount, estimate2goods, needsReapproval, extraLine, withLines,
-  estimateSig, requestVisible, canEditRequest, canEditEstimate, estimateBlock, estimateBlocked, estimatePatch,
-  validateExpense, payOptionsFromCenter, buildActualFromVariant, NO_REAPPROVAL_DEVIATION_PCT,
+  estimateSig, requestVisible, canEditRequest, canEditEstimate, estimateBlocked, estimatePatch,
+  validateExpense, NO_REAPPROVAL_DEVIATION_PCT,
 } from './estimateEngine.js'
+import { payOptionsFromCenter, buildActualFromVariant, mapCoreFailure } from './estimateActions.js'
 
 const line = (refId, lineTotal, extra = {}) => ({ type: 'labor', refId, code: refId.toUpperCase(), name: { uk: `Робота ${refId}` }, qty: 1, unitPrice: lineTotal, seasonApplied: false, lineTotal, ...extra })
 const est = (lines, extra = {}) => recomputeTotals({ id: 'e1', title: 'T', discount: null, ...extra }, lines)
@@ -105,15 +106,25 @@ test('permissions mirror accessStore', () => {
   assert.equal(canEditEstimate(staff('accountant'), sr), false)
 })
 
-test('estimateBlock: paid / rejected / pay claim', () => {
-  assert.equal(estimateBlock(null), null)
-  assert.equal(estimateBlock({ status: 'approved' }), null)
-  assert.equal(estimateBlock({ status: 'paid' }).code, 'PAID')
-  assert.equal(estimateBlock({ status: 'approved', paymentId: 'p' }).code, 'PAID')
-  assert.equal(estimateBlock({ status: 'rejected' }).code, 'REJECTED')
-  assert.equal(estimateBlock({ status: 'approved', payInitiatedAt: new Date().toISOString() }).code, 'PAY_IN_PROGRESS')
-  assert.equal(estimateBlock({ status: 'approved', payInitiatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString() }), null)
-  assert.match(estimateBlocked({ status: 'paid' }), /оплачено/)
+test('estimateBlocked: paid / rejected / pay claim → { code, message }', () => {
+  assert.equal(estimateBlocked(null), null)
+  assert.equal(estimateBlocked({ status: 'approved' }), null)
+  assert.equal(estimateBlocked({ status: 'paid' }).code, 'PAID')
+  assert.equal(estimateBlocked({ status: 'approved', paymentId: 'p' }).code, 'PAID')
+  assert.equal(estimateBlocked({ status: 'rejected' }).code, 'REJECTED')
+  assert.equal(estimateBlocked({ status: 'approved', payInitiatedAt: new Date().toISOString() }).code, 'PAYING')
+  assert.equal(estimateBlocked({ status: 'approved', payInitiatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString() }), null)
+  assert.match(estimateBlocked({ status: 'paid' }).message, /оплачено/)
+})
+
+test('mapCoreFailure: core codes → HTTP status and contract codes', () => {
+  assert.deepEqual(mapCoreFailure({ ok: false, code: 'BLOCKED', message: 'm', data: { reason: 'PAYING' } }), { ok: false, status: 409, code: 'PAY_IN_PROGRESS', message: 'm' })
+  assert.equal(mapCoreFailure({ ok: false, code: 'BLOCKED', message: 'm', data: { reason: 'PAID' } }).code, 'PAID')
+  assert.deepEqual(mapCoreFailure({ ok: false, code: 'NO_ESTIMATE_PERM', message: 'm' }), { ok: false, status: 403, code: 'NO_PERM_ACTUAL', message: 'm' })
+  assert.equal(mapCoreFailure({ ok: false, code: 'FORBIDDEN', message: 'm' }).code, 'OTHER_CENTER')
+  assert.equal(mapCoreFailure({ ok: false, code: 'INVALID', message: 'm' }).status, 400)
+  assert.equal(mapCoreFailure({ ok: false, code: 'NOT_FOUND_EXPENSE', message: 'm' }).code, 'NO_EXPENSE')
+  assert.equal(mapCoreFailure({ ok: false, code: 'WEIRD', message: 'm' }).status, 500)
 })
 
 test('estimatePatch: recomputes, sets status by threshold, snapshots history, marks via', () => {
@@ -129,10 +140,10 @@ test('estimatePatch: recomputes, sets status by threshold, snapshots history, ma
   assert.equal(r.patch.history[0].editedBy, 'm@x')
   assert.equal(r.patch.lastEditedVia, 'app')
   assert.equal(r.patch.receiptGoods.length, 2)
-  // без изменения содержания history не растёт; via по умолчанию — бот
+  // без изменения содержания history не растёт; via по умолчанию — 'server'
   const same = estimatePatch(e, e.lines, parent, staff('master'))
   assert.equal(same.patch.history.length, 0)
-  assert.equal(same.patch.lastEditedVia, 'telegram-bot')
+  assert.equal(same.patch.lastEditedVia, 'server')
   assert.equal(same.status, 'approved')
   // без родителя — approved
   assert.equal(estimatePatch(e, [...e.lines, extraLine({ id: 'y', title: 'Y', amount: 9000 })], null, staff('owner')).status, 'approved')

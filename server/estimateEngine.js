@@ -1,26 +1,38 @@
-// Серверное ЗЕРКАЛО движка кошторису (src/utils/pricing.ts) — чистые функции без Firestore.
-// Единое ядро для всех серверных правок фактического кошторису: Telegram-бот сотрудников
-// (staffBotCore.js) и HTTP-маршруты приложения сервиса (estimates.js). Любая правка строк обязана
-// пройти через withLines/estimatePatch: «размотать» вшитую скидку → пересчитать итоги → переприменить
-// скидку → перестроить позиции чека → пересчитать статус по порогу повторного согласования →
-// положить снимок в history. Иначе Σ(строк) разойдётся с total/чеком и оплата упадёт AMOUNT_MISMATCH.
+// ОБЩЕЕ серверное ядро правки заявок и фактического кошторису — без транспорта и без текстов.
+// Используют: Telegram-бот сотрудников (staffBotCore.js) и HTTP-маршруты приложения «RunFerry Сервіс»
+// (server/estimates.js, сессия «Калькуляции в приложении сервиса»). Одна реализация на всех, чтобы
+// деньги клиенту считались одинаково, откуда бы ни пришла правка.
 //
-// Функции перенесены из server/staffBotCore.js (сессия «Telegram бот для заявок», 2026-10-14) без
-// изменения семантики; staffBotCore.js должен импортировать их отсюда, а не держать копию.
-import { nowIso } from './messengerCore.js'
+// Расчёты — ЗЕРКАЛО фронтового движка src/utils/pricing.ts: доп. расход поза прайсом — строка
+// type='addon', refId 'extra:<id>', extra=true (редактор факта сохраняет такие строки при пересборке);
+// скидка кошторису переприменяется (вшивается в lineTotal в копейках, последний ненулевой ряд забирает
+// остаток), позиции чека (receiptGoods) перестраиваются построчно, порог повторного согласования
+// клиентом — 10 % от предварительной (NO_REAPPROVAL_DEVIATION_PCT в src/types/chat.ts), history ≤ 20.
+// Персистенция — firebase-admin (доверенный backend, минуя клиентские правила).
+import crypto from 'crypto'
 
-export const NO_REAPPROVAL_DEVIATION_PCT = 10 // зеркало NO_REAPPROVAL_DEVIATION_PCT (src/types/chat.ts)
+export const STAFF_ROLES = ['owner', 'director', 'accountant', 'master']
+export const NO_REAPPROVAL_DEVIATION_PCT = 10
 export const PAY_CLAIM_MS = 3 * 60 * 1000 // клиент начал оплату (payInitiatedAt) — окно блокировки правок
 export const MAX_AMOUNT = 1_000_000
-export const HISTORY_LIMIT = 20 // как pricingService.saveEstimate
-// Ключи способов оплаты (src/types/pricing.ts PAY_METHOD_KEYS) — порядок важен для fopId «первого способа».
-export const PAY_METHOD_KEYS = ['liqpayCard', 'liqpayPaypart', 'monoChast', 'monoAcquire', 'privatPaypart', 'cod']
+export const HISTORY_LIMIT = 20
+
+export const STATUS_LABELS = {
+  new: 'Нова', diagnostics: 'Діагностика', offered: 'Запропоновано', approved: 'Погоджено',
+  in_work: 'В роботі', done: 'Виконано', cancelled: 'Скасовано',
+}
 
 export const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100
 export const clip = (v, n) => (v == null ? '' : String(v).slice(0, n))
-
-// Локализованное имя строки: укр. → любое → строка как есть (порт tName с fallback).
+export const newId = (bytes = 6) => crypto.randomBytes(bytes).toString('base64url')
+export const nowIso = () => new Date().toISOString()
 export const tName = (name) => (name && typeof name === 'object' ? (name.uk || Object.values(name).find(Boolean) || '') : String(name || ''))
+
+// Номер заявки для показа: номер ремонта 1С → внешний id → наш id.
+export const displayNo = (id, r) => (r && r.onec && r.onec.number) || (r && r.externalRequestId) || id
+
+// ==== Расчёты кошторису ====
+
 const sumBy = (lines, type) => round2(lines.filter((l) => l.type === type).reduce((a, l) => a + (Number(l.lineTotal) || 0), 0))
 
 export const recomputeTotals = (est, lines) => {
@@ -30,8 +42,7 @@ export const recomputeTotals = (est, lines) => {
   return { ...est, lines, laborTotal, materialsTotal, addonsTotal, total: round2(laborTotal + materialsTotal + addonsTotal) }
 }
 
-// Знижка (відсотком або сумою) вшивається в lineTotal пропорційно, в копійках; останній ненульовий
-// рядок забирає залишок — Σ(рядків) == total == чек. Точный порт applyEstimateDiscount.
+// Точный порт applyEstimateDiscount (src/utils/pricing.ts).
 export const applyEstimateDiscount = (est, d) => {
   const value = Number(d && d.value) || 0
   if (!d || value <= 0) return est
@@ -92,14 +103,14 @@ export const needsReapproval = (prelim, actual) => {
   return { required: true, diffPercent, thresholdPct: NO_REAPPROVAL_DEVIATION_PCT }
 }
 
-// Строка кошторису для доп. расхода (вне прайса). extra=true — редактор факта сохраняет её при пересборке.
+// Строка кошторису для доп. расхода (вне прайса).
 export const extraLine = (exp) => ({
   type: 'addon', refId: `extra:${exp.id}`, code: 'EXTRA', name: { uk: exp.title }, qty: 1,
   unitPrice: round2(exp.amount), seasonApplied: false, lineTotal: round2(exp.amount), extra: true,
 })
 
-// Пересобрать кошторис с новым набором строк: сначала «размотать» скидку (grossLineTotal → lineTotal),
-// пересчитать итоги, затем переприменить ту же скидку — ровно так пересчитал бы редактор мастера.
+// Пересобрать кошторис с новым набором строк: «размотать» скидку (grossLineTotal → lineTotal),
+// пересчитать итоги, переприменить ту же скидку — ровно так пересчитал бы редактор мастера.
 export const withLines = (est, nextLines) => {
   const gross = nextLines.map((l) => {
     const g = { ...l }
@@ -116,7 +127,56 @@ export const withLines = (est, nextLines) => {
 // Сигнатура содержания (как в pricingService.saveEstimate) — версию в history пишем только при изменении.
 export const estimateSig = (e) => `${(e.lines || []).map((l) => `${l.refId}:${l.qty}:${l.lineTotal}`).sort().join('|')}#${e.total}`
 
-// ---- Видимость и права (зеркало accessStore/firestore.rules) ----
+// Почему кошторис сейчас нельзя править (null — можно). Код — для транспортов, message — укр. текст.
+export const estimateBlocked = (e) => {
+  if (!e) return null
+  if (e.status === 'paid' || e.paymentId) return { code: 'PAID', message: 'Кошторис уже оплачено — зміни неможливі.' }
+  if (e.status === 'rejected') return { code: 'REJECTED', message: 'Клієнт відхилив кошторис — зміни неможливі, відкрийте заявку в порталі.' }
+  if (e.payInitiatedAt && Date.now() - Date.parse(e.payInitiatedAt) < PAY_CLAIM_MS) return { code: 'PAYING', message: 'Клієнт зараз оплачує цей кошторис — спробуйте за кілька хвилин.' }
+  return null
+}
+
+// Патч факта под новый набор строк: итоги, скидка, чек, история (≤20), статус по порогу согласования
+// (как редактор: required → pending_approval, иначе approved). via — источник правки (lastEditedVia).
+export const estimatePatch = (e, nextLines, parent, staff, via = 'server') => {
+  const next = withLines(e, nextLines)
+  const re = parent ? needsReapproval(parent, next) : { required: false, diffPercent: 0, thresholdPct: NO_REAPPROVAL_DEVIATION_PCT }
+  const status = re.required ? 'pending_approval' : 'approved'
+  let history = Array.isArray(e.history) ? e.history : []
+  if (estimateSig(e) !== estimateSig(next)) {
+    history = [...history, {
+      at: e.updatedAt || e.createdAt || nowIso(), total: e.total, lines: e.lines || [],
+      ...(e.sections ? { sections: e.sections } : {}), editedBy: (staff && staff.email) || null,
+    }].slice(-HISTORY_LIMIT)
+  }
+  return {
+    patch: {
+      lines: next.lines, laborTotal: next.laborTotal, materialsTotal: next.materialsTotal, addonsTotal: next.addonsTotal,
+      total: next.total, discount: next.discount || null, status, receiptGoods: estimate2goods(next), history,
+      updatedAt: nowIso(), lastEditedBy: (staff && staff.email) || null, lastEditedVia: via,
+    },
+    next, reapproval: re, status,
+  }
+}
+
+export const validateExpense = (p) => {
+  const title = clip(p && p.title, 120).trim()
+  const amount = round2(Number(p && p.amount))
+  if (!title) return { error: 'Потрібна назва витрати.' }
+  if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) return { error: 'Сума має бути числом від 0.01 до 1 000 000 грн.' }
+  return { title, amount, note: clip(p && p.note, 300).trim() || undefined }
+}
+
+// ТТН Нової Пошти: 10–20 цифр (иначе '').
+export const normTtn = (v) => { const d = String(v || '').replace(/\D/g, ''); return d.length >= 10 && d.length <= 20 ? d : '' }
+
+// ==== Права (зеркало accessStore / firestore.rules) ====
+
+// Сотрудник из документа users/{uid}: { uid, email, name, role, centers[] }.
+export const staffFromProfile = (uid, p) => ({
+  uid, email: p.email || '', name: p.displayName || p.email || uid, role: p.role,
+  centers: Array.isArray(p.centers) ? p.centers.filter(Boolean) : [],
+})
 
 export const requestVisible = (staff, sr) => {
   if (staff.role === 'owner' || staff.role === 'accountant') return true
@@ -135,104 +195,166 @@ export const canEditEstimate = (staff, sr) => {
   return false
 }
 
-// ---- Блокировки и патч факта ----
-
-// Почему кошторис сейчас нельзя править: { code, message } или null.
-export const estimateBlock = (e) => {
-  if (!e) return null
-  if (e.status === 'paid' || e.paymentId) return { code: 'PAID', message: 'Кошторис уже оплачено — зміни неможливі.' }
-  if (e.status === 'rejected') return { code: 'REJECTED', message: 'Клієнт відхилив кошторис — зміни неможливі, відкрийте заявку в порталі.' }
-  if (e.payInitiatedAt && Date.now() - Date.parse(e.payInitiatedAt) < PAY_CLAIM_MS) {
-    return { code: 'PAY_IN_PROGRESS', message: 'Клієнт зараз оплачує цей кошторис — спробуйте за кілька хвилин.' }
+// ==== Операции над Firestore (транспортно-нейтральные) ====
+//
+// Каждая возвращает { ok:true, code, data } либо { ok:false, code, message }. Тексты для Telegram/HTTP
+// транспорты строят сами из data. Коды ошибок: NOT_FOUND, FORBIDDEN (чужой центр), NO_EDIT (нет права
+// менять заявки), NO_ESTIMATE_PERM (нет права «факт»), BLOCKED (оплачен/отклонён/оплата идёт; data.reason),
+// INVALID (валидация), NOT_FOUND_EXPENSE, NOTHING (нечего менять), PAID_STATUS (статус оплаченной заявки).
+export function createEstimateOps({ adminDb }) {
+  const col = (name) => adminDb.collection(name)
+  const getDoc = async (name, id) => {
+    if (!id) return null
+    const s = await col(name).doc(String(id)).get()
+    return s.exists ? { id: s.id, ...s.data() } : null
   }
-  return null
-}
-// Совместимость с staffBotCore.estimateBlocked: текст причины или null.
-export const estimateBlocked = (e) => { const b = estimateBlock(e); return b ? b.message : null }
+  const reqInfo = (sr) => ({ id: sr.id, number: displayNo(sr.id, sr), clientName: sr.clientName || '', actualEstimateId: sr.actualEstimateId || null })
+  const fail = (code, message, data) => ({ ok: false, code, message, ...(data ? { data } : {}) })
 
-// Общая часть: переписать строки факта (с переприменением скидки, чеком, историей, статусом).
-// via — кто правил ('telegram-bot' | 'app'), пишется в lastEditedVia.
-export const estimatePatch = (e, nextLines, parent, staff, via = 'telegram-bot') => {
-  const next = withLines(e, nextLines)
-  const re = parent ? needsReapproval(parent, next) : { required: false, diffPercent: 0, thresholdPct: NO_REAPPROVAL_DEVIATION_PCT }
-  const status = re.required ? 'pending_approval' : 'approved'
-  let history = Array.isArray(e.history) ? e.history : []
-  if (estimateSig(e) !== estimateSig(next)) {
-    history = [...history, {
-      at: e.updatedAt || e.createdAt || nowIso(), total: e.total, lines: e.lines || [],
-      ...(e.sections ? { sections: e.sections } : {}), editedBy: staff.email || null,
-    }].slice(-HISTORY_LIMIT)
+  const loadEditable = async (staff, requestId, { needEstimate = false } = {}) => {
+    const sr = await getDoc('serviceRequests', requestId)
+    if (!sr) return { err: fail('NOT_FOUND', 'Заявку не знайдено.') }
+    if (!requestVisible(staff, sr)) return { err: fail('FORBIDDEN', 'Заявка іншого сервісного центру.') }
+    if (!canEditRequest(staff, sr)) return { err: fail('NO_EDIT', 'Немає права змінювати заявки.') }
+    if (needEstimate && !canEditEstimate(staff, sr)) return { err: fail('NO_ESTIMATE_PERM', 'Немає права «фактична калькуляція» для центру цієї заявки.') }
+    return { sr }
   }
-  return {
-    patch: {
-      lines: next.lines, laborTotal: next.laborTotal, materialsTotal: next.materialsTotal, addonsTotal: next.addonsTotal,
-      total: next.total, discount: next.discount || null, status, receiptGoods: estimate2goods(next), history,
-      updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via,
-    },
-    next, reapproval: re, status,
+
+  // Добавить доп. расход: в факт (если есть и правим) или на заявку (appliedToEstimateId=null).
+  // opts.source — 'telegram-bot' | 'app' | 'portal'; opts.via — lastEditedVia кошторису/заявки.
+  const addExtraExpense = async (staff, p, opts = {}) => {
+    const source = opts.source || 'server'
+    const via = opts.via || source
+    const v = validateExpense(p)
+    if (v.error) return fail('INVALID', v.error)
+    const sr0 = await getDoc('serviceRequests', p && p.requestId)
+    if (!sr0) return fail('NOT_FOUND', 'Заявку не знайдено.')
+    if (!requestVisible(staff, sr0)) return fail('FORBIDDEN', 'Заявка іншого сервісного центру.')
+    if (!canEditRequest(staff, sr0)) return fail('NO_EDIT', 'Немає права змінювати заявки.')
+    const srRef = col('serviceRequests').doc(String(sr0.id))
+    const exp = {
+      id: newId(), title: v.title, amount: v.amount, ...(v.note ? { note: v.note } : {}),
+      at: nowIso(), by: staff.email || null, byUid: staff.uid, source, appliedToEstimateId: null,
+      // Ключ идемпотентности клиента (приложение сервиса): повтор с тем же ключом не добавляет второй расход.
+      ...(p && p.clientKey ? { clientKey: String(p.clientKey) } : {}),
+    }
+
+    if (sr0.actualEstimateId) {
+      if (!canEditEstimate(staff, sr0)) return fail('NO_ESTIMATE_PERM', 'Немає права «фактична калькуляція» для центру цієї заявки.')
+      const estRef = col('priceEstimates').doc(String(sr0.actualEstimateId))
+      const est0 = await getDoc('priceEstimates', sr0.actualEstimateId)
+      const parent = est0 && est0.parentEstimateId ? await getDoc('priceEstimates', est0.parentEstimateId) : null
+      const r = await adminDb.runTransaction(async (tx) => {
+        const srS = await tx.get(srRef)
+        const eS = await tx.get(estRef)
+        const cur = srS.exists ? srS.data() : null
+        if (!cur) return { blocked: { code: 'NOT_FOUND', message: 'Заявку не знайдено.' } }
+        const e = eS.exists ? { id: eS.id, ...eS.data() } : null
+        if (!e) {
+          // Ссылка на факт «висит» — пишем расход только на заявку.
+          tx.set(srRef, { extraExpenses: [...(cur.extraExpenses || []), exp], updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+          return { applied: false }
+        }
+        const blocked = estimateBlocked(e)
+        if (blocked) return { blocked }
+        const { patch, next, reapproval, status } = estimatePatch(e, [...(e.lines || []), extraLine(exp)], parent, staff, via)
+        tx.set(estRef, patch, { merge: true })
+        exp.appliedToEstimateId = e.id
+        tx.set(srRef, { extraExpenses: [...(cur.extraExpenses || []), exp], updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+        return { applied: true, prevTotal: round2(e.total || 0), total: next.total, reapproval, status, estimateId: e.id }
+      })
+      if (r.blocked) return fail(r.blocked.code === 'NOT_FOUND' ? 'NOT_FOUND' : 'BLOCKED', r.blocked.message, { reason: r.blocked.code })
+      return { ok: true, code: r.applied ? 'APPLIED' : 'RECORDED', data: { request: reqInfo(sr0), expense: exp, applied: !!r.applied, ...(r.applied ? { estimateId: r.estimateId, prevTotal: r.prevTotal, total: r.total, status: r.status, reapproval: r.reapproval } : {}) } }
+    }
+
+    await adminDb.runTransaction(async (tx) => {
+      const srS = await tx.get(srRef)
+      const cur = srS.exists ? srS.data() : {}
+      tx.set(srRef, { extraExpenses: [...(cur.extraExpenses || []), exp], updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+    })
+    return { ok: true, code: 'RECORDED', data: { request: reqInfo(sr0), expense: exp, applied: false } }
   }
+
+  // Вилучити доп. расход (и его строку из факта, если была применена).
+  const removeExtraExpense = async (staff, p, opts = {}) => {
+    const via = opts.via || opts.source || 'server'
+    const { sr: sr0, err } = await loadEditable(staff, p && p.requestId)
+    if (err) return err
+    const exp = (sr0.extraExpenses || []).find((x) => x && x.id === String(p.expenseId || ''))
+    if (!exp) return fail('NOT_FOUND_EXPENSE', 'Таку витрату в заявці не знайдено.')
+    const srRef = col('serviceRequests').doc(String(sr0.id))
+    const estId = exp.appliedToEstimateId || null
+    if (estId) {
+      if (!canEditEstimate(staff, sr0)) return fail('NO_ESTIMATE_PERM', 'Немає права «фактична калькуляція» для центру цієї заявки.')
+      const estRef = col('priceEstimates').doc(String(estId))
+      const est0 = await getDoc('priceEstimates', estId)
+      const parent = est0 && est0.parentEstimateId ? await getDoc('priceEstimates', est0.parentEstimateId) : null
+      const r = await adminDb.runTransaction(async (tx) => {
+        const srS = await tx.get(srRef)
+        const eS = await tx.get(estRef)
+        const cur = srS.exists ? srS.data() : {}
+        const e = eS.exists ? { id: eS.id, ...eS.data() } : null
+        const rest = (cur.extraExpenses || []).filter((x) => x && x.id !== exp.id)
+        if (e) {
+          const blocked = estimateBlocked(e)
+          if (blocked) return { blocked }
+          const nextLines = (e.lines || []).filter((l) => l.refId !== `extra:${exp.id}`)
+          const { patch, next, reapproval, status } = estimatePatch(e, nextLines, parent, staff, via)
+          tx.set(estRef, patch, { merge: true })
+          tx.set(srRef, { extraExpenses: rest, updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+          return { applied: true, prevTotal: round2(e.total || 0), total: next.total, reapproval, status, estimateId: e.id }
+        }
+        tx.set(srRef, { extraExpenses: rest, updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+        return { applied: false }
+      })
+      if (r.blocked) return fail('BLOCKED', r.blocked.message, { reason: r.blocked.code })
+      return { ok: true, code: 'REMOVED', data: { request: reqInfo(sr0), expense: exp, applied: !!r.applied, ...(r.applied ? { estimateId: r.estimateId, prevTotal: r.prevTotal, total: r.total, status: r.status, reapproval: r.reapproval } : {}) } }
+    }
+    await adminDb.runTransaction(async (tx) => {
+      const srS = await tx.get(srRef)
+      const cur = srS.exists ? srS.data() : {}
+      tx.set(srRef, { extraExpenses: (cur.extraExpenses || []).filter((x) => x && x.id !== exp.id), updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+    })
+    return { ok: true, code: 'REMOVED', data: { request: reqInfo(sr0), expense: exp, applied: false } }
+  }
+
+  // Поля заявки: diagnostics (текст; пусто → null), status, waybillNumber, returnTtn, boat.
+  // Первая диагностика двигает «нова» → «діагностика» (как в карточке), если статус не задан явно.
+  const updateRequest = async (staff, p, opts = {}) => {
+    const via = opts.via || opts.source || 'server'
+    const { sr: sr0, err } = await loadEditable(staff, p && p.requestId)
+    if (err) return err
+    const fields = {}
+    const changes = []
+    if (p.diagnostics !== undefined && p.diagnostics !== null) {
+      const text = clip(p.diagnostics, 4000).trim()
+      fields.diagnostics = text ? { text, at: nowIso(), by: staff.email || null } : null
+      changes.push({ field: 'diagnostics', label: text ? `діагностика: «${clip(text, 200)}${text.length > 200 ? '…' : ''}»` : 'діагностику очищено', value: text })
+      if (text && sr0.status === 'new' && !sr0.paymentId && !p.status) fields.status = 'diagnostics'
+    }
+    if (p.status) {
+      if (!STATUS_LABELS[p.status]) return fail('INVALID', 'Невідомий статус.')
+      if (sr0.paymentId) return fail('PAID_STATUS', 'Заявку оплачено — статус зафіксовано.')
+      fields.status = p.status
+      changes.push({ field: 'status', label: `статус: ${STATUS_LABELS[p.status]}`, value: p.status })
+    }
+    for (const [key, label] of [['waybillNumber', 'ТТН (до сервісу)'], ['returnTtn', 'ТТН (клієнту)']]) {
+      if (p[key] === undefined || p[key] === null) continue
+      const t = normTtn(p[key])
+      if (!t) return fail('INVALID', 'Номер ТТН має містити 10–20 цифр.')
+      fields[key] = t
+      changes.push({ field: key, label: `${label}: ${t}`, value: t })
+    }
+    if (p.boat !== undefined && p.boat !== null) {
+      fields.boat = clip(p.boat, 120).trim()
+      changes.push({ field: 'boat', label: `кораблик: ${fields.boat || '—'}`, value: fields.boat })
+    }
+    if (!changes.length) return fail('NOTHING', 'Немає що змінювати.')
+    await col('serviceRequests').doc(String(sr0.id)).set({ ...fields, updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+    return { ok: true, code: 'UPDATED', data: { request: reqInfo(sr0), fields, changes } }
+  }
+
+  return { addExtraExpense, removeExtraExpense, updateRequest, getDoc }
 }
 
-// Валидация доп. расхода (назва ≤120, сума 0.01–1 000 000, нотатка ≤300).
-export const validateExpense = (p) => {
-  const title = clip(p.title, 120).trim()
-  const amount = round2(Number(p.amount))
-  if (!title) return { error: 'Потрібна назва витрати.' }
-  if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) return { error: 'Сума має бути числом від 0.01 до 1 000 000 грн.' }
-  return { title, amount, note: clip(p.note, 300).trim() || undefined }
-}
-
-// Способы оплаты из дефолтов центра (как префилл редактора факта: PAY_METHOD_KEYS.filter(def[m])).
-export const payOptionsFromCenter = (center) => {
-  const def = center && center.defaultFopByMethod
-  if (!def || typeof def !== 'object') return []
-  return PAY_METHOD_KEYS.filter((m) => def[m]).map((m) => ({ method: m, fopId: String(def[m]) }))
-}
-
-// Фактический кошторис из варианта пропозиції (как редактор факта «Скласти факт за обраним варіантом»
-// без правок): копия строк/секций/скидки, пересчёт через withLines, статус по порогу, чек, выплаты
-// с нулями из специалистов заявки, способы оплаты из центра. Ожидающие витрати заявки (extraExpenses
-// без appliedToEstimateId) дописываются строками extra — как appendExtraLines в редакторе.
-export const buildActualFromVariant = ({ parent, sr, pendingExpenses = [], payOptions, staff, via = 'app', now = nowIso() }) => {
-  const base = {
-    requestId: parent.requestId ?? null,
-    title: parent.title || '',
-    complaint: parent.complaint || '',
-    ...(parent.sections ? { sections: parent.sections } : {}),
-    ...(parent.excludedCommonCodes ? { excludedCommonCodes: parent.excludedCommonCodes } : {}),
-    seasonId: parent.seasonId ?? null,
-    seasonCoefficient: parent.seasonCoefficient ?? 1,
-    seasonSurchargeApplied: !!parent.seasonSurchargeApplied,
-    laborRatePerHour: parent.laborRatePerHour ?? 0,
-    currency: parent.currency || 'UAH',
-    source: 'manual',
-    discount: parent.discount || null,
-    lines: [],
-    total: 0,
-  }
-  const lines = [...(parent.lines || []).map((l) => ({ ...l })), ...pendingExpenses.map(extraLine)]
-  const next = withLines(base, lines)
-  const re = needsReapproval(parent, next)
-  return {
-    estimate: {
-      ...next,
-      kind: 'actual',
-      stage: 'actual',
-      status: re.required ? 'pending_approval' : 'approved',
-      parentEstimateId: parent.id,
-      serviceRequestId: sr.id,
-      receiptGoods: estimate2goods(next),
-      specialistPayouts: (sr.specialists || []).filter((s) => s && s.uid).map((s) => ({ uid: s.uid, name: s.name || '', specialistAmount: 0, centerAdminAmount: 0 })),
-      payOptions,
-      fopId: payOptions[0].fopId,
-      createdAt: now,
-      updatedAt: now,
-      createdBy: staff.email || null,
-      lastEditedBy: staff.email || null,
-      lastEditedVia: via,
-      history: [],
-      paymentId: null, paidAt: null, taxUrl: null, fiscalCode: null, payInitiatedAt: null,
-    },
-    reapproval: re,
-  }
-}
+export default createEstimateOps
