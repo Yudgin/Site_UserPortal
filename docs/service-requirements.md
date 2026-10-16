@@ -948,11 +948,14 @@ Transcribe на Vertex `eu`, ≈ $0,005/мин) добавляется в `stt.j
   - `DELETE /api/estimates/:id/lines/:refId` — лише `extra:<id>` (рядки прайсу — B2).
   - Поля оплати (`status 'paid'`, `paymentId`, `paidAt`, `fopId` при оплаті, `taxUrl`, `fiscalCode`,
     `payInitiatedAt`) ці маршрути не торкаються; повторне сповіщення після правки — лише `custom` кнопкою.
-- **Ядро розрахунків** винесено в `server/estimateEngine.js` (чисті функції: `recomputeTotals`, `applyEstimateDiscount`,
-  `estimate2goods`, `needsReapproval`, `withLines`, `estimatePatch`, права, `buildActualFromVariant`) і
-  `server/estimateActions.js` (транзакції Firestore, структурні результати `{ok, status, code, message, data}`) —
-  спільні для HTTP і Telegram-бота співробітників (`staffBotCore.js` має імпортувати звідти після свого коміту).
-  Тести — `npm test` у `server/` (`estimateEngine.test.js`, `estimateActions.test.js` на фейковому Firestore + HTTP).
+- **Ядро розрахунків** — `server/estimateEngine.js`, СПІЛЬНИЙ файл із Telegram-ботом співробітників (сесія бота
+  винесла його сама; у нас побайтова копія + узгоджений рядок `clientKey` у `addExtraExpense`): чисті функції
+  (`recomputeTotals`, `applyEstimateDiscount`, `estimate2goods`, `needsReapproval`, `withLines`, `estimatePatch`,
+  `estimateBlocked`), права (`requestVisible`/`canEditRequest`/`canEditEstimate`) і `createEstimateOps` (транзакції
+  Firestore для витрат, результат `{ok, code, data|message}`). `server/estimateActions.js` додає лише
+  `createActualFromVariant` (`buildActualFromVariant`, ФОП з центру) і обгортки над ops (поточний факт заявки,
+  ідемпотентність за `clientKey`, коди контракту). Правило: `estimateEngine.js` у гілках бота і застосунку має
+  лишатися ідентичним — зміни семантики узгоджувати між сесіями. Тести — `npm test` у `server/`.
 - **Відкриті питання власнику (працюємо за умовчаннями):** політика комерційного статусу (1 — системний);
   право майстра складати факт з телефону (так, у своєму центрі з perm `actual`); позиції з прайсу з телефону (ні);
   калькуляції 1С (не показувати); полевое правило `estimateOffers` (не-адмін не змінює `selectedVariantId/status`) —
