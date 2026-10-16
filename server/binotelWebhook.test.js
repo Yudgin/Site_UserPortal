@@ -199,18 +199,18 @@ test('customerData: межі довжини, номер без нулів, ет�
 
   const buyer = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [], orders: [{ id: 'bo1', status: 'done', clientName: 'Сидоренко Олег', soldAt: '2025-06-12T09:00:00Z' }, { id: 'bo0', status: 'lead', clientName: 'Лід' }], siteUrl: 'https://x' })
   assert.equal(buyer.name, 'Сидоренко Олег')
-  assert.equal(buyer.description, 'Купив кораблик 12.06.2025, ремонтів не було')
+  assert.equal(buyer.description, 'Купив кораблик 12.06.2025, ремонтів у базі немає')
   assert.equal(buyer.linkToCrmUrl, 'https://x/boat-orders/bo1')
   // «ім'я» з цифр (телефон замість імені) пропускаємо
   assert.equal(buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [], orders: [{ id: 'b', status: 'done', clientName: '0671233727' }] }).name, '067 549 95 55')
 
   const nobody = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [], profile: null })
   assert.equal(nobody.name, '067 549 95 55')
-  assert.equal(nobody.description, 'Новий номер, заявок немає')
+  assert.equal(nobody.description, 'Немає в базі порталу')
   assert.equal(nobody.linkToCrmUrl, 'https://my.runferry.com/service-requests')
   const asked = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [], profile: { name: 'Олег' } })
   assert.equal(asked.name, 'Олег')
-  assert.equal(asked.description, 'Звертався, заявок немає')
+  assert.equal(asked.description, 'Звертався, заявок у базі немає')
   assert.equal(buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [] }).assignedToEmployeeNumber, undefined)
 })
 
@@ -443,7 +443,7 @@ test('ревʼю: шлях в іншому регістрі, тіло вже з�
     const base = `http://127.0.0.1:${server.address().port}/API/Binotel/call-settings`
     const rf = await fetch(base, { method: 'POST', body: FORM, headers: { 'x-binotel-token': 'test-token', 'content-type': 'application/x-www-form-urlencoded' } })
     assert.deepEqual((await rf.json()).routeData, { type: 'route', id: 466367 })
-    const rj = await fetch(base, { method: 'POST', body: JSON.stringify({ requestType: 'apiCallSettings', externalNumber: '0675499555', callType: 0 }), headers: { 'x-binotel-token': 'test-token', 'content-type': 'application/json' } })
+    const rj = await fetch(base, { method: 'POST', body: JSON.stringify({ requestType: 'apiCallSettings', externalNumber: '0675499555', pbxNumber: '0443338049', callType: 0 }), headers: { 'x-binotel-token': 'test-token', 'content-type': 'application/json' } })
     assert.deepEqual((await rj.json()).routeData, { type: 'route', id: 466367 })
   } finally { server.close(); delete process.env.BINOTEL_WEBHOOK_TOKEN }
 })
@@ -466,4 +466,47 @@ test('ревʼю: номер у заявці/замовленні без «+» �
   assert.ok(cancelled.description.startsWith('Останній ремонт №1234 · Скасовано'), cancelled.description)
   // майбутня позначка завершення рахується як дія
   assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(40), doneAt: daysAgo(3) }), NOW), true)
+})
+
+test('лінії: чужа лінія (camarad) і вхідний без pbxNumber → {} bypass-line; вихідний і lines [] — без фільтра', () => {
+  const routing = normalizeRouting({ scope: 'all', mode: 'route', routeId: 466367 })
+  assert.deepEqual(routing.lines, ['+380679278039', '+380443338049'])
+  const ours = decideCallSettings({ fields: { ...fields, pbxNumber: '0679278039' }, routing, lookup, nowMs: NOW })
+  assert.deepEqual(ours.response.routeData, { type: 'route', id: 466367 })
+  const camarad = decideCallSettings({ fields: { ...fields, pbxNumber: '0679468531' }, routing, lookup, nowMs: NOW })
+  assert.deepEqual(camarad, { response: {}, decision: 'bypass-line' })
+  assert.equal(decideCallSettings({ fields: { ...fields, pbxNumber: undefined }, routing, lookup, nowMs: NOW }).decision, 'bypass-line')
+  assert.equal(decideCallSettings({ fields: { ...fields, pbxNumber: '380443338049' }, routing, lookup, nowMs: NOW }).decision, 'route') // формат не важливий
+  const out = decideCallSettings({ fields: { ...fields, callType: '1', pbxNumber: undefined, internalNumber: '906' }, routing, lookup, nowMs: NOW })
+  assert.equal(out.decision, 'outgoing')
+  assert.ok(out.response.customerData)
+  const noFilter = normalizeRouting({ scope: 'all', mode: 'route', routeId: 466367, lines: [] })
+  assert.equal(decideCallSettings({ fields: { ...fields, pbxNumber: '0679468531' }, routing: noFilter, lookup, nowMs: NOW }).decision, 'route')
+  // тестовий номер на чужій лінії теж в обхід (фільтр лінії раніше за scope)
+  const test = normalizeRouting({ scope: 'test', testNumbers: ['0675499555'] })
+  assert.equal(decideCallSettings({ fields: { ...fields, pbxNumber: '0679468531' }, routing: test, lookup, nowMs: NOW }).decision, 'bypass-line')
+})
+
+test('відправлено (shipped): вікно doneGraceDays, а не 180 днів; дата купівлі лише з soldAt', () => {
+  const shipped = (n) => SR({ status: 'in_work', stage: 'shipped', createdAt: daysAgo(40), stageHistory: [{ stage: 'shipped', at: daysAgo(n), by: 'np-ttn' }] })
+  assert.equal(isOpen(shipped(5), NOW), true)
+  assert.equal(isOpen(shipped(20), NOW), false)
+  assert.equal(clientCategory({ requests: [shipped(20)] }, NOW), 'knownClient')
+  const noSold = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [], orders: [{ id: 'b', status: 'done', clientName: 'Олег', createdAt: '2026-07-18T10:00:00Z' }] })
+  assert.equal(noSold.description, 'Купив кораблик, ремонтів у базі немає')
+})
+
+test('ревʼю дельти: перехід 1c-sync у shipped — подія (не перший запис); опечатка в lines не вимикає фільтр', () => {
+  const sr = (hist) => SR({ status: 'in_work', stage: 'shipped', createdAt: daysAgo(25), stageHistory: hist })
+  // свіжа відправка з 1С після «отримано» → відкрита ще 14 днів
+  assert.equal(isOpen(sr([{ stage: 'received', at: daysAgo(40), by: '1c-sync' }, { stage: 'shipped', at: daysAgo(1), by: '1c-sync', note: 'ТТН 2045' }]), NOW), true)
+  // перший запис shipped від масового прогону — не подія
+  assert.equal(isOpen(sr([{ stage: 'shipped', at: daysAgo(1), by: '1c-sync' }]), NOW), false)
+  // інші записи 1c-sync, як і раніше, не рахуються
+  assert.equal(isOpen(SR({ status: 'new', createdAt: daysAgo(400), stageHistory: [{ stage: 'received', at: daysAgo(500), by: 'master@x' }, { stage: 'received', at: daysAgo(1), by: '1c-sync' }] }), NOW), false)
+  assert.deepEqual(normalizeRouting({ lines: ['0679278039, 0443338049'] }).lines, ['+380679278039', '+380443338049'])
+  assert.deepEqual(normalizeRouting({ lines: ['06792780399'] }).lines, DEFAULT_ROUTING.lines)
+  assert.deepEqual(normalizeRouting({ lines: [null, ''] }).lines, DEFAULT_ROUTING.lines)
+  assert.deepEqual(normalizeRouting({ lines: [] }).lines, [])
+  assert.deepEqual(normalizeRouting({ lines: [679278039] }).lines, ['+380679278039'])
 })
