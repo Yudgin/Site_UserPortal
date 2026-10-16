@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -116,6 +117,13 @@ class Ev {
   Ev &strOrNull(const char *k, const std::string &v) { return v.empty() ? null(k) : str(k, v); }
   Ev &num(const char *k, long long v) { key(k); b_ += std::to_string(v); return *this; }
   Ev &boolean(const char *k, bool v) { key(k); b_ += v ? "true" : "false"; return *this; }
+  Ev &real(const char *k, double v) {
+    char b[32];
+    snprintf(b, sizeof b, "%.2f", std::isfinite(v) ? v : 0.0);
+    key(k);
+    b_ += b;
+    return *this;
+  }
   Ev &null(const char *k) { key(k); b_ += "null"; return *this; }
   Ev &call(int eid) {
     callId_ = eid;
@@ -473,6 +481,9 @@ struct CallRec {
   bool playerOn = false;  // програвач уже передає у дзвінок
   int bridgePeer = 0;
   bool silent = false;    // відхилений рушієм (чужа адреса): мозку про нього не повідомляємо
+  AudioMediaRecorder *rec = nullptr;  // запис голосу співрозмовника (голосова пошта)
+  bool recOn = false;                 // звук виклику вже йде в запис
+  std::string recFile;
 };
 
 static Endpoint *g_ep = nullptr;
@@ -523,6 +534,24 @@ struct DeadPlayer {
 };
 static std::vector<DeadPlayer> g_deadPlayers;
 static const auto kPlayerLinger = std::chrono::milliseconds(1000);
+
+// Запис, що закривається: об'єкт видаляємо в головному циклі, а WAV дописує (заголовок із довжиною) потік мосту —
+// видалення порту з конференції асинхронне. record_done шлемо, коли заголовок оновився, або через kRecFinalWait.
+struct DeadRec {
+  AudioMediaRecorder *rec;
+  int eid;
+  std::string file;
+  std::string why;
+};
+static std::vector<DeadRec> g_deadRecs;
+struct ClosingRec {
+  int eid;
+  std::string file;
+  std::string why;
+  Clock::time_point at;
+};
+static std::vector<ClosingRec> g_closingRecs;
+static const auto kRecFinalWait = std::chrono::milliseconds(1500);
 
 // Кінець файлу програвача: колбек приходить з медіапотоку, тож лише черга
 struct EofNote {
@@ -611,6 +640,38 @@ static void startPlayer(CallRec &r) {
   }
 }
 
+// Запис: звук виклику (голос співрозмовника) → рекордер; якщо медіа ще немає — під'єднаємо в onCallMediaState.
+// false і причина в why — під'єднати не вдалося (медіа є, а startTransmit кинув виняток).
+static bool startRecorder(CallRec &r, std::string *why = nullptr) {
+  if (!r.rec || r.recOn || r.ended || !r.mediaActive || !r.call) return false;
+  try {
+    AudioMedia am = r.call->getAudioMedia(-1);
+    am.startTransmit(*r.rec);
+    r.recOn = true;
+    return true;
+  } catch (Error &e) {
+    logf("call %d: recorder start failed: %s", r.eid, e.reason.c_str());
+    if (why) *why = e.reason.empty() ? e.info() : e.reason;
+    return false;
+  }
+}
+
+// Запис більше не потрібен (record_stop, кінець виклику, вихід): від'єднати й віддати на закриття в головному циклі
+static void dropRecorder(CallRec &r, const char *why) {
+  if (!r.rec) return;
+  if (r.recOn && !r.ended && r.mediaActive && r.call) {
+    try {
+      AudioMedia am = r.call->getAudioMedia(-1);
+      am.stopTransmit(*r.rec);
+    } catch (Error &) {
+    }
+  }
+  g_deadRecs.push_back({r.rec, r.eid, r.recFile, why});
+  r.rec = nullptr;
+  r.recOn = false;
+  r.recFile.clear();
+}
+
 static void linkBridge(CallRec &a) {
   if (!a.bridgePeer || a.ended || !a.mediaActive) return;
   CallRec *b = findRec(a.bridgePeer);
@@ -658,6 +719,7 @@ void GwCall::onCallState(OnCallStateParam &) {
     r->ended = true;
     unlinkBridge(*r);
     dropPlayer(*r);
+    dropRecorder(*r, "hangup");
     g_deadCalls.push_back(eid_);  // видалимо об'єкт у головному циклі
   }
   if (r->silent) return;
@@ -677,12 +739,13 @@ void GwCall::onCallMediaState(OnCallMediaStateParam &) {
   }
   if (active != r->mediaActive) {
     r->mediaActive = active;
-    if (!active) r->playerOn = false;  // порт міг зникнути
+    if (!active) r->playerOn = r->recOn = false;  // порт міг зникнути
     Ev("media").call(eid_).boolean("active", active).emit();
   }
   if (active) {
-    r->playerOn = false;  // медіа могли перестворити — під'єднуємо заново
+    r->playerOn = r->recOn = false;  // медіа могли перестворити — під'єднуємо заново
     startPlayer(*r);
+    startRecorder(*r);
     linkBridge(*r);
   }
 }
@@ -1024,6 +1087,50 @@ static void cmdStop(const JObj &o) {
   if (r) dropPlayer(*r);
 }
 
+// Запис голосу співрозмовника у WAV (PCM 16 біт, моно, 8 кГц — частота мосту). Файл новий: наявний не
+// перезаписуємо; теку створює мозок. Права — 0600 (umask 077 рушія).
+static void cmdRecord(const JObj &o) {
+  int eid = 0;
+  CallRec *r = liveRec(o, "call", "record", &eid);
+  if (!r) return;
+  std::string file;
+  if (!getStr(o, "file", file) || file.empty()) return emitError("record", eid, "", "need file");
+  if (file[0] != '/' || file.size() < 5 || !ieq(file.substr(file.size() - 4), ".wav"))
+    return emitError("record", eid, "", "file must be an absolute path to .wav");
+  if (r->rec) return emitError("record", eid, "", "already recording");
+  if (access(file.c_str(), F_OK) == 0) return emitError("record", eid, "", "file exists: " + file);
+  AudioMediaRecorder *rec = new AudioMediaRecorder();
+  try {
+    rec->createRecorder(file);
+  } catch (Error &e) {
+    delete rec;
+    unlink(file.c_str());  // pjmedia міг устигнути створити порожній файл
+    return emitError("record", eid, "", e.reason.empty() ? e.info() : e.reason);
+  }
+  r->rec = rec;
+  r->recOn = false;
+  r->recFile = file;
+  std::string why;
+  if (r->mediaActive && !startRecorder(*r, &why)) {
+    // Звук до запису не йде: без помилки мозок «писав» би тишу до voicemailMaxSec і вважав це повідомленням.
+    // Рекордер у міст не під'єднаний — прибираємо одразу, порожній файл видаляємо.
+    r->rec = nullptr;
+    r->recFile.clear();
+    delete rec;
+    unlink(file.c_str());
+    return emitError("record", eid, "", "recorder start failed: " + why);
+  }
+  logf("call %d: recording", eid);  // шлях не друкуємо: у ньому останні цифри номера
+}
+
+static void cmdRecordStop(const JObj &o) {
+  int eid = 0;
+  CallRec *r = liveRec(o, "call", "record_stop", &eid);
+  if (!r) return;
+  if (!r->rec) return emitError("record_stop", eid, "", "not recording");
+  dropRecorder(*r, "stop");
+}
+
 static void cmdDial(const JObj &o) {
   std::string ref, uri;
   getStr(o, "ref", ref);
@@ -1146,6 +1253,8 @@ static void handleLine(std::string &line) {
   else if (cmd == "xfer") cmdXfer(o);
   else if (cmd == "xfer_replaces") cmdXferReplaces(o);
   else if (cmd == "bridge") cmdBridge(o);
+  else if (cmd == "record") cmdRecord(o);
+  else if (cmd == "record_stop") cmdRecordStop(o);
   else if (cmd == "quit") g_quit = true;
   else emitError(cmd, 0, "", "unknown cmd");
   auto pw = o.find("password");
@@ -1186,8 +1295,66 @@ static void processRejects() {
   }
 }
 
+// Довжина звуку в WAV із заголовка: data-чанк і байт/с із fmt. false — файлу немає або це не RIFF/WAVE.
+static bool wavInfo(const std::string &file, long long &dataLen, long long &byteRate, long long &fileSize) {
+  struct stat st;
+  if (stat(file.c_str(), &st) != 0) return false;
+  fileSize = (long long)st.st_size;
+  FILE *f = fopen(file.c_str(), "rb");
+  if (!f) return false;
+  unsigned char h[512];
+  size_t n = fread(h, 1, sizeof h, f);
+  fclose(f);
+  if (n < 12 || memcmp(h, "RIFF", 4) != 0 || memcmp(h + 8, "WAVE", 4) != 0) return false;
+  auto u32 = [&](size_t at) { return (long long)h[at] | ((long long)h[at + 1] << 8) | ((long long)h[at + 2] << 16) | ((long long)h[at + 3] << 24); };
+  dataLen = -1;
+  byteRate = 16000;
+  size_t off = 12;
+  while (off + 8 <= n) {
+    long long len = u32(off + 4);
+    if (memcmp(h + off, "fmt ", 4) == 0 && off + 20 <= n) byteRate = u32(off + 16);
+    if (memcmp(h + off, "data", 4) == 0) {
+      dataLen = len;
+      break;
+    }
+    off += 8 + (size_t)len + (size_t)(len & 1);
+  }
+  if (byteRate <= 0) byteRate = 16000;
+  return dataLen >= 0;
+}
+
+// record_done: заголовок WAV уже з довжиною (порт закрито) або минуло kRecFinalWait. force — після libDestroy.
+static void processRecs(bool force = false) {
+  if (g_closingRecs.empty()) return;
+  auto now = Clock::now();
+  std::vector<ClosingRec> keep;
+  for (const auto &c : g_closingRecs) {
+    long long len = -1, rate = 16000, size = 0;
+    bool ok = wavInfo(c.file, len, rate, size);
+    bool finalHdr = ok && len > 0;
+    if (!finalHdr && !force && now - c.at < kRecFinalWait) {
+      keep.push_back(c);
+      continue;
+    }
+    double sec = 0;
+    if (finalHdr) sec = (double)len / (double)rate;
+    else if (size > 44) sec = (double)(size - 44) / (double)rate;  // заголовок не оновився — оцінка за розміром
+    Ev e("record_done");
+    e.call(c.eid).str("file", c.file).real("sec", sec).str("reason", c.why).boolean("final", finalHdr);
+    if (!ok && size == 0) e.boolean("missing", true);
+    e.emit();
+    logf("call %d: recording closed (%s, %.1f s%s)", c.eid, c.why.c_str(), sec, finalHdr ? "" : ", header not final");
+  }
+  g_closingRecs.swap(keep);
+}
+
 // Відкладене видалення програвачів і дзвінків (ніколи не з їхніх власних колбеків)
 static void reap(bool all = false) {
+  for (auto &d : g_deadRecs) {
+    delete d.rec;  // порт знімається з мосту асинхронно; WAV закриє потік мосту
+    g_closingRecs.push_back({d.eid, d.file, d.why, Clock::now()});
+  }
+  g_deadRecs.clear();
   if (!g_deadPlayers.empty()) {
     auto now = Clock::now();
     std::vector<DeadPlayer> keep;
@@ -1220,6 +1387,7 @@ static void pump(int ms, const std::function<bool()> &done) {
     processRejects();
     processEof();
     reap();
+    processRecs();
   }
 }
 
@@ -1251,6 +1419,7 @@ static void shutdownAll() {
   reap();
   for (auto &kv : g_calls) {
     dropPlayer(kv.second);
+    dropRecorder(kv.second, "shutdown");
     delete kv.second.call;  // деструктор сам покладе, якщо ще живий
     kv.second.call = nullptr;
   }
@@ -1263,6 +1432,7 @@ static void shutdownAll() {
   } catch (Error &e) {
     logf("libDestroy: %s", e.reason.c_str());
   }
+  processRecs(true);  // міст знищено — усі WAV закриті
 }
 
 // Журнал pjsip з текстами SIP (рівень 4+): значення Authorization/Proxy-Authorization (digest response —
@@ -1325,6 +1495,7 @@ static void onSignal(int sig) { g_signal = sig; }
 
 int main() {
   signal(SIGPIPE, SIG_IGN);
+  umask(077);  // записи голосової пошти (голос клієнта) — лише власнику
   struct sigaction sa;
   memset(&sa, 0, sizeof sa);
   sa.sa_handler = onSignal;
@@ -1373,7 +1544,7 @@ int main() {
     Ev("error").null("cmd").null("call").null("ref").str("msg", "init failed: " + e.reason).emit();
     return 1;
   }
-  Ev("ready").emit();
+  Ev("ready").boolean("record", true).emit();  // record — рушій уміє record/record_stop (голосова пошта)
 
   std::string inbuf;
   bool eof = false;
@@ -1418,6 +1589,7 @@ int main() {
     processRejects();
     processEof();
     reap();
+    processRecs();
   }
   if (g_signal) logf("signal %d", (int)g_signal);
   shutdownAll();

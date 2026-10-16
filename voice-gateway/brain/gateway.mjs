@@ -9,14 +9,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
 import { Writable } from 'node:stream'
-import { loadConfig, extUri } from './config.mjs'
+import { loadConfig, extUri, isOff } from './config.mjs'
 import { startEngine } from './engine.mjs'
 import { createDispatcher, callerAllowed, maskNumber } from './flow.mjs'
 import { buildCard } from './card.mjs'
 import { makeTts, readWavInfo, isTelephonyWav } from './tts.mjs'
 import { makeTokenSource, accessSecret } from './gcp.mjs'
 import { makeJournal } from './journal.mjs'
-import { ensurePrivateDir, makeDailyLog, pruneGatewayData } from './storage.mjs'
+import { ensurePrivateDir, makeDailyLog, pruneGatewayData, makeVoicemailPath, ensureBeep, repairVoicemailHeaders, repairWavHeader, findGitRoot } from './storage.mjs'
 
 // ---------- аргументи ----------
 
@@ -25,13 +25,15 @@ const USAGE = `Использование:
   node gateway.mjs --local --manager URI   локальная проверка без АТС (аккаунт sip:gw@127.0.0.1:5092)
 Флаги:
   --manager 907|URI   кому звонить с карточкой (по умолчанию 907)
-  --fallback 906|URI  запасная линия, если менеджер не взял (по умолчанию 906; в --local = --manager)
+  --fallback 906|URI  запасная линия, если менеджер не взял: тоже набор, карточка и REFER/Replaces
+                      (по умолчанию 906; в --local = --manager; none — без неё, сразу голосовая почта)
   --allow +380…,…     добавить разрешённых звонящих (внутренние — 3-значные без X-BINOTEL-GCID — разрешены всегда)
   --no-tts            без синтеза карточки        --no-lookup   без поиска клиента в Firestore
   --card file.wav     готовая карточка, если синтез выключен или не удался
   --server host       SIP-сервер (реальный режим, по умолчанию sip14.binotel.com)
   --bind IP --port N --user NAME   адрес локального режима (127.0.0.1, 5092, gw)
-  --engine PATH       путь к sip-engine     --max-calls N   одновременных звонков (по умолчанию 2)`
+  --engine PATH       путь к sip-engine (или env VG_ENGINE_PATH; с записью голосовой почты — engine/sip-engine-next)
+  --max-calls N       одновременных звонков (по умолчанию 2)`
 
 export function parseArgs(argv) {
   const o = { local: false, tts: true, lookup: true, allow: [] }
@@ -153,14 +155,21 @@ function checkPrompt(label, file, { required }) {
 }
 
 const secs = (ms) => (ms == null ? '—' : `${(ms / 1000).toFixed(1)} с`)
+const ABORTED = { shutdown: 'остановка шлюза', engine_exit: 'движок упал' }
 
-function summary(e) {
+export function summary(e) {
   const t = e.t || {}
-  const bits = [`итог ${e.number || 'без номера'}: ${e.outcome}${e.reason ? ` (${e.reason})` : ''}`]
+  const why = [e.reason, e.fallbackReason].filter(Boolean).join(', ')
+  const bits = [`итог ${e.number || 'без номера'}: ${e.outcome}${why ? ` (${why})` : ''}`]
+  if (e.abortReason) bits.push(`прерван: ${ABORTED[e.abortReason] || e.abortReason}`)
   if (t.managerAnswered != null) bits.push(`менеджер ответил через ${secs(t.managerAnswered)}`)
-  if (t.xfer != null) bits.push(`перевод на ${secs(t.xfer)}`)
+  if (t.fbAnswered != null) bits.push(`запасная ответила через ${secs(t.fbAnswered)}`)
+  if (t.xfer != null || t.fbXfer != null) bits.push(`перевод на ${secs(t.fbXfer ?? t.xfer)}`)
   if (e.retries) bits.push(`повторов набора ${e.retries}`)
+  if (e.fallbackRetries) bits.push(`повторов набора запасной ${e.fallbackRetries}`)
   if (e.cardSource) bits.push(`карточка: ${e.cardSource}`)
+  if (e.voicemail?.empty) bits.push(`сообщения нет (запись ${e.voicemail.sec != null ? `${e.voicemail.sec.toFixed(1)} с` : '—'}${e.voicemail.removed ? ', пустой файл удалён' : ''})`)
+  else if (e.voicemail?.file) bits.push(`сообщение ${e.voicemail.sec != null ? `${e.voicemail.sec.toFixed(1)} с` : '(длина неизвестна)'}: ${e.voicemail.file}`)
   if (e.errors?.length) bits.push(`ошибок ${e.errors.length}`)
   return bits.join(', ')
 }
@@ -194,16 +203,18 @@ async function main() {
       process.exit(2)
     }
     config.managerUri = args.manager
-    config.fallbackUri = args.fallback || args.manager
+    config.fallbackUri = isOff(args.fallback) ? '' : args.fallback || args.manager
   }
   // Реальний режим: номер лінії або URI як задано (прапорець → VG_* → 907/906); URI — коли відомий сервер лінії
   const managerRaw = args.manager || config.manager
-  const fallbackRaw = args.fallback || config.fallback
+  const fallbackRaw = args.fallback != null ? (isOff(args.fallback) ? '' : args.fallback) : config.fallback
 
   try {
     config.greetingFile = checkPrompt('приветствие', config.greetingFile, { required: true })
     config.holdFile = checkPrompt('ожидание', config.holdFile, { required: true })
     config.genericCardFile = checkPrompt('общая карточка', config.genericCardFile, { required: false })
+    config.voicemailPromptFile = checkPrompt('голосовая почта', config.voicemailPromptFile, { required: false })
+    if (config.beepFile) config.beepFile = checkPrompt('сигнал перед записью', config.beepFile, { required: false })
   } catch (e) {
     warn(e.message)
     process.exit(2)
@@ -252,7 +263,7 @@ async function main() {
     }
     config.sipServer = line.server
     config.managerUri = extUri(managerRaw, config.sipServer)
-    config.fallbackUri = extUri(fallbackRaw, config.sipServer)
+    config.fallbackUri = fallbackRaw ? extUri(fallbackRaw, config.sipServer) : ''
   }
 
   // Синтез і пошук — необов'язкові: не вдалося підготувати → дзвінки йдуть без картки / лише з номером
@@ -278,10 +289,29 @@ async function main() {
   // Дані шлюзу (номери, імена голосом у кеші) — лише власнику; старе прибираємо на старті й раз на 6 год
   const logDir = path.join(config.dataDir, 'logs')
   for (const d of [config.dataDir, logDir, config.cacheDir]) ensurePrivateDir(d)
+  status(`данные шлюза (журнал, логи, голосовые сообщения): ${config.dataDir}`)
+  const gitRoot = findGitRoot(config.dataDir)
+  if (gitRoot) warn(`данные шлюза лежат внутри рабочей копии git (${gitRoot}): удалят её (worktree после слияния) — пропадут журнал и голосовые сообщения клиентов. Задайте VG_DATA_DIR вне репозитория`)
+  // Рушій упав під час запису минулого разу — WAV без довжини в заголовку: лагодимо (звук у файлі є)
+  try {
+    const fixed = repairVoicemailHeaders({ dataDir: config.dataDir })
+    if (fixed) status(`исправлен заголовок WAV у голосовых сообщений после падения движка: ${fixed}`)
+  } catch (e) {
+    warn(`проверка голосовых сообщений: ${e.message}`)
+  }
+  // Сигнал перед записом голосової пошти: свій файл (VG_BEEP_WAV) або один раз згенерований тон 1 кГц 0,4 с у кеші
+  if (!config.beepFile) {
+    try {
+      config.beepFile = ensureBeep({ cacheDir: config.cacheDir })
+    } catch (e) {
+      warn(`сигнал перед записью: ${e.message} — запись без сигнала`)
+    }
+  }
   const prune = () => {
     try {
+      repairVoicemailHeaders({ dataDir: config.dataDir, minAgeMs: 120000 }) // свіжі файли ще може писати рушій
       const n = pruneGatewayData({ dataDir: config.dataDir, cacheDir: config.cacheDir, retentionDays: config.retentionDays })
-      if (n) status(`удалено старых файлов: ${n} (логи > ${config.retentionDays.logs} дн, карточки > ${config.retentionDays.cache} дн, журнал > ${config.retentionDays.journal} дн)`)
+      if (n) status(`удалено старых файлов: ${n} (логи > ${config.retentionDays.logs} дн, карточки > ${config.retentionDays.cache} дн, журнал > ${config.retentionDays.journal} дн, голосовые сообщения > ${config.retentionDays.voicemail} дн)`)
     } catch (e) {
       warn(`очистка старых файлов: ${e.message}`)
     }
@@ -294,7 +324,7 @@ async function main() {
   const engineLog = makeDailyLog({ dir: logDir, prefix: 'engine', timeZone: config.timeZone })
   const traceLog = config.trace ? makeDailyLog({ dir: logDir, prefix: 'brain', timeZone: config.timeZone }) : null
 
-  status(`режим: ${args.local ? 'локальный' : 'линия Binotel'}; менеджер ${config.managerUri}; запасная ${config.fallbackUri}`)
+  status(`режим: ${args.local ? 'локальный' : 'линия Binotel'}; менеджер ${config.managerUri}; запасная ${config.fallbackUri || 'нет'}${config.fallbackUri ? (config.fallbackMode === 'blind' ? ' (слепой перевод)' : ' (набор, карточка, REFER/Replaces)') : ''}; голосовая почта ${config.voicemailEnabled ? `до ${config.voicemailMaxSec} с` : 'выкл'}; движок ${config.enginePath}`)
   const internal = config.allowedInternal.length ? `внутренние ${config.allowedInternal.join(', ')}` : 'внутренние'
   if (!config.allowedCallers.length) status('ВНИМАНИЕ: список разрешённых звонящих пуст — все внешние звонки получат «занято» и пойдут дальше по сценарию Binotel. Задайте VG_ALLOWED_CALLERS или --allow.')
   status(`разрешены: ${config.allowedCallers.join(', ') || 'никто'} + ${internal}; синтез ${config.ttsEnabled ? 'вкл' : 'выкл'}; поиск ${config.lookupEnabled ? 'вкл' : 'выкл'}${config.genericCardFile ? '; общая карточка есть' : ''}${config.trace ? '; трасса вкл' : ''}`)
@@ -312,6 +342,7 @@ async function main() {
   let stopping = false
   let restartTimer = null
   const untrustedSeen = new Map() // IP → коли востаннє показували (сканери шлють сотні INVITE)
+  let warnedNoRecord = false
 
   // Перед виходом дописати логи на диск (process.exit не чекає на потоки), але не довше 1 с
   const flushLogs = () => Promise.race([
@@ -331,8 +362,26 @@ async function main() {
       lookup,
       buildCard: (res, o) => buildCard(res, { ...o, nowMs: Date.now() }),
       tts,
+      voicemailPath: (o) => makeVoicemailPath({ dataDir: config.dataDir, timeZone: config.timeZone, ...o }),
       log: status,
       onDone: (entry) => {
+        const vm = entry.voicemail
+        if (vm?.file && vm.empty) {
+          // Порожнє повідомлення (клієнт поклав одразу після сигналу): файл без звуку не лишаємо, у журналі — підсумок
+          try {
+            fs.unlinkSync(vm.file)
+            vm.file = null
+            vm.removed = true
+          } catch (e) {
+            if (e.code === 'ENOENT') vm.file = null
+            else warn(`пустое голосовое сообщение не удалено: ${e.message}`)
+          }
+        } else if (vm?.file) {
+          // запис голосу клієнта — лише власнику (рушій створює його з umask 077; страховка для інших збірок)
+          try { fs.chmodSync(vm.file, 0o600) } catch { /* файлу немає */ }
+          // рушій упав під час запису — заголовок без довжини: рушія вже немає, лагодимо одразу
+          if (entry.abortReason === 'engine_exit' && repairWavHeader(vm.file)) status('заголовок WAV сообщения исправлен после падения движка')
+        }
         try {
           journal(entry)
         } catch (e) {
@@ -351,6 +400,12 @@ async function main() {
       switch (ev.ev) {
         case 'ready':
           clearTimeout(readyTimer)
+          // Старий рушій (без команди record) — голосової пошти немає: дзвінок, який ніхто не взяв, кладемо
+          config.recordSupported = ev.record === true
+          if (!config.recordSupported && config.voicemailEnabled && !warnedNoRecord) {
+            warnedNoRecord = true
+            warn(`движок ${config.enginePath} не умеет запись — голосовой почты не будет. Новый движок: make -C voice-gateway/engine sip-engine-next и VG_ENGINE_PATH=voice-gateway/engine/sip-engine-next`)
+          }
           if (args.local) {
             const bind = args.bind || '127.0.0.1'
             const port = args.port || 5092

@@ -23,11 +23,13 @@ SYS_LIBS := -L$(SSL)/lib -lssl -lcrypto -lm -lpthread \
   -framework QuartzCore -framework CoreVideo -framework CoreMedia -framework Metal \
   -framework MetalKit -framework VideoToolbox
 
-sip-engine: engine.cpp Makefile
+# sip-engine-next — та сама збірка під іншим ім'ям: новий рушій можна зібрати й перевірити, поки шлюз працює
+# зі старим sip-engine (його файл під живим процесом не перезаписуємо); шлюз бере його з VG_ENGINE_PATH / --engine.
+sip-engine sip-engine-next: engine.cpp Makefile
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ engine.cpp $(PJ_LIBS) $(SYS_LIBS)
 
 clean:
-	rm -f sip-engine
-	rm -rf sip-engine.dSYM
+	rm -f sip-engine sip-engine-next
+	rm -rf sip-engine.dSYM sip-engine-next.dSYM
 
 .PHONY: clean

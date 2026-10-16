@@ -32,6 +32,18 @@ export function wavFromPcm16(pcm, rate = RATE, channels = 1) {
   return Buffer.concat([h, data])
 }
 
+// Чистий тон (сигнал «говоріть після сигналу»): WAV PCM 16 біт моно, з плавним наростанням/спадом без клацань.
+export function toneWav({ freq = 1000, ms = 400, rate = RATE, amp = 0.35, fadeMs = 10 } = {}) {
+  const n = Math.round((rate * ms) / 1000)
+  const fade = Math.max(1, Math.round((rate * fadeMs) / 1000))
+  const pcm = Buffer.alloc(n * 2)
+  for (let i = 0; i < n; i++) {
+    const env = Math.min(1, i / fade, (n - 1 - i) / fade)
+    pcm.writeInt16LE(Math.round(Math.sin((2 * Math.PI * freq * i) / rate) * amp * env * 32767), i * 2)
+  }
+  return wavFromPcm16(pcm, rate)
+}
+
 // Формат WAV-файлу з диска: {format, channels, rate, bits} або null, якщо це не RIFF/WAVE. Чанки йдуть у будь-якому
 // порядку (LIST перед data тощо) — шукаємо 'fmt '.
 export function readWavInfo(buf) {

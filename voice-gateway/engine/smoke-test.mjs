@@ -219,7 +219,8 @@ async function quitPeers() { await Promise.all(peers.map((p) => p.quit())); peer
 
 await step('0. старт рушія, локальний режим, помилки на невідомі виклики', async () => {
   eng = startEngine('engine-local')
-  await eng.wait((e) => e.ev === 'ready', 3000, 'ready')
+  const ready = await eng.wait((e) => e.ev === 'ready', 3000, 'ready')
+  assert(ready.record === true, `ready без record: ${JSON.stringify(ready)}`)
   eng.send({ cmd: 'local', bind: '127.0.0.1', port: 5092, user: 'gw' })
   const reg = await eng.wait((e) => e.ev === 'reg', 3000, 'reg (local)')
   assert(reg.active === true && reg.code === 200, 'local: reg.active')
@@ -397,6 +398,73 @@ await step('5. локальний міст bridge A↔B: звук P2 доход�
   const a = wavActiveSeconds(p1.recPath)
   say(`  P1 записав ${a.total.toFixed(1)} с, із них звуку ${a.active.toFixed(2)} с (утримання від P2 через міст)`)
   assert(a.active >= 1.5, 'звук через міст не дійшов')
+})
+
+// Формат WAV із заголовка: {rate, channels, bits, dataLen} (dataLen — поле data-чанка)
+function wavHeader(file) {
+  const b = fs.readFileSync(file)
+  let off = 12
+  const h = { riff: b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WAVE' }
+  while (off + 8 <= b.length) {
+    const id = b.toString('ascii', off, off + 4)
+    const len = b.readUInt32LE(off + 4)
+    if (id === 'fmt ') Object.assign(h, { format: b.readUInt16LE(off + 8), channels: b.readUInt16LE(off + 10), rate: b.readUInt32LE(off + 12), bits: b.readUInt16LE(off + 22) })
+    if (id === 'data') { h.dataLen = len; break }
+    off += 8 + len + (len & 1)
+  }
+  return h
+}
+
+await step('5b. запис record/record_stop: голос P1 у WAV 0600 і record_done з тривалістю; відбій під час запису — record_done hangup', async () => {
+  const recDir = path.join(WORK, 'rec')
+  fs.mkdirSync(recDir, { recursive: true, mode: 0o700 })
+  const p1 = await startPeer('s5b-p1', 5091, 6000, { autoPlay: HOLD }) // P1 безперервно «говорить» записом утримання
+  peers.push(p1)
+  eng.send({ cmd: 'record', call: 996, file: path.join(recDir, 'x.wav') })
+  await eng.wait((e) => e.ev === 'error' && e.cmd === 'record' && e.call === 996, 2000, 'error record на невідомий виклик')
+  eng.send({ cmd: 'dial', ref: 'rec-1', uri: 'sip:peer@127.0.0.1:5091;transport=udp' })
+  const d = await eng.wait((e) => e.ev === 'dialing' && e.ref === 'rec-1', 3000, 'dialing')
+  await eng.wait((e) => e.ev === 'media' && e.call === d.call && e.active, 5000, 'media')
+  eng.send({ cmd: 'record', call: d.call, file: 'rel.wav' })
+  await eng.wait((e) => e.ev === 'error' && e.cmd === 'record' && e.call === d.call && /absolute/.test(e.msg), 2000, 'error: відносний шлях')
+  const f1 = path.join(recDir, 'vm-1.wav')
+  eng.send({ cmd: 'record', call: d.call, file: f1 })
+  eng.send({ cmd: 'record', call: d.call, file: path.join(recDir, 'vm-dup.wav') })
+  await eng.wait((e) => e.ev === 'error' && e.cmd === 'record' && /already/.test(e.msg), 2000, 'error: запис уже йде')
+  await sleep(2500)
+  eng.send({ cmd: 'record_stop', call: d.call })
+  const r1 = await eng.wait((e) => e.ev === 'record_done' && e.call === d.call, 4000, 'record_done після record_stop')
+  say(`  record_done: ${JSON.stringify(r1)}`)
+  assert(r1.file === f1 && r1.reason === 'stop' && r1.final === true, `record_done ${JSON.stringify(r1)}`)
+  assert(r1.sec > 1.8 && r1.sec < 3.6, `тривалість ${r1.sec}`)
+  const h1 = wavHeader(f1)
+  assert(h1.riff && h1.format === 1 && h1.channels === 1 && h1.rate === 8000 && h1.bits === 16, `формат ${JSON.stringify(h1)}`)
+  assert(Math.abs(h1.dataLen / 16000 - r1.sec) < 0.05, `заголовок ${h1.dataLen} Б ≠ ${r1.sec} с`)
+  const mode = fs.statSync(f1).mode & 0o777
+  assert(mode === 0o600, `права файлу ${mode.toString(8)}`)
+  const a1 = wavActiveSeconds(f1)
+  say(`  запис 1: ${a1.total.toFixed(2)} с, звуку ${a1.active.toFixed(2)} с, права ${mode.toString(8)}`)
+  assert(a1.active >= 1.5, 'у записі немає голосу P1')
+  eng.send({ cmd: 'record_stop', call: d.call })
+  await eng.wait((e) => e.ev === 'error' && e.cmd === 'record_stop' && /not recording/.test(e.msg), 2000, 'error: запису немає')
+  eng.send({ cmd: 'record', call: d.call, file: f1 })
+  await eng.wait((e) => e.ev === 'error' && e.cmd === 'record' && /exists/.test(e.msg), 2000, 'error: файл уже є')
+  assert(wavHeader(f1).dataLen === h1.dataLen, 'наявний запис перезаписано')
+  // другий запис того ж виклику, і P1 кладе трубку посеред нього — рушій сам закриває файл
+  const f2 = path.join(recDir, 'vm-2.wav')
+  eng.send({ cmd: 'record', call: d.call, file: f2 })
+  await sleep(1500)
+  p1.cmd('h')
+  await eng.wait((e) => e.ev === 'state' && e.call === d.call && e.state === 'DISCONNECTED', 5000, 'DISCONNECTED')
+  const r2 = await eng.wait((e) => e.ev === 'record_done' && e.call === d.call, 4000, 'record_done після відбою')
+  say(`  record_done: ${JSON.stringify(r2)}`)
+  assert(r2.file === f2 && r2.reason === 'hangup' && r2.final === true, `record_done ${JSON.stringify(r2)}`)
+  assert(r2.sec > 0.8 && r2.sec < 2.6, `тривалість ${r2.sec}`)
+  const iDown = eng.events.findIndex((e) => e.ev === 'state' && e.call === d.call && e.state === 'DISCONNECTED')
+  assert(iDown >= 0 && iDown < eng.events.indexOf(r2), 'record_done має йти після DISCONNECTED')
+  const a2 = wavActiveSeconds(f2)
+  say(`  запис 2: ${a2.total.toFixed(2)} с, звуку ${a2.active.toFixed(2)} с`)
+  assert(a2.active >= 0.8, 'у другому записі немає голосу P1')
 })
 
 await step('6. quit: рушій виходить з кодом 0, stdout — лише JSON', async () => {

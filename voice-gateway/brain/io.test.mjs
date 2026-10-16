@@ -4,13 +4,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { makeTts, wavFromPcm16, readWavInfo, isTelephonyWav, sha1, VOICE_SETTINGS } from './tts.mjs'
+import { makeTts, wavFromPcm16, readWavInfo, isTelephonyWav, sha1, VOICE_SETTINGS, toneWav } from './tts.mjs'
 import { makeTokenSource, accessSecret } from './gcp.mjs'
 import { makeJournal } from './journal.mjs'
 import { startEngine, redact, redactEvent } from './engine.mjs'
-import { makeDailyLog, pruneOld, pruneGatewayData, ensurePrivateDir } from './storage.mjs'
-import { parseLineSecret, clean, makePrompter } from './gateway.mjs'
-import { loadConfig, extUri } from './config.mjs'
+import { makeDailyLog, pruneOld, pruneGatewayData, ensurePrivateDir, makeVoicemailPath, ensureBeep, BEEP_NAME, repairWavHeader, repairVoicemailHeaders, findGitRoot } from './storage.mjs'
+import { parseLineSecret, clean, makePrompter, summary } from './gateway.mjs'
+import { loadConfig, extUri, isOff, defaultDataDir, GATEWAY_DIR } from './config.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -226,11 +226,158 @@ test('config: траса типово вимкнена; менеджер/зап�
   assert.deepEqual(c.allowedInternal, [])
   assert.equal(c.fallbackRingMs, 90000)
   assert.equal(c.bridgeMaxMin, 60)
-  assert.deepEqual(c.retentionDays, { logs: 14, cache: 30, journal: 90 })
+  assert.deepEqual(c.retentionDays, { logs: 14, cache: 30, journal: 90, voicemail: 90 })
   const c2 = loadConfig({ VG_MANAGER: '905', VG_ALLOWED_INTERNAL: '907, 906', VG_SIP_TRUST: '45.91.130.64 1.2.3.4' })
   assert.equal(extUri(c2.manager, 'sip15.binotel.com'), 'sip:905@sip15.binotel.com;transport=udp')
   assert.deepEqual(c2.allowedInternal, ['907', '906'])
   assert.equal(c2.sipTrust, '45.91.130.64,1.2.3.4')
+})
+
+test('config: повтори у вікні 12 с через 2 с, запасна consult (blind — лише за VG_FALLBACK_MODE, none — без неї), пошта, VG_ENGINE_PATH', () => {
+  const c = loadConfig({})
+  assert.equal(c.dialRetryWindowSec, 12)
+  assert.equal(c.dialRetryIntervalMs, 2000)
+  assert.equal(c.dialRetries, null) // кількість не обмежена — лише вікно
+  assert.equal(c.managerTimeoutSec, 25)
+  assert.equal(c.fallbackTimeoutSec, 20)
+  assert.equal(c.fallbackMode, 'consult')
+  assert.equal(c.fallbackUri, 'sip:906@sip14.binotel.com;transport=udp')
+  assert.equal(c.voicemailEnabled, true)
+  assert.equal(c.voicemailMaxSec, 60)
+  assert.equal(c.voicemailPromptFile, '/Users/yevhenyushchenko/Documents/GitHub/runferry-briefs/telephony/voice-prompts/wav-8k/mila/07-voicemail-no-answer-short.wav')
+  assert.equal(c.beepFile, null)
+  assert.equal(c.recordSupported, null)
+  assert.equal(c.retentionDays.voicemail, 90)
+  assert.match(c.enginePath, /voice-gateway\/engine\/sip-engine$/)
+  assert.equal(loadConfig({ VG_ENGINE: '/x/old' }).enginePath, '/x/old') // стара назва працює
+  assert.equal(loadConfig({ VG_ENGINE: '/x/old', VG_ENGINE_PATH: '/x/sip-engine-next' }).enginePath, '/x/sip-engine-next')
+  assert.equal(loadConfig({ VG_DIAL_RETRY_DELAY_MS: '1500' }).dialRetryIntervalMs, 1500) // стара назва інтервалу
+  assert.equal(loadConfig({ VG_DIAL_RETRY_DELAY_MS: '1500', VG_DIAL_RETRY_INTERVAL_MS: '2500' }).dialRetryIntervalMs, 2500)
+  const c3 = loadConfig({ VG_DIAL_RETRIES: '3', VG_DIAL_RETRY_WINDOW_SEC: '8', VG_FALLBACK_TIMEOUT_SEC: '15', VG_FALLBACK_MODE: ' Blind ', VG_VOICEMAIL: '0', VG_VOICEMAIL_MAX_SEC: '30', VG_VOICEMAIL_WAV: '/w/vm.wav', VG_BEEP_WAV: '/w/beep.wav', VG_VOICEMAIL_DAYS: '0' })
+  assert.deepEqual([c3.dialRetries, c3.dialRetryWindowSec, c3.fallbackTimeoutSec, c3.fallbackMode, c3.voicemailEnabled, c3.voicemailMaxSec, c3.voicemailPromptFile, c3.beepFile, c3.retentionDays.voicemail],
+    [3, 8, 15, 'blind', false, 30, '/w/vm.wav', '/w/beep.wav', 0])
+  assert.equal(loadConfig({ VG_FALLBACK_MODE: 'what' }).fallbackMode, 'consult')
+  for (const v of ['none', 'OFF', '-', '0', 'no']) {
+    const c4 = loadConfig({ VG_FALLBACK: v })
+    assert.equal(c4.fallback, '', v)
+    assert.equal(c4.fallbackUri, '', v)
+  }
+  assert.equal(isOff('906'), false)
+  assert.equal(isOff(undefined), false)
+})
+
+test('config: дані шлюзу типово поза репозиторієм (worktree видаляють), шляхи абсолютні; поріг порожнього повідомлення', () => {
+  assert.equal(defaultDataDir({ HOME: '/Users/x' }, 'darwin'), '/Users/x/Library/Application Support/runferry-voice-gateway/data')
+  assert.equal(defaultDataDir({ HOME: '/home/x' }, 'linux'), '/home/x/.local/share/runferry-voice-gateway/data')
+  assert.equal(defaultDataDir({ HOME: '/home/x', XDG_DATA_HOME: '/srv/d' }, 'linux'), '/srv/d/runferry-voice-gateway/data')
+  const c = loadConfig({ HOME: '/Users/x' })
+  assert.equal(c.dataDir, defaultDataDir({ HOME: '/Users/x' }))
+  assert.ok(!c.dataDir.startsWith(GATEWAY_DIR), c.dataDir)
+  assert.equal(c.cacheDir, path.join(GATEWAY_DIR, 'cache'))
+  // VG_DATA_DIR=data (відносний) — від поточної теки, абсолютним: інакше рушій відкине шлях запису пошти
+  const rel = loadConfig({ VG_DATA_DIR: 'data', VG_CACHE_DIR: 'c' })
+  assert.equal(rel.dataDir, path.resolve('data'))
+  assert.equal(rel.cacheDir, path.resolve('c'))
+  assert.equal(loadConfig({ VG_DATA_DIR: '/abs/d' }).dataDir, '/abs/d')
+  assert.equal(c.voicemailMinSec, 1)
+  assert.equal(loadConfig({ VG_VOICEMAIL_MIN_SEC: '0' }).voicemailMinSec, 0)
+})
+
+test('storage: шлях голосової пошти (київська дата, gcid або час, 4 цифри, вільне ім\'я, теки 0700), сигнал 1 кГц 0,4 с, старі повідомлення прибираються', () => {
+  const dir = tmpDir()
+  const data = path.join(dir, 'data')
+  const now = new Date('2026-10-16T21:53:01Z') // у Києві 17.10, 00:53:01
+  const day = path.join(data, 'voicemail', '2026-10-17')
+  const f1 = makeVoicemailPath({ dataDir: data, gcid: '6929308233', number: '+380671230255', now })
+  assert.equal(f1, path.join(day, '6929308233-0255.wav'))
+  assert.equal(fs.statSync(path.join(data, 'voicemail')).mode & 0o777, 0o700)
+  assert.equal(fs.statSync(day).mode & 0o777, 0o700)
+  assert.equal(fs.existsSync(f1), false) // файл створює рушій
+  fs.writeFileSync(f1, 'x')
+  assert.equal(makeVoicemailPath({ dataDir: data, gcid: '6929308233', number: '+380671230255', now }), path.join(day, '6929308233-0255-2.wav'))
+  assert.equal(makeVoicemailPath({ dataDir: data, gcid: null, number: '907', now }), path.join(day, '005301-907.wav'))
+  assert.equal(makeVoicemailPath({ dataDir: data, gcid: '../../etc/x', number: null, now }), path.join(day, 'etcx-anon.wav')) // GCID із SIP — без «..» і «/»
+  // відносна тека даних → усе одно абсолютний шлях (рушій приймає лише такий)
+  const relData = path.relative(process.cwd(), data)
+  const f3 = makeVoicemailPath({ dataDir: relData, gcid: 'g1', number: '+380671230255', now })
+  assert.ok(path.isAbsolute(f3), f3)
+  assert.equal(f3, path.join(day, 'g1-0255.wav'))
+
+  const cache = path.join(dir, 'cache')
+  const beep = ensureBeep({ cacheDir: cache })
+  assert.equal(beep, path.join(cache, BEEP_NAME))
+  const b = fs.readFileSync(beep)
+  assert.ok(isTelephonyWav(readWavInfo(b)))
+  assert.equal(b.length, 44 + 8000 * 2 * 0.4)
+  assert.equal(fs.statSync(beep).mode & 0o777, 0o600)
+  let peak = 0
+  for (let i = 44; i < b.length; i += 2) peak = Math.max(peak, Math.abs(b.readInt16LE(i)))
+  assert.ok(peak > 10000 && peak < 12000, `пік ${peak}`)
+  assert.equal(b.readInt16LE(44), 0) // плавний початок — без клацання
+  assert.deepEqual(toneWav({ ms: 400 }), b)
+  const mtime = fs.statSync(beep).mtimeMs
+  assert.equal(ensureBeep({ cacheDir: cache }), beep) // уже є — не переписуємо
+  assert.equal(fs.statSync(beep).mtimeMs, mtime)
+  assert.equal(pruneGatewayData({ dataDir: data, cacheDir: cache, retentionDays: { logs: 14, cache: 30, journal: 90, voicemail: 90 } }), 0) // сигнал і свіжі записи не чіпаємо
+
+  const old = (f, days) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, 'x'); const ts = (Date.now() - days * 86400000) / 1000; fs.utimesSync(f, ts, ts) }
+  old(path.join(data, 'voicemail', '2026-06-01', 'a-0001.wav'), 100)
+  old(path.join(data, 'voicemail', '2026-07-20', 'b-0002.wav'), 89)
+  assert.equal(pruneGatewayData({ dataDir: data, cacheDir: cache, retentionDays: { logs: 14, cache: 30, journal: 90, voicemail: 90 } }), 1)
+  assert.deepEqual(fs.readdirSync(path.join(data, 'voicemail')).sort(), ['2026-07-20', '2026-10-17']) // порожню теку дня прибрали
+  assert.equal(pruneGatewayData({ dataDir: data, cacheDir: cache, retentionDays: { logs: 14, cache: 30, journal: 90, voicemail: 0 } }), 0) // 0 — не прибирати
+})
+
+test('storage: заголовок WAV після падіння рушія (довжини 0) лагодимо за розміром файла; цілі й чужі файли не чіпаємо; git-корінь', () => {
+  const dir = tmpDir()
+  const data = path.join(dir, 'data')
+  const day = path.join(data, 'voicemail', '2026-10-17')
+  fs.mkdirSync(day, { recursive: true })
+  const pcm = Buffer.alloc(8000 * 2 * 3) // 3 с тиші
+  const good = wavFromPcm16(pcm)
+  const broken = Buffer.from(good)
+  broken.writeUInt32LE(0, 4) // так pjmedia лишає заголовок до закриття файла
+  broken.writeUInt32LE(0, 40)
+  const fBroken = path.join(day, 'g1-0255.wav')
+  const fGood = path.join(day, 'g2-0255.wav')
+  const fOdd = path.join(day, 'g3-0255.wav')
+  const fEmpty = path.join(day, 'g4-0255.wav')
+  fs.writeFileSync(fBroken, broken)
+  fs.writeFileSync(fGood, good)
+  fs.writeFileSync(fOdd, Buffer.concat([broken, Buffer.from([1])])) // обірваний посеред відліку
+  fs.writeFileSync(fEmpty, broken.subarray(0, 44)) // лише заголовок — звуку немає
+  fs.writeFileSync(path.join(day, 'notes.wav'), 'not a wav at all, definitely more than forty-four bytes long....')
+  assert.equal(repairVoicemailHeaders({ dataDir: data }), 2)
+  assert.deepEqual(fs.readFileSync(fBroken), good)
+  assert.deepEqual(fs.readFileSync(fGood), good)
+  const odd = fs.readFileSync(fOdd)
+  assert.equal(odd.readUInt32LE(40), pcm.length)
+  assert.equal(odd.readUInt32LE(4), 36 + pcm.length)
+  assert.equal(fs.readFileSync(fEmpty).readUInt32LE(40), 0)
+  assert.equal(repairVoicemailHeaders({ dataDir: data }), 0) // вдруге — нічого
+  assert.equal(repairWavHeader(path.join(dir, 'nope.wav')), false)
+  // свіжий файл (ще може писатися) з minAgeMs не чіпаємо
+  fs.writeFileSync(fBroken, broken)
+  assert.equal(repairVoicemailHeaders({ dataDir: data, minAgeMs: 120000 }), 0)
+  assert.equal(repairVoicemailHeaders({ dataDir: data, minAgeMs: 120000, now: () => Date.now() + 121000 }), 1)
+  assert.equal(repairVoicemailHeaders({ dataDir: path.join(dir, 'nope') }), 0)
+
+  assert.equal(findGitRoot(dir), null)
+  fs.mkdirSync(path.join(dir, 'repo', 'a', 'b'), { recursive: true })
+  fs.writeFileSync(path.join(dir, 'repo', '.git'), 'gitdir: /x') // worktree: .git — файл
+  assert.equal(findGitRoot(path.join(dir, 'repo', 'a', 'b')), path.join(dir, 'repo'))
+  assert.ok(findGitRoot(GATEWAY_DIR)) // типовий старий шлях voice-gateway/data — у робочій копії
+})
+
+test('gateway: підсумок дзвінка в консолі — запасна, повтори, голосове повідомлення', () => {
+  assert.equal(summary({ number: '+380500000001', outcome: 'connected_fallback', reason: 'manager_timeout', fallbackRetries: 2, t: { fbAnswered: 30500, fbXfer: 42000 } }),
+    'итог +380500000001: connected_fallback (manager_timeout), запасная ответила через 30.5 с, перевод на 42.0 с, повторов набора запасной 2')
+  assert.equal(summary({ number: '+380500000001', outcome: 'voicemail', reason: 'manager_486', fallbackReason: 'fallback_timeout', retries: 5, voicemail: { file: '/d/v.wav', sec: 12.34 }, t: {} }),
+    'итог +380500000001: voicemail (manager_486, fallback_timeout), повторов набора 5, сообщение 12.3 с: /d/v.wav')
+  assert.equal(summary({ number: '+380500000001', outcome: 'voicemail_empty', reason: 'manager_486', voicemail: { file: null, sec: 0.2, stop: 'client_hangup', empty: true, removed: true }, t: {} }),
+    'итог +380500000001: voicemail_empty (manager_486), сообщения нет (запись 0.2 с, пустой файл удалён)')
+  assert.equal(summary({ number: '+380500000001', outcome: 'voicemail', reason: 'manager_timeout', abortReason: 'shutdown', voicemail: { file: '/d/v.wav', sec: null, stop: 'aborted' }, t: {} }),
+    'итог +380500000001: voicemail (manager_timeout), прерван: остановка шлюза, сообщение (длина неизвестна): /d/v.wav')
 })
 
 test('storage: денний лог переходить на новий файл з новою добою; файли 0600, теки 0700; старе прибирається', async () => {
@@ -387,6 +534,9 @@ test('gateway: менеджер з VG_MANAGER на сервері лінії; р
   assert.match(out, /движок завершился \(code 1\)/)
   assert.match(out, /перезапускаю движок/)
   assert.match(out, /шлюз остановлен/)
+  assert.match(out, /не умеет запись — голосовой почты не будет/) // підроблений рушій не оголосив record у ready
+  assert.equal((out.match(/не умеет запись/g) || []).length, 1) // після перезапуску рушія — не повторюємо
+  assert.ok(fs.existsSync(path.join(dir, 'cache', 'beep-1000hz-400ms.wav')), 'сигнал перед записом не згенеровано')
   assert.ok(!out.includes('S3cret-PW'), 'пароль у виводі шлюзу')
   assert.equal(fs.statSync(path.join(dir, 'data')).mode & 0o777, 0o700)
   assert.equal(fs.statSync(path.join(dir, 'data', 'logs')).mode & 0o777, 0o700)

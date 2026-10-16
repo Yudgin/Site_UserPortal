@@ -8,9 +8,13 @@
 ## Сборка
 
 ```sh
-make            # → ./sip-engine
+make                  # → ./sip-engine
+make sip-engine-next  # тот же код под другим именем → ./sip-engine-next
 make clean
 ```
+
+Пока шлюз работает с `./sip-engine`, его не пересобирать (файл под живым процессом): новый движок собирать как
+`sip-engine-next` и подключать после перезапуска шлюза (`VG_ENGINE_PATH=…/sip-engine-next` или `--engine`).
 
 Нужны: pjproject 2.17 из Homebrew (`/opt/homebrew/Cellar/pjproject/2.17`, статические библиотеки) и `openssl@4`
 (`/opt/homebrew/opt/openssl@4`). pkg-config нет, поэтому флаги из `lib/pkgconfig/libpjproject.pc` переписаны
@@ -34,6 +38,15 @@ make clean
   режиме адрес не проверяется.
 - Входящие REFER и INVITE с Replaces движок отклоняет (603): шлюзу они не нужны.
 - `xfer` / `xfer_replaces`: на финальный 2xx движок сам кладёт переводящую ногу.
+- Запись (`record`) — `AudioMediaRecorder`: звук звонка (голос собеседника, без того, что играем мы) → WAV PCM
+  16 бит моно 8 кГц. Файл только новый (существующий не перезаписывается), путь абсолютный `.wav`, теку создаёт
+  мозг; права 0600 — движок работает с `umask 077`. Порт рекордера снимается с моста асинхронно, поэтому
+  `record_done` приходит, когда в заголовке WAV уже записана длина (обычно через ~20 мс), но не позже 1,5 с
+  (тогда `final:false`, длина — по размеру файла). Звонок закончился во время записи — движок сам закрывает
+  файл (`reason:"hangup"`, после `state DISCONNECTED`); при выходе — `reason:"shutdown"`. Медиа есть, а звук к
+  рекордеру подключить не удалось — `error` `{cmd:"record", msg:"recorder start failed: …"}`, файл удалён, записи
+  нет (раньше это было только в логе, и мозг «писал» тишину до предела записи). Пустой или отсутствующий файл —
+  `record_done` с `sec` < 1 или `missing:true`: мозг считает это `voicemail_empty`.
 - Повторы набора на 503 делает **мозг** (новый `dial` с новым `ref`), движок не повторяет.
 - Пароль SIP не печатается нигде: команда `register` в журнал пишется только именем, буфер строки затирается.
 
@@ -53,13 +66,15 @@ make clean
 | `xfer` | `call`, `uri` | слепой перевод (REFER) |
 | `xfer_replaces` | `call` (A), `dest` (B) | сопровождаемый перевод: REFER на A с Replaces ноги B (Refer-To `…?Replaces=…` без `Require=replaces` — как консоль pjsua в ручной проверке с Binotel) |
 | `bridge` | `a`, `b` | локальный мост звука A↔B в обе стороны (запасной вариант), останавливает проигрыватели |
+| `record` | `call`, `file` (абсолютный путь `.wav`, файла ещё нет) | записывать голос собеседника в WAV; если медиа ещё нет — начнёт, когда появится; одна запись на звонок |
+| `record_stop` | `call` | закончить запись → `record_done` |
 | `quit` | — | положить всё, снять регистрацию, выйти с кодом 0 (то же при конце stdin и SIGTERM/SIGINT) |
 
 События (stdout):
 
 | Событие | Поля |
 |---|---|
-| `ready` | — (движок запущен, ждёт `register`/`local`) |
+| `ready` | `record: true` — движок умеет `record`/`record_stop` (у старого движка поля нет); ждёт `register`/`local` |
 | `reg` | `code`, `reason`, `active`, `expires`; в локальном режиме один раз `{code:200, reason:"local", active:true, local:true}` |
 | `incoming` | `call`, `from` (`sip:0500000001@45.91.130.64`), `number`, `name`, `gcid` (X-BINOTEL-GCID или `null`), `to`, `set_caller_id` (X-BINOTEL-SET-CALLER-ID или `null`), `src` (IP:порт отправителя) |
 | `untrusted` | `src`, `method` — INVITE с недоверенного адреса отклонён 403 (только боевой режим) |
@@ -69,6 +84,7 @@ make clean
 | `play_done` | `call`, `tag` — только для `loop:false`, в конце файла |
 | `xfer` | `call`, `code`, `reason`, `final` (pjsua сообщает 202 как `100 Accepted`, затем NOTIFY 100, 200) |
 | `dtmf` | `call`, `digit` (RFC 2833) |
+| `record_done` | `call`, `file`, `sec` (длина звука, с), `reason` (`stop` / `hangup` / `shutdown`), `final` (заголовок WAV с длиной уже записан), `missing: true` — файла нет (или он нулевого размера) |
 | `error` | `cmd`, `call`, `ref`, `msg`; если `dial` не удалось начать — `{cmd:"dial", ref, call:null}` без `dialing` |
 
 Заголовки X-BINOTEL-* ищутся без учёта регистра; `from`/`to` берутся из самого INVITE (pjsua в CallInfo
@@ -81,19 +97,21 @@ stderr: строки `[engine] ...` и журнал pjsip. Уровень — `S
 в журнал попадают полные INVITE — **номера и имена клиентов**, заголовки X-BINOTEL-*; значения
 `Authorization`/`Proxy-Authorization` и `nonce`/`opaque` в `WWW-`/`Proxy-Authenticate` заменяются на `<…>`
 (по digest-ответу иначе можно подбирать пароль линии офлайн). Такой журнал не пересылать целиком. Строки `conference.c Remove port N failed: PJ_EINVAL` при остановке
-проигрывателя безвредны: деструктор проигрывателя в pjsua2 дважды снимает порт с моста.
+проигрывателя или рекордера безвредны: деструктор в pjsua2 дважды снимает порт с моста. Путь файла записи
+(в нём последние 4 цифры номера) pjsua пишет в журнал при создании рекордера.
 
 ## Проверка без Binotel
 
 ```sh
-./smoke-test.sh     # всё только на 127.0.0.1; журналы в .smoke/
+./smoke-test.sh                                # всё только на 127.0.0.1; журналы в .smoke/
+ENGINE="$PWD/sip-engine-next" ./smoke-test.sh  # проверить новый движок, пока шлюз работает со старым
 ```
 
-Скрипт собирает движок и запускает `smoke-test.mjs` (Node 24): движок в локальном режиме и два `pjsua`
+Скрипт собирает движок (`$ENGINE`, по умолчанию `./sip-engine`, своей целью make) и запускает `smoke-test.mjs` (Node 24): движок в локальном режиме и два `pjsua`
 (`--null-audio --no-tcp --auto-answer 200`, управление через stdin), плюс «сырой» SIP через UDP и
 поддельный регистратор. Проверяет:
 
-0. `ready`, `local`, ошибки на неизвестные звонки, кривой JSON и неудачный `dial`;
+0. `ready` (с `record: true`), `local`, ошибки на неизвестные звонки, кривой JSON и неудачный `dial`;
 1a. «сырой» INVITE: `gcid` из `X-Binotel-Gcid`, имя, номер, отказ 486 (+ ACK);
 1. pjsua звонит на шлюз → `incoming` → `answer` → приветствие (`play` до появления медиа) → `media`,
    `play_done` через ~4,86 с; запись у pjsua — звук есть; кодек PCMA, хотя pjsua предлагает PCMU раньше;
@@ -103,6 +121,10 @@ stderr: строки `[engine] ...` и журнал pjsip. Уровень — `S
 4. сопровождаемый перевод `xfer_replaces` A→B: второй pjsua получил INVITE с Replaces, обе ноги шлюза
    закрыты, xfer 200 (final);
 5. `bridge`: звук второго pjsua доходит до первого через шлюз;
+5b. `record`: движок звонит pjsua, который играет WAV; ошибки (неизвестный звонок, относительный путь, запись уже
+   идёт, файл уже есть, `record_stop` без записи); 2,5 с записи → `record_stop` → `record_done` (`stop`, `final`),
+   WAV 8 кГц моно 16 бит с правами 0600 и голосом pjsua; вторая запись того же звонка, pjsua кладёт трубку →
+   `record_done` (`hangup`) после `DISCONNECTED`, файл с голосом;
 6. `quit` → код 0, в stdout только JSON;
 7. `register` на поддельный регистратор 127.0.0.1:5096: 401 → digest (проверяется по паролю) → 200,
    REGISTER на `sip:…;transport=udp`, INVITE с `Route: <sip:…;transport=udp;lr>`, в SDP только 8/0/telephone-event,
