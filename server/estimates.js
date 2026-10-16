@@ -93,6 +93,7 @@ export function registerEstimates(app, deps) {
       const snap = await adminDb.collection('priceEstimates').doc(estimateId).get()
       if (!snap.exists) return err(res, 404, 'NO_ESTIMATE', 'Кошторис не знайдено')
       const est = snap.data()
+      if (est.kind !== 'actual') return err(res, 400, 'NOT_ACTUAL', 'Позиції вилучаються лише з фактичного кошторису')
       if (!est.serviceRequestId) return err(res, 409, 'NO_SR', 'Кошторис не прив’язано до заявки')
       const r = await actions.removeExtraExpense(req.staff, { requestId: est.serviceRequestId, estimateId, expenseId: m[1] }, { via: 'app' })
       return sendResult(res, r)

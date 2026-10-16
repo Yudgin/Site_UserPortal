@@ -9,7 +9,7 @@
 import crypto from 'crypto'
 import {
   createEstimateOps, round2, nowIso, requestVisible, canEditRequest, canEditEstimate, withLines, needsReapproval,
-  estimate2goods, extraLine,
+  estimate2goods, extraLine, validateExpense,
 } from './estimateEngine.js'
 import { statusTimes } from './statusTimes.js'
 
@@ -19,6 +19,7 @@ export const PAY_METHOD_KEYS = ['liqpayCard', 'liqpayPaypart', 'monoChast', 'mon
 // Id кошторису — capability-token публичной ссылки /estimate/:id (как secureId(16) на портале).
 const newEstimateId = () => crypto.randomBytes(12).toString('base64url')
 const fail = (status, code, message) => ({ ok: false, status, code, message })
+const NOT_CURRENT_MSG = 'Це не поточний фактичний кошторис заявки.'
 
 // Коды ядра → HTTP-статус и код контракта (коды блокировок — как у /api/estimates/pay).
 const CORE_CODES = {
@@ -110,9 +111,11 @@ export function createEstimateActions({ adminDb }) {
       }
       return fail(409, 'ALREADY_EXISTS', 'Фактичний кошторис уже складено — відкрийте його.')
     }
-    // Родитель: явный вариант или выбранный клиентом вариант пропозиції.
-    let parentId = p.parentEstimateId ? String(p.parentEstimateId) : null
+    // Родитель: выбранный клиентом вариант пропозиції; явный parentEstimateId принимается, только если он и
+    // есть выбор клиента (или клиент ещё не выбирал). Иначе факт получился бы на «чужом» пути: оплата его
+    // отклонит (payments.js PATH_CHANGED), а пропозиція уже зафиксирована — тупик (ревью 2026-10-16).
     const offer = sr0.offerId ? await getDoc('estimateOffers', sr0.offerId) : null
+    let parentId = p.parentEstimateId ? String(p.parentEstimateId) : null
     if (!parentId) parentId = offer && offer.selectedVariantId ? String(offer.selectedVariantId) : null
     if (!parentId) return fail(404, 'NO_VARIANT', 'Клієнт ще не обрав варіант пропозиції — складіть факт у порталі.')
     const parent = await getDoc('priceEstimates', parentId)
@@ -120,6 +123,10 @@ export function createEstimateActions({ adminDb }) {
     if (parent.kind === 'actual' || parent.stage === 'actual') return fail(400, 'BAD_PARENT', 'Батьківський кошторис має бути варіантом пропозиції.')
     const belongs = (parent.serviceRequestId && parent.serviceRequestId === sr0.id) || (parent.offerId && sr0.offerId && parent.offerId === sr0.offerId)
     if (!belongs) return fail(400, 'BAD_PARENT', 'Варіант не належить цій заявці.')
+    const parentOffer = parent.offerId ? (offer && offer.id === String(parent.offerId) ? offer : await getDoc('estimateOffers', parent.offerId)) : null
+    if (parentOffer && parentOffer.selectedVariantId && String(parentOffer.selectedVariantId) !== parent.id) {
+      return fail(409, 'NOT_CHOSEN', 'Факт складається лише за варіантом, який обрав клієнт.')
+    }
     // Способы оплаты + ФОП — из дефолтов центра заявки (сервер подставляет сам).
     const center = sr0.serviceCenterId ? await getDoc('serviceCenters', sr0.serviceCenterId) : null
     const payOptions = payOptionsFromCenter(center)
@@ -128,12 +135,32 @@ export function createEstimateActions({ adminDb }) {
     const estId = newEstimateId()
     const estRef = col('priceEstimates').doc(estId)
     const srRef = col('serviceRequests').doc(String(sr0.id))
+    const offerRef = parent.offerId ? col('estimateOffers').doc(String(parent.offerId)) : null
     return adminDb.runTransaction(async (tx) => {
+      // Все чтения — до первой записи (правило транзакций Firestore).
       const srS = await tx.get(srRef)
       const cur = srS.exists ? srS.data() : null
       if (!cur) return fail(404, 'NO_SR', 'Заявку не знайдено.')
-      if (cur.actualEstimateId) return fail(409, 'ALREADY_EXISTS', 'Фактичний кошторис уже складено — відкрийте його.')
+      if (cur.actualEstimateId) {
+        // Параллельный повтор с тем же ключом успел создать факт — это тот же запрос, отвечаем идемпотентно.
+        if (clientKey) {
+          const eS = await tx.get(col('priceEstimates').doc(String(cur.actualEstimateId)))
+          const e = eS.exists ? eS.data() : null
+          if (e && e.createdWithKey === clientKey) {
+            return { ok: true, data: { estimateId: eS.id, total: round2(e.total || 0), status: e.status || 'approved', reapproval: e.createdReapproval || null, created: false } }
+          }
+        }
+        return fail(409, 'ALREADY_EXISTS', 'Фактичний кошторис уже складено — відкрийте його.')
+      }
       if (cur.status === 'cancelled') return fail(409, 'CANCELLED', 'Заявку скасовано — факт не складається.')
+      // Выбор клиента перечитываем в транзакции: /api/offers/:id/choose мог сменить вариант после первой проверки.
+      if (offerRef) {
+        const oS = await tx.get(offerRef)
+        const o = oS.exists ? oS.data() : null
+        if (o && o.selectedVariantId && String(o.selectedVariantId) !== parent.id) {
+          return fail(409, 'PATH_CHANGED', 'Клієнт змінив обраний варіант — оновіть картку і спробуйте ще раз.')
+        }
+      }
       const now = nowIso()
       const pending = (cur.extraExpenses || []).filter((x) => x && x.id && !x.appliedToEstimateId)
       const { estimate, reapproval } = buildActualFromVariant({ parent, sr: { ...cur, id: sr0.id }, pendingExpenses: pending, payOptions, staff, via, now })
@@ -145,8 +172,8 @@ export function createEstimateActions({ adminDb }) {
       if (pending.length) srPatch.extraExpenses = (cur.extraExpenses || []).map((x) => (x && x.id && !x.appliedToEstimateId ? { ...x, appliedToEstimateId: estId } : x))
       tx.set(srRef, srPatch, { merge: true })
       // Факт собран по выбранному варианту → «замораживаем» пропозицію (переизбор клиентом запрещён).
-      if (parent.offerId) tx.set(col('estimateOffers').doc(String(parent.offerId)), { status: 'locked', updatedAt: now }, { merge: true })
-      return { ok: true, data: { estimateId: estId, total: estimate.total, status: estimate.status, reapproval, created: true, appliedExpenses: pending.length, offerLocked: !!parent.offerId } }
+      if (offerRef) tx.set(offerRef, { status: 'locked', updatedAt: now }, { merge: true })
+      return { ok: true, data: { estimateId: estId, total: estimate.total, status: estimate.status, reapproval, created: true, appliedExpenses: pending.length, offerLocked: !!offerRef } }
     })
   }
 
@@ -164,17 +191,24 @@ export function createEstimateActions({ adminDb }) {
   const addExtraExpense = async (staff, p, { via = 'app' } = {}) => {
     const sr0 = await getDoc('serviceRequests', p.requestId)
     if (!sr0) return fail(404, 'NO_SR', 'Заявку не знайдено.')
+    // Порядок как в контракте §1.2: права → текущий факт → валидация → повтор ключа.
     if (!requestVisible(staff, sr0)) return fail(403, 'OTHER_CENTER', 'Заявка іншого сервісного центру.')
-    if (p.estimateId && String(p.estimateId) !== String(sr0.actualEstimateId || '')) return fail(409, 'NOT_CURRENT', 'Це не поточний фактичний кошторис заявки.')
+    if (!canEditRequest(staff, sr0)) return fail(403, 'NO_PERM', 'Немає права змінювати заявки.')
+    if ((p.estimateId || sr0.actualEstimateId) && !canEditEstimate(staff, sr0)) return fail(403, 'NO_PERM_ACTUAL', 'Немає права «фактична калькуляція» для центру цієї заявки.')
+    if (p.estimateId && String(p.estimateId) !== String(sr0.actualEstimateId || '')) return fail(409, 'NOT_CURRENT', NOT_CURRENT_MSG)
+    const v = validateExpense(p)
+    if (v.error) return fail(400, 'BAD_EXPENSE', v.error)
     const clientKey = p.clientKey ? String(p.clientKey) : null
     if (clientKey) {
       const dup = (sr0.extraExpenses || []).find((x) => x && x.clientKey === clientKey)
       if (dup) {
+        // Тот же ключ с другими назвой/суммой — это НЕ повтор, а новая витрата с переиспользованным ключом.
+        if (dup.title !== v.title || round2(dup.amount) !== v.amount) return fail(409, 'CLIENT_KEY_REUSED', 'Ключ запиту вже використано для іншої витрати — спробуйте ще раз.')
         const e = dup.appliedToEstimateId ? await getDoc('priceEstimates', dup.appliedToEstimateId) : null
         return { ok: true, data: { expenseId: dup.id, refId: `extra:${dup.id}`, applied: !!dup.appliedToEstimateId, estimateId: dup.appliedToEstimateId || null, total: e ? round2(e.total || 0) : null, prevTotal: null, status: e ? e.status : null, reapproval: null, duplicate: true } }
       }
     }
-    const r = await ops.addExtraExpense(staff, { requestId: sr0.id, title: p.title, amount: p.amount, note: p.note, ...(clientKey ? { clientKey } : {}) }, { source: via, via })
+    const r = await ops.addExtraExpense(staff, { requestId: sr0.id, title: v.title, amount: v.amount, note: v.note, ...(clientKey ? { clientKey } : {}) }, { source: via, via })
     if (!r.ok) return mapCoreFailure(r)
     return { ok: true, data: lineData(r) }
   }
@@ -185,9 +219,13 @@ export function createEstimateActions({ adminDb }) {
     const sr0 = await getDoc('serviceRequests', p.requestId)
     if (!sr0) return fail(404, 'NO_SR', 'Заявку не знайдено.')
     if (!requestVisible(staff, sr0)) return fail(403, 'OTHER_CENTER', 'Заявка іншого сервісного центру.')
+    if (!canEditRequest(staff, sr0)) return fail(403, 'NO_PERM', 'Немає права змінювати заявки.')
+    // Маршрут приложения работает с фактом — право «actual» нужно и для неприменённой витраты.
+    if (!canEditEstimate(staff, sr0)) return fail(403, 'NO_PERM_ACTUAL', 'Немає права «фактична калькуляція» для центру цієї заявки.')
+    if (p.estimateId && String(p.estimateId) !== String(sr0.actualEstimateId || '')) return fail(409, 'NOT_CURRENT', NOT_CURRENT_MSG)
     const exp = (sr0.extraExpenses || []).find((x) => x && x.id === String(p.expenseId || ''))
     if (!exp) return fail(404, 'NO_EXPENSE', 'Таку витрату в заявці не знайдено.')
-    if (p.estimateId && exp.appliedToEstimateId && String(p.estimateId) !== String(exp.appliedToEstimateId)) return fail(409, 'NOT_CURRENT', 'Витрата належить іншому кошторису.')
+    if (p.estimateId && exp.appliedToEstimateId && String(p.estimateId) !== String(exp.appliedToEstimateId)) return fail(409, 'NOT_CURRENT', NOT_CURRENT_MSG)
     const r = await ops.removeExtraExpense(staff, { requestId: sr0.id, expenseId: exp.id }, { via })
     if (!r.ok) return mapCoreFailure(r)
     return { ok: true, data: lineData(r) }
