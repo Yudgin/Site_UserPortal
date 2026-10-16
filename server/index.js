@@ -1220,14 +1220,15 @@ registerClientProfiles(app, { adminDb })
 // Саморегистрация сотрудника при входе (identity; роль назначает владелец).
 registerUserProfiles(app, { adminDb })
 // Журнал информирования клиента: авто-выбор канала (мессенджер в окне / иначе SMS).
-registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUrl: SITE_URL })
+const { notifyClient } = registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUrl: SITE_URL })
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 registerPayments(app, { adminDb })
 // Управление ФОПами (владелец): мета в Firestore, секреты write-only (fopSecrets, backend-only).
 registerFopsAdmin(app, { adminDb, refreshFops })
-// Создание ТТН Новой Почты (InternetDocument.save) по шаблону — сценарий «приём кораблика».
-registerNpTtn(app, { adminDb })
+// Создание ТТН Новой Почты (InternetDocument.save) по шаблону: власник — будь-який шаблон; директор із
+// застосунку — шаблон «з ремонту» свого центру (+ превʼю /api/np/ttn/preview, за бажанням notifyClient).
+registerNpTtn(app, { adminDb, notifyClient })
 // Deep-link Telegram: генерация ссылки t.me/<бот>?start=<токен> из заявки (владелец).
 registerTelegramLinks(app, { adminDb })
 // Операторский бот (поглощение TelegramBot): спит без TELEGRAM_OPERATOR_BOT_TOKEN (фазы Б1-Б4).
