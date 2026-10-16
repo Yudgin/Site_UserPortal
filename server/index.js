@@ -21,6 +21,7 @@ import { registerOperatorBot } from './operatorBot.js'
 import { registerCalls } from './calls.js'
 import { registerFmcCalls } from './fmcCalls.js'
 import { registerBinotelCalls } from './binotelCalls.js'
+import { registerBinotelWebhook } from './binotelWebhook.js'
 import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
 import { registerVoiceTranscribe } from './voiceTranscribe.js'
@@ -67,7 +68,10 @@ app.use(cors({
 app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); next() })
 // Операторский бот под /operator-bot разбирает тело САМ (лимит 1mb + свой JSON-ответ на битый JSON,
 // как в standalone) — глобальные парсеры его пропускают, иначе его express.json стал бы no-op.
-const notOperatorBot = (mw) => (req, res, next) => (req.path.startsWith('/operator-bot') ? next() : mw(req, res, next))
+// Вебхуки Binotel (/api/binotel/*) тоже читают сырое тело сами: журнал хранит байты как прислала АТС,
+// а вложенные form-поля разбирает свой парсер (binotelWebhook.js).
+const selfParsedBody = (p) => p.startsWith('/operator-bot') || p.startsWith('/api/binotel/')
+const notOperatorBot = (mw) => (req, res, next) => (selfParsedBody(req.path) ? next() : mw(req, res, next))
 // rawBody сохраняем для проверки подписи Viber-/monobank-вебхуков (HMAC-SHA256 сырого тела).
 app.use(notOperatorBot(express.json({ verify: (req, _res, buf) => { req.rawBody = buf } })))
 // LiqPay шлёт вебхук form-urlencoded (поля data + signature)
@@ -1247,6 +1251,10 @@ if (process.env.BINOTEL_KEY && process.env.BINOTEL_SECRET) {
 } else {
   registerFmcCalls(app, { adminDb })
 }
+// Вебхуки АТС Binotel: POST /api/binotel/call-settings (apiCallSettings — сейчас через 1С-прокси, потом
+// напрямую). Ответ {customerData, routeData} по нашей базе; маршрутизацию переключает Firestore
+// system/binotelRouting. Токен BINOTEL_WEBHOOK_TOKEN (Secret Manager binotel-webhook-token).
+registerBinotelWebhook(app, { adminDb, siteUrl: SITE_URL })
 // Синхронизация картотеки ремонтов из 1С (admin/scheduler): upsert в serviceRequests.
 registerOnecSync(app, { adminDb })
 // Голосова надиктовка з застосунку сервісу: POST /api/ai/transcribe (staff, аудіо → текст; рушій у stt.js,
