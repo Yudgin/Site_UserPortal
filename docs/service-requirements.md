@@ -845,8 +845,11 @@ PHP-нотации или JSON. Ответ всегда 200: `{customerData{name
 бюджетом 1,2 с, без внешних вызовов.
 
 **Переключатель — документ `system/binotelRouting`:** `enabled` (false → всегда `{}`), `scope` (`test` — отвечаем только
-номерам из `testNumbers`, `all` — всем), `mode` (`passthrough` — без `routeData`, сценарий линии; `route` — `routeId`),
-`routeType`, `overrides{телефон: routeId | {id,type} | 0}`, `sendCustomerData`, `assignedToEmployeeNumber` (1С шлёт 906),
+номерам из `testNumbers`, `all` — всем), `mode` (`passthrough` — без `routeData`, сценарий линии; `route` — `routeId`;
+`byClient` — по категории клиента), `routeType`, `overrides{телефон: routeId | {id,type} | 0}`, `categoryRoutes`
+(`openRequest` — незакрытая заявка → S2, `knownClient` — любая заявка или профиль → S1, неизвестный номер — без
+`routeData`, сценарий линии S0; тип по умолчанию `routeWithTime`; схема сессии «Голосовые заглушки для сценариев
+Binotel», ID S1/S2 Binotel ещё не присвоил), `sendCustomerData`, `assignedToEmployeeNumber` (1С шлёт 906),
 `mirrorCallEvents`. Управление: `node server/scripts/binotel-routing.mjs show | set | test-add | override | log`.
 Известные сценарии: 466367 sticky-903 (HAPP), 220956 нерабочее время, 270182 рабочее время, 73622 график 24/7.
 
@@ -857,10 +860,11 @@ PHP-нотации или JSON. Ответ всегда 200: `{customerData{name
 **1С.** Фрагмент для `МодульРаботыСТГ` (пересылка тела, таймаут 2 с, откат на штатную логику, URL и токен — в константах
 1С) и порядок вставки/проверки/отката: `runferry-briefs/telephony/binotel-1c-proxy-2026-10-16.md`.
 
-**Задеплоено 2026-10-16** ревизией `runferry-backend-00068-wtb` (ветка `claude/vigilant-turing-7b0f39` = charming-lehmann +
-`feat/calc` + приёмник; секрет подключён `--update-secrets`). Проверено curl-ом: без токена и с неверным — 403; form и
+**Задеплоено 2026-10-16** ревизией `runferry-backend-00068-wtb`, режим `byClient` — `runferry-backend-00069-8g2` (ветка
+`claude/vigilant-turing-7b0f39` = charming-lehmann + `feat/calc` + приёмник; секрет подключён `--update-secrets`). Проверено curl-ом: без токена и с неверным — 403; form и
 JSON — `customerData` по заявке `sr-test-pbx-call`; номер вне `testNumbers` — `{}`; `mode=route`, `override` и возврат в
-`passthrough` действуют сразу; 49–303 мс внутри сервера. Документ `system/binotelRouting` создан (`scope: test`,
+`passthrough` действуют сразу; `byClient` с временными ID: отменённая заявка → `knownClient`, номер без истории → без
+`routeData`; 49–303 мс внутри сервера. Документ `system/binotelRouting` создан (`scope: test`,
 `mode: passthrough`, три тестовых номера владельца, `assignedToEmployeeNumber: 906`), TTL-политика на
 `binotelEvents.expireAt` включена. Фрагмент в 1С вставляет владелец; до этого приёмник вызывается только тестами.
 
