@@ -115,16 +115,18 @@ test('isOpen: вік за createdAt/справжніми діями, не за u
   assert.equal(isOpen({ ...stale1c, diagnostics: { text: 'x', at: daysAgo(10), by: 'm' } }, NOW), true)
   assert.equal(isOpen({ ...stale1c, stageHistory: [{ stage: 'shipped', at: daysAgo(5), by: 'np-ttn' }] }, NOW), true)
   assert.equal(isOpen({ ...stale1c, stageHistory: [{ stage: 'packed', at: daysAgo(5), by: 'backfill' }] }, NOW), false)
-  // межі: активний ≤ 60 днів, виконаний ≤ 14, скасований ніколи
-  assert.equal(isOpen(SR({ createdAt: daysAgo(60) }), NOW), true)
-  assert.equal(isOpen(SR({ createdAt: daysAgo(61) }), NOW), false)
+  // межі: активний ≤ 180 днів (живий in_work 65-денний лишається відкритим), виконаний ≤ 14, скасований ніколи
+  assert.equal(isOpen(SR({ createdAt: daysAgo(65) }), NOW), true)
+  assert.equal(isOpen(SR({ createdAt: daysAgo(180) }), NOW), true)
+  assert.equal(isOpen(SR({ createdAt: daysAgo(181) }), NOW), false)
   assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(14) }), NOW), true)
   assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(15) }), NOW), false)
   assert.equal(isOpen(SR({ status: 'cancelled', createdAt: daysAgo(0) }), NOW), false)
   assert.equal(isOpen(SR({ createdAt: undefined }), NOW), false)
   // пороги з документа
-  const cfg = normalizeRouting({ openMaxAgeDays: 90, doneGraceDays: 0 })
-  assert.equal(isOpen(SR({ createdAt: daysAgo(80) }), NOW, cfg), true)
+  const cfg = normalizeRouting({ openMaxAgeDays: 60, doneGraceDays: 0 })
+  assert.equal(isOpen(SR({ createdAt: daysAgo(65) }), NOW, cfg), false)
+  assert.equal(isOpen(SR({ createdAt: daysAgo(50) }), NOW, cfg), true)
   assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(1) }), NOW, cfg), false)
   assert.equal(normalizeRouting({ openMaxAgeDays: 'x', doneGraceDays: null }).openMaxAgeDays, DEFAULT_ROUTING.openMaxAgeDays)
   assert.equal(normalizeRouting({ doneGraceDays: null }).doneGraceDays, DEFAULT_ROUTING.doneGraceDays)

@@ -121,8 +121,9 @@ export const DEFAULT_ROUTING = {
   // mode 'byClient': {openRequest: S2, knownClient: S1, unknown: —} — routeId | {id, type}; тип за замовчуванням
   // routeWithTime (робочий час рахує Binotel); категорії немає або id порожній → без routeData (сценарій лінії S0)
   categoryRoutes: {},
-  // Пороги «незакритої» заявки (днів від останньої справжньої дії) — див. isOpen
-  openMaxAgeDays: 60,
+  // Пороги «незакритої» заявки (днів від останньої справжньої дії) — див. isOpen. 180 — страховка: на 2026-10-16
+  // усі 17 заявок з відкритим статусом молодші (найстарша жива in_work — 65 днів), 60 відрізало б її.
+  openMaxAgeDays: 180,
   doneGraceDays: 14,
   sendCustomerData: true,
   assignedToEmployeeNumber: null, // 1С зараз завжди шле 906
@@ -216,8 +217,8 @@ export const lastActivityMs = (sr) => Math.max(
   ...(Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).filter((h) => h && !AUTO_STAGE_BY.has(h.by)).map((h) => msOf(h.at)),
 )
 // Незакрита заявка (узгоджено з сесією «1С телефонія міграція», 2026-10-16). Не скасована і:
-//   - не виконана, а остання дія не старша за openMaxAgeDays: ~560 ремонтів з 1С отримали статус один раз при імпорті
-//     (inferStatus), покинуті старі назавжди лишились 'new';
+//   - не виконана, а остання дія не старша за openMaxAgeDays (180): ~560 ремонтів з 1С отримали статус один раз при
+//     імпорті (inferStatus), покинуті старі назавжди лишилися б 'new' — поріг лише страховка на майбутнє;
 //   - або виконана, але остання дія не старша за doneGraceDays: клієнт дзвонить «де мій кораблик».
 export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   if (!sr || sr.status === 'cancelled') return false
