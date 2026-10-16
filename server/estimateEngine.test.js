@@ -126,6 +126,7 @@ test('mapCoreFailure: core codes → HTTP status and contract codes', () => {
   assert.equal(mapCoreFailure({ ok: false, code: 'NOT_FOUND_EXPENSE', message: 'm' }).code, 'NO_EXPENSE')
   assert.equal(mapCoreFailure({ ok: false, code: 'WEIRD', message: 'm' }).status, 500)
   assert.deepEqual(mapCoreFailure({ ok: false, code: 'CONFLICT', message: 'm' }), { ok: false, status: 409, code: 'CONFLICT', message: 'm' })
+  assert.deepEqual(mapCoreFailure({ ok: false, code: 'CLIENT_KEY_REUSED', message: 'm' }), { ok: false, status: 409, code: 'CLIENT_KEY_REUSED', message: 'm' })
 })
 
 test('estimatePatch: recomputes, sets status by threshold, snapshots history, marks via', () => {

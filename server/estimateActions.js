@@ -27,6 +27,8 @@ const CORE_CODES = {
   INVALID: [400, 'BAD_EXPENSE'], NOT_FOUND_EXPENSE: [404, 'NO_EXPENSE'], NOTHING: [400, 'NOTHING'], PAID_STATUS: [409, 'PAID'],
   // Ядро повторило операцию после параллельной правки заявки и снова упёрлось в неё — можно повторить позже.
   CONFLICT: [409, 'CONFLICT'],
+  // Тот же clientKey с другими назвой/суммой, пойманный внутри транзакции ядра (вне гонки ловится выше).
+  CLIENT_KEY_REUSED: [409, 'CLIENT_KEY_REUSED'],
 }
 const BLOCK_REASONS = { PAID: 'PAID', REJECTED: 'REJECTED', PAYING: 'PAY_IN_PROGRESS' }
 export const mapCoreFailure = (r) => {
