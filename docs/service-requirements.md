@@ -895,7 +895,10 @@ JSON — `customerData` по заявке `sr-test-pbx-call`; номер вне 
 журнала звонков); иностранный номер остаётся как набран. `boatOrders.clientPhone` нормализован один раз скриптом
 `server/scripts/normalize-boat-order-phones.mjs` (286 заказов, исправлено 2: формат со скобками и `0…`; `updatedAt` не
 трогали); в `serviceRequests` нестандартных номеров нет (567 из 567). Приложение «RunFerry Сервіс» (отмена, первая
-диагностика) — задача сессии «Функционал мобильного приложения обслуживания».
+диагностика) — задача сессии «Функционал мобильного приложения обслуживания» (бриф
+`runferry-briefs/service-app/status-times-app-brief-2026-10-16.md`). Задеплоено 2026-10-16: бэкенд
+`runferry-backend-00073-k4n` (ветка `claude/status-times-phones` = `claude/vigilant-turing-7b0f39` + эти правки; env и
+секреты прежние), фронт — Firebase Hosting. **Кто деплоит бэкенд следующим — смержите `claude/status-times-phones`.**
 
 **Открыто.** Документ `system/binotelRouting` создан (`scope: test`,
 `mode: passthrough`, три тестовых номера владельца, `assignedToEmployeeNumber: 906`), TTL-политика на
