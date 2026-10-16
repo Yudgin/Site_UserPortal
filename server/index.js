@@ -24,6 +24,7 @@ import { registerBinotelCalls } from './binotelCalls.js'
 import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
 import { registerVoiceTranscribe } from './voiceTranscribe.js'
+import { registerEstimates } from './estimates.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
 import { registerUserProfiles } from './userProfiles.js'
@@ -1221,6 +1222,9 @@ registerClientProfiles(app, { adminDb })
 registerUserProfiles(app, { adminDb })
 // Журнал информирования клиента: авто-выбор канала (мессенджер в окне / иначе SMS).
 const { notifyClient } = registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUrl: SITE_URL })
+// Фактичний кошторис із застосунку сервісу: створити за обраним варіантом, витрата поза прайсом,
+// вилучити витрату (ядро розрахунків — estimateEngine.js, спільне з Telegram-ботом співробітників).
+registerEstimates(app, { adminDb, notifyClient })
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 registerPayments(app, { adminDb })
