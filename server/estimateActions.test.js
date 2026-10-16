@@ -302,6 +302,7 @@ test('removeExtraExpense: removes the line and the request expense, re-applies s
 test('addExtraExpense: a DUPLICATE caught inside the engine transaction is returned as duplicate:true with the estimate totals', async () => {
   const db = new FakeDb(withActual())
   db.data.priceEstimates['act-1'].total = 2150
+  db.data.priceEstimates['act-1'].lines.push({ type: 'addon', refId: 'extra:x1', name: { uk: 'Доставка' }, qty: 1, unitPrice: 150, lineTotal: 150, extra: true })
   const exp = { id: 'x1', title: 'Доставка', amount: 150, clientKey: 'key-00000020', appliedToEstimateId: 'act-1' }
   // ядро нового формата (сессия бота): повтор ключа найден в транзакции → { ok, code: 'DUPLICATE', data }
   const ops = { getDoc: async (name, id) => (db.data[name] && db.data[name][id] ? { id, ...db.data[name][id] } : null),
@@ -310,10 +311,43 @@ test('addExtraExpense: a DUPLICATE caught inside the engine transaction is retur
   const a = createEstimateActions({ adminDb: db, ops })
   const r = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Доставка', amount: 150, clientKey: 'key-00000020' })
   assert.equal(r.ok, true, JSON.stringify(r))
-  assert.deepEqual(r.data, { expenseId: 'x1', refId: 'extra:x1', applied: true, estimateId: 'act-1', prevTotal: null, total: 2150, status: 'approved', reapproval: null, duplicate: true })
+  assert.deepEqual(r.data, { expenseId: 'x1', refId: 'extra:x1', applied: true, estimateId: 'act-1', prevTotal: null, total: 2150, status: 'approved', reapproval: { required: false, diffPercent: 7.5, thresholdPct: 10 }, duplicate: true })
   db.data.serviceRequests['sr-1'].extraExpenses = [exp]
   const c = await a.removeExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', expenseId: 'x1' })
   assert.deepEqual(c, { ok: false, status: 409, code: 'CONFLICT', message: 'Заявку щойно змінили паралельно — спробуйте ще раз.' })
+})
+
+test('addExtraExpense: a repeat whose expense is no longer in the current actual is KEY_STALE, not a false success', async () => {
+  // (1) витрату записали в факт act-1 (ответ потерян), затем в портале составили новый факт act-2 без неё
+  const db = new FakeDb(withActual())
+  const a = createEstimateActions({ adminDb: db })
+  const first = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Доставка', amount: 150, clientKey: 'key-00000030' })
+  assert.equal(first.ok, true)
+  db.data.priceEstimates['act-2'] = { ...db.data.priceEstimates['act-1'], id: 'act-2', lines: db.data.priceEstimates['act-1'].lines.filter((l) => !l.extra), total: 2000 }
+  db.data.serviceRequests['sr-1'].actualEstimateId = 'act-2'
+  const stale = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-2', title: 'Доставка', amount: 150, clientKey: 'key-00000030' })
+  assert.equal(stale.ok, false)
+  assert.equal(stale.status, 409)
+  assert.equal(stale.code, 'KEY_STALE')
+  // (2) тот же факт, но пересохранение в портале выкинуло строку extra
+  const db2 = new FakeDb(withActual())
+  const a2 = createEstimateActions({ adminDb: db2 })
+  assert.equal((await a2.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Деталь', amount: 99, clientKey: 'key-00000031' })).ok, true)
+  db2.data.priceEstimates['act-1'].lines = db2.data.priceEstimates['act-1'].lines.filter((l) => !l.extra)
+  assert.equal((await a2.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Деталь', amount: 99, clientKey: 'key-00000031' })).code, 'KEY_STALE')
+})
+
+test('addExtraExpense: a repeat keeps the reapproval warning of the current actual', async () => {
+  const db = new FakeDb(withActual())
+  const a = createEstimateActions({ adminDb: db })
+  const big = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Мотор', amount: 1000, clientKey: 'key-00000032' })
+  assert.equal(big.data.reapproval.required, true)
+  const again = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Мотор', amount: 1000, clientKey: 'key-00000032' })
+  assert.equal(again.ok, true)
+  assert.equal(again.data.duplicate, true)
+  assert.equal(again.data.status, 'pending_approval')
+  assert.equal(again.data.reapproval.required, true)
+  assert.equal(again.data.total, 3000)
 })
 
 // ---------- HTTP ----------

@@ -189,6 +189,23 @@ export function createEstimateActions({ adminDb, ops: injectedOps } = {}) {
     status: r.data.status || null, reapproval: r.data.reapproval || null, ...extra,
   })
 
+  // Ответ на повтор с тем же ключом. «Успешный повтор» допустим, только если витрата действительно лежит в
+  // факте, который приложение считает текущим (:id): иначе мастер увидит «додано», а в оплачиваемом факте
+  // её нет (факт пересоздали в портале или пересохранение выкинуло строку extra) — ревью 2026-10-16.
+  // Тогда 409 KEY_STALE: приложение берёт новый ключ и мастер добавляет витрату заново. Итоги и
+  // необходимость повторного согласования — по текущему состоянию факта.
+  const duplicateAnswer = async (exp, expectedEstimateId) => {
+    const estId = exp.appliedToEstimateId || null
+    const e = estId ? await getDoc('priceEstimates', estId) : null
+    const inFact = !!e && (e.lines || []).some((l) => l && l.refId === `extra:${exp.id}`)
+    if (expectedEstimateId && (String(estId || '') !== String(expectedEstimateId) || !inFact)) {
+      return fail(409, 'KEY_STALE', 'Цю витрату вже записували раніше, але в поточному кошторисі її немає — додайте її ще раз.')
+    }
+    const parent = e && e.parentEstimateId ? await getDoc('priceEstimates', e.parentEstimateId) : null
+    const reapproval = e && parent ? needsReapproval(parent, e) : null
+    return { ok: true, data: { expenseId: exp.id, refId: `extra:${exp.id}`, applied: inFact, estimateId: estId, total: e ? round2(e.total || 0) : null, prevTotal: null, status: e ? e.status : null, reapproval, duplicate: true } }
+  }
+
   // ---- Витрата поза прайсом в текущий факт заявки ----
   // p: { requestId, estimateId?, title, amount, note?, clientKey? }; opts: { via }
   // estimateId (из HTTP-маршрута) должен совпадать с текущим фактом заявки — иначе NOT_CURRENT.
@@ -209,18 +226,13 @@ export function createEstimateActions({ adminDb, ops: injectedOps } = {}) {
       if (dup) {
         // Тот же ключ с другими назвой/суммой — это НЕ повтор, а новая витрата с переиспользованным ключом.
         if (dup.title !== v.title || round2(dup.amount) !== v.amount) return fail(409, 'CLIENT_KEY_REUSED', 'Ключ запиту вже використано для іншої витрати — спробуйте ще раз.')
-        const e = dup.appliedToEstimateId ? await getDoc('priceEstimates', dup.appliedToEstimateId) : null
-        return { ok: true, data: { expenseId: dup.id, refId: `extra:${dup.id}`, applied: !!dup.appliedToEstimateId, estimateId: dup.appliedToEstimateId || null, total: e ? round2(e.total || 0) : null, prevTotal: null, status: e ? e.status : null, reapproval: null, duplicate: true } }
+        return duplicateAnswer(dup, p.estimateId)
       }
     }
     const r = await ops.addExtraExpense(staff, { requestId: sr0.id, title: v.title, amount: v.amount, note: v.note, ...(clientKey ? { clientKey } : {}) }, { source: via, via })
     if (!r.ok) return mapCoreFailure(r)
     // Повтор с тем же ключом, пойманный уже внутри транзакции ядра (код DUPLICATE): итоги берём из факта.
-    if (r.code === 'DUPLICATE' || (r.data && r.data.duplicate)) {
-      const exp = r.data.expense
-      const e = exp.appliedToEstimateId ? await getDoc('priceEstimates', exp.appliedToEstimateId) : null
-      return { ok: true, data: lineData(r, { applied: !!exp.appliedToEstimateId, estimateId: exp.appliedToEstimateId || null, total: e ? round2(e.total || 0) : null, status: e ? e.status : null, duplicate: true }) }
-    }
+    if (r.code === 'DUPLICATE' || (r.data && r.data.duplicate)) return duplicateAnswer(r.data.expense, p.estimateId)
     return { ok: true, data: lineData(r) }
   }
 
