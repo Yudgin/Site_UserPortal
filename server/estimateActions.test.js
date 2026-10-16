@@ -170,11 +170,14 @@ test('addExtraExpense: appends an extra line, recomputes, writes history and the
   assert.equal(est.history[0].total, 2000)
   assert.equal(est.lastEditedVia, 'app')
   assert.equal(est.receiptGoods.length, 2)
-  const exp = db.data.serviceRequests['sr-1'].extraExpenses[0]
+  const sr = db.data.serviceRequests['sr-1']
+  assert.equal(sr.lastEditedVia, 'app') // ядро пишет источник правки и на заявку
+  const exp = sr.extraExpenses[0]
   assert.equal(exp.appliedToEstimateId, 'act-1')
   assert.equal(exp.source, 'app')
   assert.equal(exp.note, 'НП')
   assert.equal(exp.clientKey, 'key-00000009')
+  assert.equal(r.data.estimateId, 'act-1')
   // повтор — тот же расход, без второй строки
   const dup = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Доставка', amount: 150, clientKey: 'key-00000009' }, { via: 'app' })
   assert.equal(dup.ok, true)
