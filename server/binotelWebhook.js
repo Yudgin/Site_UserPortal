@@ -30,6 +30,7 @@
 import express from 'express'
 import { timingSafeEqual } from 'node:crypto'
 import { normPhone } from './phone.js'
+import { makeClientLookup } from './clientLookup.js'
 
 const nowIso = () => new Date().toISOString()
 const LOOKUP_BUDGET_MS = Number(process.env.BINOTEL_LOOKUP_BUDGET_MS || 1200) // 1С чекає нас ≤ 2 с
@@ -38,8 +39,6 @@ const LOOKUP_BUDGET_MS = Number(process.env.BINOTEL_LOOKUP_BUDGET_MS || 1200) //
 const JOURNAL_BUDGET_MS = Number(process.env.BINOTEL_JOURNAL_BUDGET_MS || 300)
 const RAW_MAX_STORE = 8 * 1024 // скільки сирого тіла кладемо в журнал
 const JOURNAL_TTL_DAYS = 180
-const SR_SCAN_LIMIT = 100 // заявок одного телефону (у найактивнішого номера вже 24; без orderBy — беремо з запасом)
-const ORDER_SCAN_LIMIT = 10 // замовлень корабликів одного телефону
 export const NAME_MAX = 43 // Binotel: довше обрізає плагін/телефон
 export const DESC_MAX = 70
 
@@ -406,23 +405,8 @@ export function registerBinotelWebhook(app, deps) {
     next()
   }
 
-  // Варіанти запису одного номера (+380…, 380…, 0…): заявки з вхідних менеджера і ручні замовлення корабликів
-  // зберігають телефон як є. Один запит 'in' на колекцію, як у мобільному застосунку.
-  const phoneVariants = (e164) => [e164, e164.slice(1), '0' + e164.slice(4)]
-  const lookupClient = async (phone) => {
-    const digits = phone.replace(/\D/g, '')
-    const variants = phoneVariants(phone)
-    const [srSnap, profSnap, orderSnap] = await Promise.all([
-      adminDb.collection('serviceRequests').where('clientPhone', 'in', variants).limit(SR_SCAN_LIMIT).get(),
-      adminDb.collection('clientProfiles').doc(digits).get(),
-      adminDb.collection('boatOrders').where('clientPhone', 'in', variants).limit(ORDER_SCAN_LIMIT).get(),
-    ])
-    return {
-      requests: srSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
-      profile: profSnap.exists ? profSnap.data() : null,
-      orders: orderSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
-    }
-  }
+  // Заявки, профіль, замовлення корабликів за телефоном — спільний модуль clientLookup.js (його ж бере голосовий шлюз).
+  const lookupClient = makeClientLookup(adminDb)
   const loadRouting = async () => {
     const s = await adminDb.collection('system').doc('binotelRouting').get()
     return normalizeRouting(s.exists ? s.data() : null)
