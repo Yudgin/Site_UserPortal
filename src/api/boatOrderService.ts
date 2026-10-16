@@ -4,6 +4,7 @@ import { db, auth } from './firebase'
 import { collection, doc, getDoc, getDocs, setDoc, deleteDoc } from 'firebase/firestore'
 import type { BoatOrder } from '@/types/boats'
 import { secureId } from '@/utils/id'
+import { canonicalPhone } from '@/utils/phone'
 
 const COLLECTION = 'boatOrders'
 
@@ -32,14 +33,17 @@ export const boatOrderService = {
     }
   },
 
+  // clientPhone пишем каноническим +380XXXXXXXXX (как набрали — «380…», «(067)…») — по нему входящий
+  // звонок Binotel находит покупку кораблика.
   save: async (o: Partial<BoatOrder> & { id?: string }): Promise<{ id: string } | null> => {
     if (!db || !auth?.currentUser) return null
     try {
       const id = o.id || secureId(16)
       const now = new Date().toISOString()
+      const phone = typeof o.clientPhone === 'string' ? { clientPhone: canonicalPhone(o.clientPhone) } : {}
       await setDoc(
         doc(db, COLLECTION, id),
-        { ...o, id, updatedAt: now, ...(o.createdAt ? {} : { createdAt: now, createdBy: auth.currentUser.uid }) },
+        { ...o, ...phone, id, updatedAt: now, ...(o.createdAt ? {} : { createdAt: now, createdBy: auth.currentUser.uid }) },
         { merge: true }
       )
       return { id }
