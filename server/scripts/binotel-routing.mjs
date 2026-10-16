@@ -10,7 +10,8 @@
 //   node scripts/binotel-routing.mjs set scope=all             # відповідати ВСІМ (обережно: реальні клієнти)
 //   node scripts/binotel-routing.mjs set enabled=false         # аварійно: завжди {} → повністю логіка 1С
 //   node scripts/binotel-routing.mjs test-add 0675499555 | test-remove 0675499555
-//   node scripts/binotel-routing.mjs override 0675499555 466367 [routeWithTime] | override 0675499555 off
+//   node scripts/binotel-routing.mjs override 0675499555 466367 [route|routeWithTime] [force] | override 0675499555 off
+//     force — наш маршрут важливіший за Клиенты.Сценарий 1С (заголовок X-Runferry-Route-Priority: override)
 //   node scripts/binotel-routing.mjs set mode=byClient         # сценарій за категорією клієнта (categoryRoutes)
 //   node scripts/binotel-routing.mjs category openRequest 12345 [route|routeWithTime] | category knownClient off
 //   node scripts/binotel-routing.mjs log [N]                   # останні N подій binotelEvents (типово 10)
@@ -95,7 +96,11 @@ switch (cmd) {
     const phone = normPhone(args[0])
     if (!phone) throw new Error('потрібен номер телефону')
     const v = args[1]
-    const value = v === 'off' || v === undefined ? FieldValue.delete() : args[2] ? { id: Number(v), type: args[2] } : Number(v)
+    const force = args.includes('force')
+    const type = args.slice(2).find((a) => ['route', 'routeWithTime'].includes(a)) || null
+    // Тип пишемо лише якщо його задали — інакше приймач візьме routeType документа, як для простого числа.
+    const value = v === 'off' || v === undefined ? FieldValue.delete()
+      : type || force ? { id: Number(v), ...(type ? { type } : {}), ...(force ? { force: true } : {}) } : Number(v)
     const st = stamp()
     // FieldPath, бо «+» у імені поля ламає рядковий шлях overrides.+380…
     await ref.update(new FieldPath('overrides', phone), value, 'updatedAt', st.updatedAt, 'updatedBy', st.updatedBy).catch((e) => {
@@ -122,12 +127,12 @@ switch (cmd) {
     const q = await db.collection('binotelEvents').orderBy('at', 'desc').limit(n).get()
     for (const d of q.docs) {
       const x = d.data()
-      console.log(`${x.at}  ${x.kind}  via=${x.via}  ${x.category || ''}  ${x.callType === 1 ? 'OUT' : 'IN '}  ${x.externalNumber || '-'} → ${x.pbxNumber || x.internalNumber || '-'}  ${x.decision}  ${x.latencyMs} мс  ${JSON.stringify(x.response)}`)
+      console.log(`${x.at}  ${x.kind}  via=${x.via}  ${x.category || ''}${x.priority ? ' priority=' + x.priority : ''}  ${x.callType === 1 ? 'OUT' : 'IN '}  ${x.externalNumber || '-'} → ${x.pbxNumber || x.internalNumber || '-'}  ${x.decision}  ${x.latencyMs} мс  ${JSON.stringify(x.response)}`)
     }
     if (!q.size) console.log('binotelEvents порожній')
     break
   }
   default:
-    console.log('Команди: show | init | set k=v… | test-add N… | test-remove N… | override N routeId|off [routeWithTime] | category openRequest|knownClient|unknown routeId|off [route|routeWithTime] | log [N]')
+    console.log('Команди: show | init | set k=v… | test-add N… | test-remove N… | override N routeId|off [route|routeWithTime] [force] | category openRequest|knownClient|unknown routeId|off [route|routeWithTime] | log [N]')
 }
 
