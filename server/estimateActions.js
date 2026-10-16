@@ -25,6 +25,8 @@ const NOT_CURRENT_MSG = 'Це не поточний фактичний кошт�
 const CORE_CODES = {
   NOT_FOUND: [404, 'NO_SR'], FORBIDDEN: [403, 'OTHER_CENTER'], NO_EDIT: [403, 'NO_PERM'], NO_ESTIMATE_PERM: [403, 'NO_PERM_ACTUAL'],
   INVALID: [400, 'BAD_EXPENSE'], NOT_FOUND_EXPENSE: [404, 'NO_EXPENSE'], NOTHING: [400, 'NOTHING'], PAID_STATUS: [409, 'PAID'],
+  // Ядро повторило операцию после параллельной правки заявки и снова упёрлось в неё — можно повторить позже.
+  CONFLICT: [409, 'CONFLICT'],
 }
 const BLOCK_REASONS = { PAID: 'PAID', REJECTED: 'REJECTED', PAYING: 'PAY_IN_PROGRESS' }
 export const mapCoreFailure = (r) => {
@@ -88,8 +90,9 @@ export const buildActualFromVariant = ({ parent, sr, pendingExpenses = [], payOp
   }
 }
 
-export function createEstimateActions({ adminDb }) {
-  const ops = createEstimateOps({ adminDb })
+// deps.ops — подмена ядра в тестах; по умолчанию createEstimateOps({ adminDb }).
+export function createEstimateActions({ adminDb, ops: injectedOps } = {}) {
+  const ops = injectedOps || createEstimateOps({ adminDb })
   const col = (name) => adminDb.collection(name)
   const getDoc = ops.getDoc
 
@@ -210,6 +213,12 @@ export function createEstimateActions({ adminDb }) {
     }
     const r = await ops.addExtraExpense(staff, { requestId: sr0.id, title: v.title, amount: v.amount, note: v.note, ...(clientKey ? { clientKey } : {}) }, { source: via, via })
     if (!r.ok) return mapCoreFailure(r)
+    // Повтор с тем же ключом, пойманный уже внутри транзакции ядра (код DUPLICATE): итоги берём из факта.
+    if (r.code === 'DUPLICATE' || (r.data && r.data.duplicate)) {
+      const exp = r.data.expense
+      const e = exp.appliedToEstimateId ? await getDoc('priceEstimates', exp.appliedToEstimateId) : null
+      return { ok: true, data: lineData(r, { applied: !!exp.appliedToEstimateId, estimateId: exp.appliedToEstimateId || null, total: e ? round2(e.total || 0) : null, status: e ? e.status : null, duplicate: true }) }
+    }
     return { ok: true, data: lineData(r) }
   }
 

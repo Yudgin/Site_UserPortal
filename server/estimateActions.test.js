@@ -299,6 +299,23 @@ test('removeExtraExpense: removes the line and the request expense, re-applies s
   assert.equal((await a.removeExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', expenseId: 'nope' })).code, 'NO_EXPENSE')
 })
 
+test('addExtraExpense: a DUPLICATE caught inside the engine transaction is returned as duplicate:true with the estimate totals', async () => {
+  const db = new FakeDb(withActual())
+  db.data.priceEstimates['act-1'].total = 2150
+  const exp = { id: 'x1', title: 'Доставка', amount: 150, clientKey: 'key-00000020', appliedToEstimateId: 'act-1' }
+  // ядро нового формата (сессия бота): повтор ключа найден в транзакции → { ok, code: 'DUPLICATE', data }
+  const ops = { getDoc: async (name, id) => (db.data[name] && db.data[name][id] ? { id, ...db.data[name][id] } : null),
+    addExtraExpense: async () => ({ ok: true, code: 'DUPLICATE', data: { request: { id: 'sr-1' }, expense: exp, applied: true, duplicate: true } }),
+    removeExtraExpense: async () => ({ ok: false, code: 'CONFLICT', message: 'Заявку щойно змінили паралельно — спробуйте ще раз.' }) }
+  const a = createEstimateActions({ adminDb: db, ops })
+  const r = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Доставка', amount: 150, clientKey: 'key-00000020' })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.deepEqual(r.data, { expenseId: 'x1', refId: 'extra:x1', applied: true, estimateId: 'act-1', prevTotal: null, total: 2150, status: 'approved', reapproval: null, duplicate: true })
+  db.data.serviceRequests['sr-1'].extraExpenses = [exp]
+  const c = await a.removeExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', expenseId: 'x1' })
+  assert.deepEqual(c, { ok: false, status: 409, code: 'CONFLICT', message: 'Заявку щойно змінили паралельно — спробуйте ще раз.' })
+})
+
 // ---------- HTTP ----------
 const makeApp = (db, staff, notifyClient) => {
   const app = express()
