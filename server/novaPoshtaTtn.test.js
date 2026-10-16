@@ -347,8 +347,33 @@ test('create: the owner by email keeps the full path — any template, no center
     assert.equal(r.status, 200)
     assert.equal(lastSave(t).BackwardDeliveryData, undefined, 'explicit codAmount 0 = without COD')
     r = await t.create({ serviceRequestId: 'sr-1' })
+    assert.equal(r.status, 200, 'without templateId the owner falls back to the center template (the app)')
+    assert.equal(r.json.data.scenario, 'return')
+  } finally { await t.close() }
+})
+
+test('create: the owner by email WITHOUT templateId (the app) takes the center-template path, any center', async () => {
+  const t = await startApp({ staff: OWNER })
+  try {
+    let r = await t.create({ serviceRequestId: 'sr-1', cost: 400 })
+    assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.equal(r.json.data.scenario, 'return', 'center template «з ремонту», not BAD_REQ')
+    assert.equal(lastSave(t).Cost, '400')
+    const w = t.db.writes.find((x) => x.id === 'sr-1')
+    assert.equal(w.patch.returnTtn, '20450999999999')
+    assert.equal(w.patch.stage, 'shipped')
+    // Чужий центр для власника не існує; шаблон центру c2 — «на ремонт» → BAD_SCENARIO, не OTHER_CENTER.
+    r = await t.create({ serviceRequestId: 'sr-2' })
     assert.equal(r.status, 400)
-    assert.equal(r.json.error.code, 'BAD_REQ', 'templateId is still required for the owner')
+    assert.equal(r.json.error.code, 'BAD_SCENARIO')
+    // Наявна ТТН → 409 і для власника на шляху центру.
+    r = await t.create({ serviceRequestId: 'sr-4' })
+    assert.equal(r.status, 409)
+    assert.equal(r.json.error.code, 'TTN_EXISTS')
+    // Замовлення кораблика без шаблону — як було: BAD_REQ.
+    r = await t.create({ boatOrderId: 'bo-1' })
+    assert.equal(r.status, 400)
+    assert.equal(r.json.error.code, 'BAD_REQ')
   } finally { await t.close() }
 })
 

@@ -8,8 +8,8 @@
 // Ключ НП и refs берём у ФОП (write-only секреты). Ошибки НП отдаём текстом — доточить маппинг.
 //
 // Два шляхи доступу (§30 docs/service-requirements.md):
-//  • ВЛАСНИК за email (admin@runferry.de) — повний: будь-який шаблон (templateId), ФОП, наложка,
-//    заявка або замовлення кораблика; без лімітів — як було.
+//  • ВЛАСНИК за email (admin@runferry.de) з templateId — повний: будь-який шаблон, ФОП, наложка,
+//    заявка або замовлення кораблика; без лімітів — як було. Без templateId (застосунок) — шлях центру нижче.
 //  • ДЕЛЕГОВАНИЙ (роль owner/director з users/{uid}, застосунок «RunFerry Сервіс»): лише заявка
 //    СВОГО центру (директор), шаблон = serviceCenters/{center}.returnTtnTemplateId (сценарій return),
 //    ФОП і наложка — з шаблону/факту (поля тіла ігноруються), оголошена вартість 1–20 000 (інакше 300),
@@ -199,7 +199,10 @@ export function registerNpTtn(app, deps = {}) {
       let sr = null
       let subjRef = null
       let tpl = null
-      const delegated = !staff.full
+      // Повний шлях — лише коли власник за email сам обрав шаблон (діалог хаба). Із застосунку
+      // власник шле заявку без templateId — тоді йде шляхом центру, як директор, але без розрізу
+      // по центрах (centerContext пропускає перевірку для staff.full).
+      const delegated = !staff.full || (!tplId && !!srId)
 
       if (delegated) {
         if (!srId) return err(res, 400, 'BAD_REQ', 'Потрібна заявка (serviceRequestId)')
