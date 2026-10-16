@@ -23,6 +23,7 @@ import * as liqpay from './liqpay.js'
 import * as monoChast from './monoChast.js'
 import * as monoAcquire from './monoAcquire.js'
 import * as checkbox from './checkbox.js'
+import { statusTimes, paidRequestPatch } from './statusTimes.js'
 
 const nowIso = () => new Date().toISOString()
 const ADMIN_EMAIL = 'admin@runferry.de'
@@ -149,14 +150,13 @@ export function registerPayments(app, deps) {
       }
     }
     // Привязываем оплату к нашей заявке. Статус → 'done', но НЕ «воскрешаем» скасовану заявку.
+    // paidAt/doneAt/statusChangedAt — для правила «виконаний ремонт ще 14 днів» входящих Binotel.
     if (order.serviceRequestId) {
       try {
         const srRef = adminDb.collection('serviceRequests').doc(String(order.serviceRequestId))
         await adminDb.runTransaction(async (tx) => {
           const s = await tx.get(srRef)
-          const p = { paymentId: order.orderId, updatedAt: nowIso() }
-          if (!s.exists || s.data().status !== 'cancelled') p.status = 'done'
-          tx.set(srRef, p, { merge: true })
+          tx.set(srRef, paidRequestPatch(s.exists ? s.data() : {}, order.orderId, nowIso()), { merge: true })
         })
       } catch (e) {
         console.error('serviceRequest writeback:', e.message)
@@ -682,7 +682,8 @@ export function registerPayments(app, deps) {
           if (!s.exists) return
           const d = s.data()
           if (d.status === 'cancelled' || d.status === 'done' || d.paymentId) return
-          tx.set(srRef, { status: 'approved', updatedAt: nowIso() }, { merge: true })
+          const now = nowIso()
+          tx.set(srRef, { status: 'approved', ...statusTimes(d.status, 'approved', now), updatedAt: now }, { merge: true })
         }).catch(() => {})
       }
       if (!out.ok) return res.status(out.status).json({ success: false, error: { code: out.code, message: out.message } })
