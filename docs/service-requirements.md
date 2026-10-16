@@ -827,6 +827,36 @@
 **Открыто.** Фраза ожидания Binotel на русском (`BINOTEL_PLAYBACK_WAITING`), тариф линии `0443338049`, вебхуки API PUSH
 вместо опроса (с сессией «1С телефония миграция»), перевод мастеров на внутренние линии (`pbxLine`).
 
+### 28.1. Входящие: ответ Binotel `apiCallSettings` из нашей базы через 1С-прокси (2026-10-16)
+
+**Требование.** Входящий звонок клиента маршрутизирует наш бэкенд уже сейчас, не трогая настройки Binotel: вебхук
+`apiCallSettings` по-прежнему принимает 1С (`bot:/binotel`), но пересылает тело нам и возвращает Binotel наш ответ.
+Нужно для реалистичного теста (владелец звонит как клиент, сессия звонков направляет звонок: линия HAPP 903, сценарии,
+суфлёр). Маршрутизация переключается без деплоя. Реальные клиенты, пока не сказано иное, живут на логике 1С.
+
+**Реализация (сервер, `server/binotelWebhook.js`, общий приёмник Binotel по контракту с сессией «1С телефония
+миграция»; `call-completed` и `push` она добавит в тот же модуль).** `POST /api/binotel/call-settings`: токен
+`x-binotel-token` или `?k=` = `BINOTEL_WEBHOOK_TOKEN` (Secret Manager `binotel-webhook-token`; нет env → 503, неверный →
+403). Тело читается сырым (глобальные парсеры пропускают `/api/binotel/`): form-urlencoded с вложенными полями
+PHP-нотации или JSON. Ответ всегда 200: `{customerData{name ≤43, description ≤70, linkToCrmUrl/Title на
+`my.runferry.com/service-request/{id}`, assignedToEmployeeNumber?}, routeData{type, id}?}` или `{}` — тогда 1С отвечает
+по-старому. Клиент ищется по `serviceRequests.clientPhone == +380<последние 9 цифр>` и `clientProfiles/{380…}`; главная
+заявка — свежайшая активная (не `done`/`cancelled`/`shipped`). Критический путь — три чтения Firestore параллельно с
+бюджетом 1,2 с, без внешних вызовов.
+
+**Переключатель — документ `system/binotelRouting`:** `enabled` (false → всегда `{}`), `scope` (`test` — отвечаем только
+номерам из `testNumbers`, `all` — всем), `mode` (`passthrough` — без `routeData`, сценарий линии; `route` — `routeId`),
+`routeType`, `overrides{телефон: routeId | {id,type} | 0}`, `sendCustomerData`, `assignedToEmployeeNumber` (1С шлёт 906),
+`mirrorCallEvents`. Управление: `node server/scripts/binotel-routing.mjs show | set | test-add | override | log`.
+Известные сценарии: 466367 sticky-903 (HAPP), 220956 нерабочее время, 270182 рабочее время, 73622 график 24/7.
+
+**Журнал.** `binotelEvents/{autoId}` (`kind: 'call-settings'`, сырое тело ≤ 8 КБ, разобранные поля, ответ, решение,
+задержка, `expireAt` +180 дней под TTL-политику) пишется после ответа. В `callEvents` (операторская доска) — только
+флагом `mirrorCallEvents` и только для входящих, на которые мы ответили: туда уже пишет `call.incoming` старый бот.
+
+**1С.** Фрагмент для `МодульРаботыСТГ` (пересылка тела, таймаут 2 с, откат на штатную логику, URL и токен — в константах
+1С) и порядок вставки/проверки/отката: `runferry-briefs/telephony/binotel-1c-proxy-2026-10-16.md`.
+
 ## 29. Голосова надиктовка у застосунку сервісу: запис → сервер → розшифровка → ШІ-помічник (2026-10-15)
 
 **Требование.** Мастер в приложении «RunFerry Сервіс» не печатает, а надиктовывает: кнопка микрофона в редакторе
