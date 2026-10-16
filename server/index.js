@@ -70,7 +70,7 @@ app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'
 // как в standalone) — глобальные парсеры его пропускают, иначе его express.json стал бы no-op.
 // Вебхуки Binotel (/api/binotel/*) тоже читают сырое тело сами: журнал хранит байты как прислала АТС,
 // а вложенные form-поля разбирает свой парсер (binotelWebhook.js).
-const selfParsedBody = (p) => p.startsWith('/operator-bot') || p.startsWith('/api/binotel/')
+const selfParsedBody = (p) => p.startsWith('/operator-bot') || p.toLowerCase().startsWith('/api/binotel/') // маршрути Express нечутливі до регістру
 const notOperatorBot = (mw) => (req, res, next) => (selfParsedBody(req.path) ? next() : mw(req, res, next))
 // rawBody сохраняем для проверки подписи Viber-/monobank-вебхуков (HMAC-SHA256 сырого тела).
 app.use(notOperatorBot(express.json({ verify: (req, _res, buf) => { req.rawBody = buf } })))

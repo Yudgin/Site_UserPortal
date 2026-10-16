@@ -221,12 +221,14 @@ test('pickRequests і clip', () => {
 })
 
 // ---------- маршрут цілком на підробленому Firestore ----------
-function fakeDb({ routing, requests = [], profile = null, orders = [], slowMs = 0, journalMs = 0 }) {
+function fakeDb({ routing, requests = [], profile = null, orders = [], slowMs = 0, journalMs = 0, throwOnParsedKey = null }) {
   const writes = []
+  const reads = []
   const delay = (v) => new Promise((r) => setTimeout(() => r(v), slowMs))
   let auto = 0
   const db = {
     writes,
+    reads,
     collection(name) {
       return {
         doc(id) {
@@ -234,19 +236,25 @@ function fakeDb({ routing, requests = [], profile = null, orders = [], slowMs = 
           return {
             id: docId,
             get: async () => {
+              reads.push(name)
               if (name === 'system') return delay({ exists: !!routing, data: () => routing })
               if (name === 'clientProfiles') return delay({ exists: !!profile, data: () => profile })
               return { exists: false, data: () => null }
             },
-            set: async (data) => {
-              if (journalMs && name === 'binotelEvents') await new Promise((r) => setTimeout(r, journalMs))
-              writes.push({ coll: name, id: docId, data })
+            set: (data) => {
+              // як справжній клієнт Firestore: недопустиме ім'я поля → СИНХРОННИЙ виняток
+              if (throwOnParsedKey != null && data.parsed && Object.prototype.hasOwnProperty.call(data.parsed, throwOnParsedKey)) throw new Error('Element at index 0 should not be an empty string.')
+              return (async () => {
+                if (journalMs && name === 'binotelEvents') await new Promise((r) => setTimeout(r, journalMs))
+                writes.push({ coll: name, id: docId, data })
+              })()
             },
           }
         },
         where(field, op, value) {
           const src = name === 'boatOrders' ? orders : requests
-          return { limit: () => ({ get: async () => delay({ docs: src.filter((r) => r[field] === value).map((r) => ({ id: r.id, data: () => r })) }) }) }
+          const match = (r) => (op === 'in' ? value.includes(r[field]) : r[field] === value)
+          return { limit: () => ({ get: async () => { reads.push(name); return delay({ docs: src.filter(match).map((r) => ({ id: r.id, data: () => r })) }) } }) }
         },
       }
     },
@@ -357,14 +365,105 @@ test('route: журнал записаний ДО відповіді; повіл
   })
 })
 
-test('route: короткий, порожній і прихований номер → {} без пошуку', async () => {
+test('route: короткий, порожній і прихований номер → {} без жодного читання Firestore', async () => {
   const db = fakeDb({ routing: { scope: 'all', mode: 'route', routeId: 466367 } })
   await withServer(db, async (base) => {
+    await settle()
+    db.reads.length = 0 // прогрів system/binotelRouting при реєстрації — не про дзвінок
     for (const n of ['', '12345678', 'anonymous', '0']) {
       const r = await fetch(`${base}/api/binotel/call-settings`, { method: 'POST', body: `requestType=apiCallSettings&externalNumber=${n}&pbxNumber=0443338049&callType=0`, headers: { 'x-binotel-token': 'test-token' } })
       assert.deepEqual(await r.json(), {}, `number «${n}»`)
     }
     const decisions = db.writes.filter((w) => w.coll === 'binotelEvents').map((w) => w.data.decision)
     assert.deepEqual(decisions, ['no-phone', 'no-phone', 'no-phone', 'no-phone'])
+    assert.deepEqual(db.reads, [], 'no Firestore reads for a missing number')
   })
+})
+
+test('ревʼю: поле-об’єкт (externalNumber[toString]) не валить процес — 200 {}, наступний запит працює', async () => {
+  const db = fakeDb({ routing: { scope: 'all', mode: 'route', routeId: 466367, mirrorCallEvents: true }, requests: [SR({ clientPhone: '+380675499555' })] })
+  await withServer(db, async (base) => {
+    const url = `${base}/api/binotel/call-settings`
+    const h = { 'x-binotel-token': 'test-token' }
+    for (const body of ['requestType=apiCallSettings&externalNumber[toString]=1&callType=0',
+      'requestType=apiCallSettings&externalNumber=0675499555&pbxNumber[toString]=1&callType[toString]=1',
+      'requestType[valueOf]=1&externalNumber=0675499555']) {
+      const r = await fetch(url, { method: 'POST', body, headers: h })
+      assert.equal(r.status, 200, body)
+      await r.json()
+    }
+    const rj = await fetch(url, { method: 'POST', body: JSON.stringify({ requestType: 'apiCallSettings', externalNumber: { toString: 1 }, callType: 0 }), headers: { ...h, 'content-type': 'application/json' } })
+    assert.deepEqual(await rj.json(), {})
+    const ok = await fetch(url, { method: 'POST', body: FORM, headers: h })
+    assert.deepEqual((await ok.json()).routeData, { type: 'route', id: 466367 })
+    await settle()
+  })
+})
+
+test('ревʼю: розбір форми лінійний і обмежений (256 КБ «x[]=» і «&=» — швидко)', () => {
+  const objPush = 'x[y]=1' + '&x[]='.repeat(50000)
+  let t0 = Date.now()
+  const a = parseNestedForm(objPush)
+  assert.ok(Date.now() - t0 < 300, `object push took ${Date.now() - t0} ms`)
+  assert.deepEqual(a, { x: { y: '1' } })
+  const empty = '&='.repeat(100000)
+  t0 = Date.now()
+  assert.deepEqual(parseNestedForm(empty), {})
+  assert.ok(Date.now() - t0 < 300, `empty keys took ${Date.now() - t0} ms`)
+  const many = Array.from({ length: 5000 }, (_, i) => `k${i}=1`).join('&')
+  assert.equal(Object.keys(parseNestedForm(many)).length, 1000) // ліміт пар
+  assert.equal(parseNestedForm('a[]=' + Array(300).fill('1').join('&a[]=')).a.length, 200) // ліміт масиву
+  assert.equal(parseNestedForm('d=1&d=2&' + 'd=3&'.repeat(300)).d.length, 200)
+})
+
+test('ревʼю: синхронна відмова Firestore на parsed — запасний запис без parsed', async () => {
+  const db = fakeDb({ routing: { scope: 'all' }, throwOnParsedKey: '' })
+  await withServer(db, async (base) => {
+    const r = await fetch(`${base}/api/binotel/call-settings`, { method: 'POST', body: JSON.stringify({ requestType: 'apiCallSettings', externalNumber: '0675499555', '': 'x' }), headers: { 'x-binotel-token': 'test-token', 'content-type': 'application/json' } })
+    assert.equal(r.status, 200)
+    await r.json()
+    const e = db.writes.find((w) => w.coll === 'binotelEvents')
+    assert.ok(e, 'fallback journal entry written')
+    assert.equal(e.data.parsed, null)
+    assert.equal(e.data.parsedRejected, true)
+  })
+})
+
+test('ревʼю: шлях в іншому регістрі, тіло вже з’їв глобальний парсер — однаково правильне рішення', async () => {
+  process.env.BINOTEL_WEBHOOK_TOKEN = 'test-token'
+  const db = fakeDb({ routing: { scope: 'all', mode: 'route', routeId: 466367 }, requests: [SR({ clientPhone: '+380675499555' })] })
+  const app = express()
+  // стара (чутлива до регістру) перевірка — глобальні парсери з'їдають тіло для /API/Binotel/…
+  const skip = (mw) => (req, res, next) => (req.path.startsWith('/api/binotel/') ? next() : mw(req, res, next))
+  app.use(skip(express.json({ verify: (req, _res, buf) => { req.rawBody = buf } })))
+  app.use(skip(express.urlencoded({ extended: true })))
+  registerBinotelWebhook(app, { adminDb: db })
+  const server = await new Promise((r) => { const s = app.listen(0, () => r(s)) })
+  try {
+    const base = `http://127.0.0.1:${server.address().port}/API/Binotel/call-settings`
+    const rf = await fetch(base, { method: 'POST', body: FORM, headers: { 'x-binotel-token': 'test-token', 'content-type': 'application/x-www-form-urlencoded' } })
+    assert.deepEqual((await rf.json()).routeData, { type: 'route', id: 466367 })
+    const rj = await fetch(base, { method: 'POST', body: JSON.stringify({ requestType: 'apiCallSettings', externalNumber: '0675499555', callType: 0 }), headers: { 'x-binotel-token': 'test-token', 'content-type': 'application/json' } })
+    assert.deepEqual((await rj.json()).routeData, { type: 'route', id: 466367 })
+  } finally { server.close(); delete process.env.BINOTEL_WEBHOOK_TOKEN }
+})
+
+test('ревʼю: номер у заявці/замовленні без «+» або з нулем — знаходиться; закритий ремонт — статусом', async () => {
+  const routing = { scope: 'all', mode: 'byClient', categoryRoutes: { openRequest: 501, knownClient: 502 } }
+  const db = fakeDb({ routing, requests: [SR({ clientPhone: '380675499555' })], orders: [{ id: 'bo1', clientPhone: '0671112233', status: 'done', clientName: 'Сидоренко Олег', soldAt: '2025-06-12T09:00:00Z' }] })
+  await withServer(db, async (base) => {
+    const url = `${base}/api/binotel/call-settings`
+    const r1 = await fetch(url, { method: 'POST', body: FORM, headers: { 'x-binotel-token': 'test-token' } })
+    assert.deepEqual((await r1.json()).routeData, { type: 'routeWithTime', id: 501 })
+    const r2 = await fetch(url, { method: 'POST', body: FORM.replace('0675499555', '0671112233'), headers: { 'x-binotel-token': 'test-token' } })
+    const j2 = await r2.json()
+    assert.deepEqual(j2.routeData, { type: 'routeWithTime', id: 502 })
+    assert.equal(j2.customerData.name, 'Сидоренко Олег')
+  })
+  const closed = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'done', stage: 'received', createdAt: daysAgo(300) })] })
+  assert.ok(closed.description.startsWith('Останній ремонт №1234 · Виконано'), closed.description)
+  const cancelled = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'cancelled', stage: 'shipped', createdAt: daysAgo(300) })] })
+  assert.ok(cancelled.description.startsWith('Останній ремонт №1234 · Скасовано'), cancelled.description)
+  // майбутня позначка завершення рахується як дія
+  assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(40), doneAt: daysAgo(3) }), NOW), true)
 })

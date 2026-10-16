@@ -38,7 +38,7 @@ const LOOKUP_BUDGET_MS = Number(process.env.BINOTEL_LOOKUP_BUDGET_MS || 1200) //
 const JOURNAL_BUDGET_MS = Number(process.env.BINOTEL_JOURNAL_BUDGET_MS || 300)
 const RAW_MAX_STORE = 8 * 1024 // скільки сирого тіла кладемо в журнал
 const JOURNAL_TTL_DAYS = 180
-const SR_SCAN_LIMIT = 25 // заявок одного телефону для вибору «головної»
+const SR_SCAN_LIMIT = 100 // заявок одного телефону (у найактивнішого номера вже 24; без orderBy — беремо з запасом)
 const ORDER_SCAN_LIMIT = 10 // замовлень корабликів одного телефону
 export const NAME_MAX = 43 // Binotel: довше обрізає плагін/телефон
 export const DESC_MAX = 70
@@ -55,16 +55,22 @@ const STATUS_UK = {
 
 // ---------- розбір тіла ----------
 
-// Вкладені form-поля як у qs/PHP: a[b][0][c]=v → {a:{b:[{c:v}]}}. Глибина ≤ 6, індекси масивів ≤ 200,
-// ключі __proto__/constructor/prototype відкидаються. Повтор простого ключа → масив значень.
+// Вкладені form-поля як у qs/PHP: a[b][0][c]=v → {a:{b:[{c:v}]}}. Обмеження проти зловмисного тіла (ревʼю 2026-10-16):
+// ≤ MAX_FORM_PARTS пар (як parameterLimit у qs), глибина ≤ 6, індекси й довжина масивів ≤ 200, «a[]» лише для масивів
+// (на об'єкті порожній ключ коштував би Object.keys на кожну пару — квадратичний розбір), ключі
+// __proto__/constructor/prototype відкидаються, наявність ключа — лише власна (успадкований toString тощо не рахується).
+// Повтор простого ключа → масив значень.
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+const MAX_FORM_PARTS = 1000
+const MAX_ARRAY = 200
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 const decode = (s) => {
   try { return decodeURIComponent(s.replace(/\+/g, ' ')) } catch { return s }
 }
 export function parseNestedForm(raw) {
   const out = {}
   if (!raw) return out
-  for (const part of String(raw).split('&')) {
+  for (const part of String(raw).split('&', MAX_FORM_PARTS)) {
     if (!part) continue
     const eq = part.indexOf('=')
     const key = decode(eq === -1 ? part : part.slice(0, eq))
@@ -76,21 +82,28 @@ export function parseNestedForm(raw) {
     for (let i = 0; i < path.length; i++) {
       let k = path[i]
       const last = i === path.length - 1
-      if (k === '') k = Array.isArray(node) ? node.length : Object.keys(node).length // a[]=…
-      if (Array.isArray(node) && !/^\d+$/.test(String(k))) break
-      if (Array.isArray(node) && Number(k) > 200) break
+      if (k === '') {
+        if (!Array.isArray(node)) break // a[]= лише в масив
+        k = node.length
+      }
+      if (Array.isArray(node) && (!/^\d+$/.test(String(k)) || Number(k) >= MAX_ARRAY)) break
+      const cur = own(node, k) ? node[k] : undefined
       if (last) {
-        if (node[k] === undefined) node[k] = val
-        else if (Array.isArray(node[k])) node[k].push(val)
-        else if (typeof node[k] !== 'object') node[k] = [node[k], val]
+        if (cur === undefined) node[k] = val
+        else if (Array.isArray(cur)) { if (cur.length < MAX_ARRAY) cur.push(val) }
+        else if (typeof cur !== 'object' || cur === null) node[k] = [cur, val]
       } else {
-        if (node[k] === undefined || typeof node[k] !== 'object') node[k] = /^\d+$/.test(path[i + 1]) || path[i + 1] === '' ? [] : {}
+        if (cur === undefined || cur === null || typeof cur !== 'object') node[k] = /^\d+$/.test(path[i + 1]) || path[i + 1] === '' ? [] : {}
         node = node[k]
       }
     }
   }
   return out
 }
+
+// Значення поля АТС як рядок: лише рядок або скінченне число; об'єкти/масиви (externalNumber[toString]=1 тощо) → ''.
+// Інакше String(obj) у normPhone кидав би TypeError і (поза try) валив процес.
+export const str = (v) => (typeof v === 'string' ? v : typeof v === 'number' && Number.isFinite(v) ? String(v) : '')
 
 // Сире тіло → об'єкт. JSON — за Content-Type або якщо тіло починається з «{»; інакше form-urlencoded.
 export function parseBinotelBody(rawBuf, contentType = '') {
@@ -211,9 +224,14 @@ const msOf = (iso) => {
 }
 // Остання справжня дія по заявці. updatedAt НЕ беремо: масові прогони синхронізації 1С (2026-09-21, 10-06, 10-13,
 // 10-14) і бекфіл оновили його майже всім заявкам. createdAt у заявок з 1С = дата документа 1С (parse1cDate).
+// doneAt / statusChangedAt / paidAt — якщо колись їх почнуть ставити записувачі статусу (зараз payments.js,
+// estimateEngine і хаб час завершення не пишуть, тож doneGraceDays рахується від останньої дії людини).
 export const lastActivityMs = (sr) => Math.max(
   msOf(sr?.createdAt),
   msOf(sr?.diagnostics?.at),
+  msOf(sr?.doneAt),
+  msOf(sr?.statusChangedAt),
+  msOf(sr?.paidAt),
   ...(Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).filter((h) => h && !AUTO_STAGE_BY.has(h.by)).map((h) => msOf(h.at)),
 )
 // Незакрита заявка (узгоджено з сесією «1С телефонія міграція», 2026-10-16). Не скасована і:
@@ -262,7 +280,11 @@ export function buildCustomerData({ phone, requests, orders, profile, siteUrl, a
   if (main) {
     const no = numberOf(main)
     const head = `${mainOpen ? 'Ремонт' : 'Останній ремонт'}${no ? ` №${no}` : ''}`
-    const state = STAGE_UK[main.stage] || STATUS_UK[main.status] || ''
+    // Закритий ремонт показуємо статусом («Виконано»/«Скасовано»), а не етапом: синхронізація 1С поставила
+    // 'received' сотням виконаних ремонтів, і «Отримано» читалося б як «кораблик у нас». Виняток — «Відправлено».
+    const state = mainOpen
+      ? STAGE_UK[main.stage] || STATUS_UK[main.status] || ''
+      : main.stage === 'shipped' && main.status !== 'cancelled' ? STAGE_UK.shipped : STATUS_UK[main.status] || ''
     const more = openCount > 1 ? ` (+${openCount - 1})` : ''
     const parts = [head + more, state, main.boat, main.complaint].filter(Boolean)
     description = clip(parts.join(' · '), DESC_MAX)
@@ -285,12 +307,13 @@ export function buildCustomerData({ phone, requests, orders, profile, siteUrl, a
 
 // Рішення: що відповісти на apiCallSettings. Повертає {response, decision, routeId, category}.
 export function decideCallSettings({ fields, routing, lookup, siteUrl, nowMs = Date.now() }) {
-  const phone = normPhone(fields.externalNumber)
-  if (fields.requestType && fields.requestType !== 'apiCallSettings') return { response: {}, decision: 'not-call-settings' }
+  const phone = normPhone(str(fields.externalNumber))
+  const requestType = str(fields.requestType)
+  if (requestType && requestType !== 'apiCallSettings') return { response: {}, decision: 'not-call-settings' }
   if (!phone) return { response: {}, decision: 'no-phone' }
   if (!routing || !routing.enabled) return { response: {}, decision: routing?.missing ? 'no-routing-doc' : 'disabled' }
   if (routing.scope === 'test' && !routing.testNumbers.includes(phone)) return { response: {}, decision: 'out-of-scope' }
-  const incoming = String(fields.callType ?? '0') !== '1'
+  const incoming = str(fields.callType).trim() !== '1'
   const response = {}
   if (routing.sendCustomerData && lookup) {
     response.customerData = buildCustomerData({
@@ -354,12 +377,16 @@ export function registerBinotelWebhook(app, deps) {
     next()
   }
 
+  // Варіанти запису одного номера (+380…, 380…, 0…): заявки з вхідних менеджера і ручні замовлення корабликів
+  // зберігають телефон як є. Один запит 'in' на колекцію, як у мобільному застосунку.
+  const phoneVariants = (e164) => [e164, e164.slice(1), '0' + e164.slice(4)]
   const lookupClient = async (phone) => {
     const digits = phone.replace(/\D/g, '')
+    const variants = phoneVariants(phone)
     const [srSnap, profSnap, orderSnap] = await Promise.all([
-      adminDb.collection('serviceRequests').where('clientPhone', '==', phone).limit(SR_SCAN_LIMIT).get(),
+      adminDb.collection('serviceRequests').where('clientPhone', 'in', variants).limit(SR_SCAN_LIMIT).get(),
       adminDb.collection('clientProfiles').doc(digits).get(),
-      adminDb.collection('boatOrders').where('clientPhone', '==', phone).limit(ORDER_SCAN_LIMIT).get(),
+      adminDb.collection('boatOrders').where('clientPhone', 'in', variants).limit(ORDER_SCAN_LIMIT).get(),
     ])
     return {
       requests: srSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
@@ -375,57 +402,70 @@ export function registerBinotelWebhook(app, deps) {
   // а 1С чекає нас ≤ 2 с — нехай цю ціну заплатить старт, а не перший дзвінок.
   if (adminDb) loadRouting().catch(() => {})
 
-  app.post('/api/binotel/call-settings', guard, rawBody, async (req, res) => {
+  // Тіло: зазвичай Buffer від express.raw. Якщо глобальний парсер усе ж з'їв тіло (шлях в іншому регістрі тощо) —
+  // беремо req.rawBody (його зберігає глобальний express.json) або вже розібраний об'єкт.
+  const readBody = (req) => {
+    const ct = req.get('content-type') || ''
+    if (Buffer.isBuffer(req.body)) return parseBinotelBody(req.body, ct)
+    if (Buffer.isBuffer(req.rawBody)) return parseBinotelBody(req.rawBody, ct)
+    if (req.body && typeof req.body === 'object' && Object.keys(req.body).length) return { raw: '', format: 'preparsed', data: req.body }
+    return parseBinotelBody('', ct)
+  }
+
+  const handleCallSettings = async (req, reply) => {
     const started = Date.now()
-    let parsed = { raw: '', format: 'form', data: {} }
+    const parsed = readBody(req)
+    const f = parsed.data && typeof parsed.data === 'object' ? parsed.data : {}
+    const phone = normPhone(str(f.externalNumber)) || null
+    const requestType = str(f.requestType)
     let result = { response: {}, decision: 'error' }
     let routing = null
     let lookup = null
-    try {
-      parsed = parseBinotelBody(req.body, req.get('content-type') || '')
-      const f = parsed.data
-      const phone = normPhone(f.externalNumber)
-      if (!adminDb) {
-        result = { response: {}, decision: 'no-db' }
-      } else {
+    if (!adminDb) {
+      result = { response: {}, decision: 'no-db' }
+    } else if (!phone || (requestType && requestType !== 'apiCallSettings')) {
+      // Порожній, прихований, короткий номер або не apiCallSettings — {} одразу, без жодного читання Firestore.
+      result = decideCallSettings({ fields: f, routing: null, lookup: null, siteUrl })
+    } else {
+      try {
         const [r, l] = await Promise.all([
           withBudget(loadRouting(), LOOKUP_BUDGET_MS),
-          phone ? withBudget(lookupClient(phone), LOOKUP_BUDGET_MS) : Promise.resolve(null),
+          withBudget(lookupClient(phone), LOOKUP_BUDGET_MS),
         ])
         routing = r === TIMEOUT ? null : r
         lookup = l === TIMEOUT ? null : l
         result = routing ? decideCallSettings({ fields: f, routing, lookup, siteUrl }) : { response: {}, decision: 'routing-timeout' }
+      } catch (e) {
+        console.error('binotel/call-settings:', e.message)
+        result = { response: {}, decision: 'error' }
       }
-    } catch (e) {
-      console.error('binotel/call-settings:', e.message)
-      result = { response: {}, decision: 'error' }
     }
     const latencyMs = Date.now() - started // час до рішення; журнал нижче — окремо
 
     // ---- журнал: запис стартує до відповіді, чекаємо його ≤ JOURNAL_BUDGET_MS ----
     let journalRef = null
     let main = null
-    const f = parsed.data || {}
-    const phone = normPhone(f.externalNumber) || null
     const at = nowIso()
+    const field = (v, max = 64) => str(v).slice(0, max) || null
     if (adminDb) {
       try {
         journalRef = adminDb.collection('binotelEvents').doc()
         const nowMs = Date.now()
         main = lookup ? pickRequests(lookup.requests, nowMs, routing || DEFAULT_ROUTING).main : null
+        const callTypeStr = str(f.callType).trim()
         const entry = {
           kind: 'call-settings',
           via: String(req.get('x-binotel-via') || 'direct').slice(0, 32),
           format: parsed.format,
           contentType: String(req.get('content-type') || '').slice(0, 100) || null,
-          requestType: f.requestType ? String(f.requestType) : null,
-          callType: f.callType != null && f.callType !== '' ? Number(f.callType) : null,
+          requestType: field(f.requestType),
+          callType: /^\d+$/.test(callTypeStr) ? Number(callTypeStr) : null,
           externalNumber: phone,
-          externalNumberRaw: f.externalNumber != null ? String(f.externalNumber).slice(0, 32) : null,
-          pbxNumber: f.pbxNumber != null ? String(f.pbxNumber) : null,
-          internalNumber: f.internalNumber != null ? String(f.internalNumber) : null,
-          companyID: f.companyID != null ? String(f.companyID) : null,
-          generalCallID: f.generalCallID != null ? String(f.generalCallID) : null,
+          externalNumberRaw: field(f.externalNumber, 32),
+          pbxNumber: field(f.pbxNumber, 32),
+          internalNumber: field(f.internalNumber, 32),
+          companyID: field(f.companyID, 32),
+          generalCallID: field(f.generalCallID, 64),
           raw: parsed.raw.length > RAW_MAX_STORE ? parsed.raw.slice(0, RAW_MAX_STORE) : parsed.raw,
           rawTruncated: parsed.raw.length > RAW_MAX_STORE,
           parsed: parsed.raw.length <= RAW_MAX_STORE ? f : null,
@@ -439,27 +479,47 @@ export function registerBinotelWebhook(app, deps) {
           at,
           expireAt: new Date(nowMs + JOURNAL_TTL_DAYS * DAY_MS),
         }
-        // Ключі розібраного тіла — від АТС; якщо Firestore відкине якесь ім'я поля (__x__ тощо), пишемо без parsed.
-        const write = journalRef.set(entry).catch(() => journalRef.set({ ...entry, parsed: null, parsedRejected: true }))
+        // Ключі розібраного тіла — від АТС. Firestore відкидає порожні імена, __x__, вкладені масиви, глибину > 20 —
+        // інколи синхронним винятком, тому перша спроба загорнута в then: запасний запис без parsed спрацює завжди.
+        const write = Promise.resolve()
+          .then(() => journalRef.set(entry))
+          .catch(() => journalRef.set({ ...entry, parsed: null, parsedRejected: true }))
         write.catch((e) => console.error('binotel/call-settings journal:', e.message))
         await withBudget(write, JOURNAL_BUDGET_MS)
       } catch (e) {
         console.error('binotel/call-settings journal:', e.message)
       }
     }
-    res.status(200).json(result.response)
+    reply(result.response)
 
     // Дзеркало в callEvents — некритичне, після відповіді; лише для вхідних, на які ми відповіли по суті (інакше
     // дублювали б картки старого бота).
-    if (adminDb && journalRef && routing?.mirrorCallEvents && phone && String(f.callType ?? '0') !== '1' && Object.keys(result.response).length) {
+    if (adminDb && journalRef && routing?.mirrorCallEvents && phone && str(f.callType).trim() !== '1' && Object.keys(result.response).length) {
       const callId = `binotel-cs-${journalRef.id}`
-      adminDb.collection('callEvents').doc(callId).set({
+      await adminDb.collection('callEvents').doc(callId).set({
         callId, source: 'binotel-settings', kind: 'incoming', phone,
         clientName: result.response.customerData?.name || null,
-        line: f.pbxNumber != null ? String(f.pbxNumber) : null,
+        line: field(f.pbxNumber, 32),
         serviceRequestId: main?.id || null, routeId: result.routeId || null, binotelEventId: journalRef.id,
         direction: 'inbound', at, lastType: 'call.incoming', updatedAt: at,
       }, { merge: true }).catch((e) => console.error('binotel/call-settings mirror:', e.message))
+    }
+  }
+
+  // Обгортка: будь-який виняток після авторизації → 200 {} (1С тоді відповідає по-старому), і ніколи не
+  // необроблене відхилення промісу (Express 4 не ловить async-обробники, Node 20 на ньому завершує процес).
+  app.post('/api/binotel/call-settings', guard, rawBody, async (req, res) => {
+    let sent = false
+    const reply = (body) => {
+      if (sent) return
+      sent = true
+      res.status(200).json(body)
+    }
+    try {
+      await handleCallSettings(req, reply)
+    } catch (e) {
+      console.error('binotel/call-settings fatal:', e?.message || e)
+      reply({})
     }
   })
 }
