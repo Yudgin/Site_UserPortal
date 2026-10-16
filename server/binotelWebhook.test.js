@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import express from 'express'
 import {
   parseNestedForm, parseBinotelBody, normalizeRouting, decideCallSettings, buildCustomerData, pickRequests,
-  clip, NAME_MAX, DESC_MAX, registerBinotelWebhook,
+  clip, NAME_MAX, DESC_MAX, registerBinotelWebhook, clientCategory,
 } from './binotelWebhook.js'
 
 const FORM = 'requestType=apiCallSettings&externalNumber=0675499555&pbxNumber=0443338049&companyID=12345&callType=0'
@@ -99,6 +99,35 @@ test('decide: passthrough — лише customerData; route — routeData; overri
   const timeout = decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all', mode: 'route', routeId: 466367 }), lookup: null })
   assert.deepEqual(timeout.response, { routeData: { type: 'route', id: 466367 } })
   assert.equal(timeout.decision, 'route+lookup-timeout')
+})
+
+test('byClient: категорія клієнта → сценарій routeWithTime; без id або без пошуку → без routeData; override перемагає', () => {
+  assert.equal(clientCategory(null), null)
+  assert.equal(clientCategory({ requests: [SR()] }), 'openRequest')
+  assert.equal(clientCategory({ requests: [SR({ status: 'done' })] }), 'knownClient')
+  assert.equal(clientCategory({ requests: [SR({ stage: 'shipped' })] }), 'knownClient')
+  assert.equal(clientCategory({ requests: [], profile: { name: 'Олег' } }), 'knownClient')
+  assert.equal(clientCategory({ requests: [], profile: null }), 'unknown')
+
+  const routing = normalizeRouting({ scope: 'all', mode: 'byClient', categoryRoutes: { openRequest: 501, knownClient: { id: 502, type: 'route' }, unknown: 0 } })
+  assert.deepEqual(routing.categoryRoutes.openRequest, { id: 501, type: 'routeWithTime' })
+  const open = decideCallSettings({ fields, routing, lookup })
+  assert.deepEqual(open.response.routeData, { type: 'routeWithTime', id: 501 })
+  assert.equal(open.decision, 'byClient:openRequest')
+  assert.equal(open.category, 'openRequest')
+  const known = decideCallSettings({ fields, routing, lookup: { requests: [SR({ status: 'cancelled' })] } })
+  assert.deepEqual(known.response.routeData, { type: 'route', id: 502 })
+  const unknown = decideCallSettings({ fields, routing, lookup: { requests: [], profile: null } })
+  assert.equal(unknown.response.routeData, undefined)
+  assert.equal(unknown.decision, 'byClient:unknown-none')
+  const noLookup = decideCallSettings({ fields, routing, lookup: null })
+  assert.deepEqual(noLookup.response, {})
+  const ov = decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all', mode: 'byClient', categoryRoutes: { openRequest: 501 }, overrides: { '0675499555': 466367 } }), lookup })
+  assert.deepEqual(ov.response.routeData, { type: 'route', id: 466367 })
+  const noIds = decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all', mode: 'byClient' }), lookup })
+  assert.equal(noIds.response.routeData, undefined)
+  assert.equal(noIds.decision, 'byClient:openRequest-none')
+  assert.equal(normalizeRouting({ mode: 'whatever' }).mode, 'passthrough')
 })
 
 test('customerData: межі довжини, номер без нулів, етап, кілька заявок, без заявок, відповідальний', () => {

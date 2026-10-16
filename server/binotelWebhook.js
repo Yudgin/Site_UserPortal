@@ -104,10 +104,15 @@ export const DEFAULT_ROUTING = {
   enabled: true, // false → завжди {} (повністю логіка 1С)
   scope: 'test', // 'test' — відповідаємо лише номерам з testNumbers; 'all' — усім
   testNumbers: [],
-  mode: 'passthrough', // 'passthrough' — routeData не віддаємо (сценарій лінії); 'route' — routeId
+  // 'passthrough' — routeData не віддаємо (сценарій лінії); 'route' — routeId; 'byClient' — сценарій за категорією
+  // клієнта з categoryRoutes (схема сесії «Голосові заглушки для сценаріїв Binotel», 2026-10-16)
+  mode: 'passthrough',
   routeId: null,
   routeType: 'route', // або 'routeWithTime' (ID у двох списках Binotel можуть збігатися)
   overrides: {}, // {телефон: routeId | {id, type} | 0} — діє за будь-якого mode; 0/null → без routeData
+  // mode 'byClient': {openRequest: S2, knownClient: S1, unknown: —} — routeId | {id, type}; тип за замовчуванням
+  // routeWithTime (робочий час рахує Binotel); категорії немає або id порожній → без routeData (сценарій лінії S0)
+  categoryRoutes: {},
   sendCustomerData: true,
   assignedToEmployeeNumber: null, // 1С зараз завжди шле 906
   mirrorCallEvents: false,
@@ -118,6 +123,11 @@ const posInt = (v) => {
   return Number.isInteger(n) && n > 0 ? n : null
 }
 const routeTypeOf = (t) => (t === 'routeWithTime' ? 'routeWithTime' : 'route')
+// Запис маршруту: число або {id|routeId, type|routeType}; тип за замовчуванням — defaultType.
+const routeEntry = (v, defaultType) => (v && typeof v === 'object'
+  ? { id: posInt(v.id ?? v.routeId), type: routeTypeOf(v.type ?? v.routeType ?? defaultType) }
+  : { id: posInt(v), type: routeTypeOf(defaultType) })
+export const CATEGORIES = ['openRequest', 'knownClient', 'unknown']
 
 export function normalizeRouting(doc) {
   const d = doc && typeof doc === 'object' ? doc : null
@@ -128,18 +138,21 @@ export function normalizeRouting(doc) {
   for (const [k, v] of Object.entries(src)) {
     const p = normPhone(k)
     if (!p) continue
-    if (v && typeof v === 'object') overrides[p] = { id: posInt(v.id ?? v.routeId), type: routeTypeOf(v.type ?? v.routeType ?? d.routeType) }
-    else overrides[p] = { id: posInt(v), type: routeTypeOf(d.routeType) }
+    overrides[p] = routeEntry(v, d.routeType)
   }
+  const categoryRoutes = {}
+  const cr = d.categoryRoutes && typeof d.categoryRoutes === 'object' ? d.categoryRoutes : {}
+  for (const c of CATEGORIES) if (cr[c] != null) categoryRoutes[c] = routeEntry(cr[c], 'routeWithTime')
   const assigned = d.assignedToEmployeeNumber == null ? '' : String(d.assignedToEmployeeNumber).trim()
   return {
     enabled: d.enabled !== false,
     scope: d.scope === 'all' ? 'all' : 'test',
     testNumbers,
-    mode: d.mode === 'route' ? 'route' : 'passthrough',
+    mode: d.mode === 'route' || d.mode === 'byClient' ? d.mode : 'passthrough',
     routeId: posInt(d.routeId),
     routeType: routeTypeOf(d.routeType),
     overrides,
+    categoryRoutes,
     sendCustomerData: d.sendCustomerData !== false,
     assignedToEmployeeNumber: assigned === '' ? null : /^\d+$/.test(assigned) ? Number(assigned) : assigned, // числом, як шле 1С
     mirrorCallEvents: d.mirrorCallEvents === true,
@@ -193,7 +206,18 @@ export function buildCustomerData({ phone, requests, profile, siteUrl, assignedT
   return cd
 }
 
-// Рішення: що відповісти на apiCallSettings. Повертає {response, decision, routeId}.
+// Категорія клієнта для mode 'byClient': незакрита заявка (не done/cancelled/shipped) → openRequest; реальна історія
+// (будь-яка заявка або профіль клієнта з сайту/ботів) → knownClient; інакше unknown. Картки, які 1С створює на кожен
+// дзвінок, сюди не потрапляють — у нашій базі їх немає. Пошук не встиг → null (маршрут не віддаємо).
+export function clientCategory(lookup) {
+  if (!lookup) return null
+  const reqs = (lookup.requests || []).filter(Boolean)
+  if (reqs.some(isActive)) return 'openRequest'
+  if (reqs.length || lookup.profile) return 'knownClient'
+  return 'unknown'
+}
+
+// Рішення: що відповісти на apiCallSettings. Повертає {response, decision, routeId, category}.
 export function decideCallSettings({ fields, routing, lookup, siteUrl }) {
   const phone = normPhone(fields.externalNumber)
   if (fields.requestType && fields.requestType !== 'apiCallSettings') return { response: {}, decision: 'not-call-settings' }
@@ -206,6 +230,7 @@ export function decideCallSettings({ fields, routing, lookup, siteUrl }) {
     response.customerData = buildCustomerData({ phone, requests: lookup.requests, profile: lookup.profile, siteUrl, assignedToEmployeeNumber: routing.assignedToEmployeeNumber })
   }
   let routeId = null
+  let category = null
   let routeType = routing.routeType
   let decision = incoming ? 'passthrough' : 'outgoing'
   if (incoming) {
@@ -217,11 +242,19 @@ export function decideCallSettings({ fields, routing, lookup, siteUrl }) {
     } else if (routing.mode === 'route' && routing.routeId) {
       routeId = routing.routeId
       decision = 'route'
+    } else if (routing.mode === 'byClient') {
+      category = clientCategory(lookup)
+      const entry = category ? routing.categoryRoutes[category] : null
+      if (entry?.id) {
+        routeId = entry.id
+        routeType = entry.type
+      }
+      decision = `byClient:${category || 'no-lookup'}${entry?.id ? '' : '-none'}`
     }
   }
   if (routeId) response.routeData = { type: routeType, id: routeId }
   if (!lookup && routing.sendCustomerData) decision += '+lookup-timeout'
-  return { response, decision, routeId }
+  return { response, decision, routeId, category }
 }
 
 // ---------- маршрут ----------
@@ -325,6 +358,7 @@ export function registerBinotelWebhook(app, deps) {
         response: result.response,
         decision: result.decision,
         routeId: result.routeId || null,
+        category: result.category || null,
         serviceRequestId: main?.id || null,
         latencyMs,
         at,

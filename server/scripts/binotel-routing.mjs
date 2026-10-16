@@ -11,6 +11,8 @@
 //   node scripts/binotel-routing.mjs set enabled=false         # аварійно: завжди {} → повністю логіка 1С
 //   node scripts/binotel-routing.mjs test-add 0675499555 | test-remove 0675499555
 //   node scripts/binotel-routing.mjs override 0675499555 466367 [routeWithTime] | override 0675499555 off
+//   node scripts/binotel-routing.mjs set mode=byClient         # сценарій за категорією клієнта (categoryRoutes)
+//   node scripts/binotel-routing.mjs category openRequest 12345 [route|routeWithTime] | category knownClient off
 //   node scripts/binotel-routing.mjs log [N]                   # останні N подій binotelEvents (типово 10)
 import { initializeApp, applicationDefault } from 'firebase-admin/app'
 import { getFirestore, FieldValue, FieldPath } from 'firebase-admin/firestore'
@@ -40,6 +42,7 @@ const INIT = {
   sendCustomerData: true,
   assignedToEmployeeNumber: 906, // як зараз шле 1С
   mirrorCallEvents: false,
+  categoryRoutes: {},
   knownRoutes: KNOWN_ROUTES,
 }
 
@@ -102,17 +105,29 @@ switch (cmd) {
     await show()
     break
   }
+  case 'category': {
+    const [cat, v, type] = args
+    if (!['openRequest', 'knownClient', 'unknown'].includes(cat)) throw new Error('категорія: openRequest | knownClient | unknown')
+    const value = v === 'off' || v === undefined ? FieldValue.delete() : { id: Number(v), type: type || 'routeWithTime' }
+    const st = stamp()
+    await ref.update(new FieldPath('categoryRoutes', cat), value, 'updatedAt', st.updatedAt, 'updatedBy', st.updatedBy).catch((e) => {
+      if (e.code === 5) throw new Error('документа немає — спершу init')
+      throw e
+    })
+    await show()
+    break
+  }
   case 'log': {
     const n = Number(args[0] || 10)
     const q = await db.collection('binotelEvents').orderBy('at', 'desc').limit(n).get()
     for (const d of q.docs) {
       const x = d.data()
-      console.log(`${x.at}  ${x.kind}  via=${x.via}  ${x.callType === 1 ? 'OUT' : 'IN '}  ${x.externalNumber || '-'} → ${x.pbxNumber || x.internalNumber || '-'}  ${x.decision}  ${x.latencyMs} мс  ${JSON.stringify(x.response)}`)
+      console.log(`${x.at}  ${x.kind}  via=${x.via}  ${x.category || ''}  ${x.callType === 1 ? 'OUT' : 'IN '}  ${x.externalNumber || '-'} → ${x.pbxNumber || x.internalNumber || '-'}  ${x.decision}  ${x.latencyMs} мс  ${JSON.stringify(x.response)}`)
     }
     if (!q.size) console.log('binotelEvents порожній')
     break
   }
   default:
-    console.log('Команди: show | init | set k=v… | test-add N… | test-remove N… | override N routeId|off [routeWithTime] | log [N]')
+    console.log('Команди: show | init | set k=v… | test-add N… | test-remove N… | override N routeId|off [routeWithTime] | category openRequest|knownClient|unknown routeId|off [route|routeWithTime] | log [N]')
 }
 
