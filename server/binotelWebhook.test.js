@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import express from 'express'
 import {
   parseNestedForm, parseBinotelBody, normalizeRouting, decideCallSettings, buildCustomerData, pickRequests,
-  clip, NAME_MAX, DESC_MAX, registerBinotelWebhook, clientCategory,
+  clip, NAME_MAX, DESC_MAX, registerBinotelWebhook, clientCategory, isOpen, lastActivityMs, DEFAULT_ROUTING,
 } from './binotelWebhook.js'
 
 const FORM = 'requestType=apiCallSettings&externalNumber=0675499555&pbxNumber=0443338049&companyID=12345&callType=0'
@@ -59,8 +59,10 @@ test('routing: нормалізація номерів, override як число
   assert.equal(normalizeRouting({ assignedToEmployeeNumber: '' }).assignedToEmployeeNumber, null)
 })
 
-const SR = (o) => ({ id: 'sr1', clientName: 'Петренко Іван', status: 'in_work', stage: 'diagnosed', onec: { number: '0001234' }, complaint: 'Не крутиться правий гвинт', updatedAt: '2026-10-15', ...o })
-const lookup = { requests: [SR()], profile: null }
+const NOW = Date.parse('2026-10-16T08:00:00Z')
+const daysAgo = (n) => new Date(NOW - n * 86400e3).toISOString()
+const SR = (o) => ({ id: 'sr1', clientName: 'Петренко Іван', status: 'in_work', stage: 'diagnosed', onec: { number: '0001234' }, complaint: 'Не крутиться правий гвинт', createdAt: daysAgo(6), updatedAt: daysAgo(0), ...o })
+const lookup = { requests: [SR()], profile: null, orders: [] }
 const fields = { requestType: 'apiCallSettings', externalNumber: '0675499555', pbxNumber: '0443338049', callType: '0' }
 
 test('decide: поза scope / вимкнено / нема документа → {}', () => {
@@ -73,7 +75,7 @@ test('decide: поза scope / вимкнено / нема документа �
 })
 
 test('decide: passthrough — лише customerData; route — routeData; override перемагає; вихідний без routeData', () => {
-  const pass = decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all' }), lookup, siteUrl: 'https://my.runferry.com' })
+  const pass = decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all' }), lookup, siteUrl: 'https://my.runferry.com', nowMs: NOW })
   assert.equal(pass.decision, 'passthrough')
   assert.equal(pass.response.routeData, undefined)
   assert.equal(pass.response.customerData.name, 'Петренко Іван')
@@ -101,57 +103,113 @@ test('decide: passthrough — лише customerData; route — routeData; overri
   assert.equal(timeout.decision, 'route+lookup-timeout')
 })
 
-test('byClient: категорія клієнта → сценарій routeWithTime; без id або без пошуку → без routeData; override перемагає', () => {
-  assert.equal(clientCategory(null), null)
-  assert.equal(clientCategory({ requests: [SR()] }), 'openRequest')
-  assert.equal(clientCategory({ requests: [SR({ status: 'done' })] }), 'knownClient')
-  assert.equal(clientCategory({ requests: [SR({ stage: 'shipped' })] }), 'knownClient')
-  assert.equal(clientCategory({ requests: [], profile: { name: 'Олег' } }), 'knownClient')
-  assert.equal(clientCategory({ requests: [], profile: null }), 'unknown')
+test('isOpen: вік за createdAt/справжніми діями, не за updatedAt; пороги з документа', () => {
+  // ремонт з 1С 2023 року в статусі new, updatedAt свіжий від масової синхронізації → не відкритий
+  const stale1c = SR({ status: 'new', createdAt: '2023-05-01T10:00:00Z', updatedAt: daysAgo(1), createdBy: '1c-sync',
+    stageHistory: [{ stage: 'received', at: daysAgo(2), by: '1c-sync' }] })
+  assert.equal(isOpen(stale1c, NOW), false)
+  assert.equal(lastActivityMs(stale1c), Date.parse('2023-05-01T10:00:00Z'))
+  // той самий ремонт, але майстер змінив етап 3 дні тому → відкритий
+  assert.equal(isOpen({ ...stale1c, stageHistory: [...stale1c.stageHistory, { stage: 'diagnosed', at: daysAgo(3), by: 'master@x' }] }, NOW), true)
+  // діагностика і рух посилки (np-ttn) теж дії; бекфіл — ні
+  assert.equal(isOpen({ ...stale1c, diagnostics: { text: 'x', at: daysAgo(10), by: 'm' } }, NOW), true)
+  assert.equal(isOpen({ ...stale1c, stageHistory: [{ stage: 'shipped', at: daysAgo(5), by: 'np-ttn' }] }, NOW), true)
+  assert.equal(isOpen({ ...stale1c, stageHistory: [{ stage: 'packed', at: daysAgo(5), by: 'backfill' }] }, NOW), false)
+  // межі: активний ≤ 60 днів, виконаний ≤ 14, скасований ніколи
+  assert.equal(isOpen(SR({ createdAt: daysAgo(60) }), NOW), true)
+  assert.equal(isOpen(SR({ createdAt: daysAgo(61) }), NOW), false)
+  assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(14) }), NOW), true)
+  assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(15) }), NOW), false)
+  assert.equal(isOpen(SR({ status: 'cancelled', createdAt: daysAgo(0) }), NOW), false)
+  assert.equal(isOpen(SR({ createdAt: undefined }), NOW), false)
+  // пороги з документа
+  const cfg = normalizeRouting({ openMaxAgeDays: 90, doneGraceDays: 0 })
+  assert.equal(isOpen(SR({ createdAt: daysAgo(80) }), NOW, cfg), true)
+  assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(1) }), NOW, cfg), false)
+  assert.equal(normalizeRouting({ openMaxAgeDays: 'x', doneGraceDays: null }).openMaxAgeDays, DEFAULT_ROUTING.openMaxAgeDays)
+  assert.equal(normalizeRouting({ doneGraceDays: null }).doneGraceDays, DEFAULT_ROUTING.doneGraceDays)
+})
 
+test('clientCategory: S2 відкрита / S1 справжня історія (заявка з ТТН, покупка) / профіль не рахується', () => {
+  assert.equal(clientCategory(null, NOW), null)
+  assert.equal(clientCategory({ requests: [SR()] }, NOW), 'openRequest')
+  assert.equal(clientCategory({ requests: [SR({ status: 'done', createdAt: daysAgo(30) })] }, NOW), 'knownClient')
+  assert.equal(clientCategory({ requests: [SR({ status: 'new', createdAt: daysAgo(400) })] }, NOW), 'knownClient')
+  assert.equal(clientCategory({ requests: [SR({ status: 'cancelled', waybillNumber: '2045' })] }, NOW), 'knownClient')
+  assert.equal(clientCategory({ requests: [SR({ status: 'cancelled' })] }, NOW), 'unknown') // передумав до відправки
+  assert.equal(clientCategory({ requests: [], orders: [{ status: 'done' }] }, NOW), 'knownClient')
+  assert.equal(clientCategory({ requests: [], orders: [{ status: 'lead' }, { status: 'cancelled' }] }, NOW), 'unknown')
+  assert.equal(clientCategory({ requests: [], profile: { name: 'Олег' } }, NOW), 'unknown')
+  assert.equal(clientCategory({ requests: [], profile: null }, NOW), 'unknown')
+})
+
+test('byClient: сценарій routeWithTime; без id або без пошуку → без routeData; override перемагає; scenarioIds', () => {
   const routing = normalizeRouting({ scope: 'all', mode: 'byClient', categoryRoutes: { openRequest: 501, knownClient: { id: 502, type: 'route' }, unknown: 0 } })
   assert.deepEqual(routing.categoryRoutes.openRequest, { id: 501, type: 'routeWithTime' })
-  const open = decideCallSettings({ fields, routing, lookup })
+  const open = decideCallSettings({ fields, routing, lookup, nowMs: NOW })
   assert.deepEqual(open.response.routeData, { type: 'routeWithTime', id: 501 })
   assert.equal(open.decision, 'byClient:openRequest')
   assert.equal(open.category, 'openRequest')
-  const known = decideCallSettings({ fields, routing, lookup: { requests: [SR({ status: 'cancelled' })] } })
+  const known = decideCallSettings({ fields, routing, lookup: { requests: [SR({ status: 'done', createdAt: daysAgo(100) })] }, nowMs: NOW })
   assert.deepEqual(known.response.routeData, { type: 'route', id: 502 })
-  const unknown = decideCallSettings({ fields, routing, lookup: { requests: [], profile: null } })
+  const unknown = decideCallSettings({ fields, routing, lookup: { requests: [], profile: null }, nowMs: NOW })
   assert.equal(unknown.response.routeData, undefined)
   assert.equal(unknown.decision, 'byClient:unknown-none')
-  const noLookup = decideCallSettings({ fields, routing, lookup: null })
+  const noLookup = decideCallSettings({ fields, routing, lookup: null, nowMs: NOW })
   assert.deepEqual(noLookup.response, {})
-  const ov = decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all', mode: 'byClient', categoryRoutes: { openRequest: 501 }, overrides: { '0675499555': 466367 } }), lookup })
+  const ov = decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all', mode: 'byClient', categoryRoutes: { openRequest: 501 }, overrides: { '0675499555': 466367 } }), lookup, nowMs: NOW })
   assert.deepEqual(ov.response.routeData, { type: 'route', id: 466367 })
-  const noIds = decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all', mode: 'byClient' }), lookup })
+  const noIds = decideCallSettings({ fields, routing: normalizeRouting({ scope: 'all', mode: 'byClient' }), lookup, nowMs: NOW })
   assert.equal(noIds.response.routeData, undefined)
   assert.equal(noIds.decision, 'byClient:openRequest-none')
+  // синонім scenarioIds {S1, S2}; categoryRoutes важливіший
+  const sc = normalizeRouting({ mode: 'byClient', scenarioIds: { S1: 11, S2: 22 } })
+  assert.deepEqual(sc.categoryRoutes, { openRequest: { id: 22, type: 'routeWithTime' }, knownClient: { id: 11, type: 'routeWithTime' } })
+  assert.equal(normalizeRouting({ categoryRoutes: { openRequest: 5 }, scenarioIds: { S2: 22 } }).categoryRoutes.openRequest.id, 5)
+  // вихідний — ніколи routeData, навіть з override
+  const out = decideCallSettings({ fields: { ...fields, callType: '1' }, routing: normalizeRouting({ scope: 'all', mode: 'byClient', categoryRoutes: { openRequest: 501 }, overrides: { '0675499555': 466367 } }), lookup, nowMs: NOW })
+  assert.equal(out.response.routeData, undefined)
   assert.equal(normalizeRouting({ mode: 'whatever' }).mode, 'passthrough')
 })
 
-test('customerData: межі довжини, номер без нулів, етап, кілька заявок, без заявок, відповідальний', () => {
-  const cd = buildCustomerData({ phone: '+380675499555', requests: [SR({ clientName: 'Дуже-Дуже Довге Прізвище Ім’я По-батькові Клієнта Сервісу' })], siteUrl: 'https://x', assignedToEmployeeNumber: '906' })
+test('customerData: межі довжини, номер без нулів, етап, кілька заявок, покупка, без історії, відповідальний', () => {
+  const cd = buildCustomerData({ phone: '+380675499555', requests: [SR({ clientName: 'Дуже-Дуже Довге Прізвище Ім’я По-батькові Клієнта Сервісу' })], siteUrl: 'https://x', assignedToEmployeeNumber: 906, nowMs: NOW })
   assert.ok(cd.name.length <= NAME_MAX && cd.name.endsWith('…'))
   assert.ok(cd.description.length <= DESC_MAX)
   assert.ok(cd.description.startsWith('Ремонт №1234 · Діагностовано'))
-  assert.equal(cd.assignedToEmployeeNumber, '906')
+  assert.equal(cd.assignedToEmployeeNumber, 906)
   assert.equal(cd.linkToCrmTitle, 'Заявка №1234')
 
-  const two = buildCustomerData({ phone: '+380675499555', requests: [SR(), SR({ id: 'sr2', updatedAt: '2026-10-16', onec: null, stage: 'received' }), SR({ id: 'old', status: 'done', updatedAt: '2026-10-17' })] })
-  assert.equal(two.linkToCrmUrl.endsWith('/service-request/sr2'), true) // найсвіжіша активна, не виконана
-  assert.ok(two.description.startsWith('Ремонт (+1) · Отримано'))
+  const two = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [
+    SR(),
+    SR({ id: 'sr2', createdAt: daysAgo(2), onec: null, stage: 'received' }),
+    SR({ id: 'old', status: 'done', createdAt: daysAgo(300), updatedAt: daysAgo(0) }), // свіжий updatedAt не робить головною
+  ] })
+  assert.equal(two.linkToCrmUrl.endsWith('/service-request/sr2'), true)
+  assert.ok(two.description.startsWith('Ремонт (+1) · Отримано'), two.description)
   assert.equal(two.linkToCrmTitle, 'Заявка (усього 3)')
 
-  const done = buildCustomerData({ phone: '+380675499555', requests: [SR({ status: 'done', stage: 'shipped' })] })
+  const done = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'done', stage: 'shipped', createdAt: daysAgo(200) })] })
   assert.ok(done.description.startsWith('Останній ремонт №1234 · Відправлено'))
+  // старий «new» з 1С — це вже «Останній ремонт», не поточний
+  const stale = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'new', stage: null, createdAt: '2023-05-01T10:00:00Z' })] })
+  assert.ok(stale.description.startsWith('Останній ремонт №1234 · Нова'), stale.description)
 
-  const nobody = buildCustomerData({ phone: '+380675499555', requests: [], profile: null })
+  const buyer = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [], orders: [{ id: 'bo1', status: 'done', clientName: 'Сидоренко Олег', soldAt: '2025-06-12T09:00:00Z' }, { id: 'bo0', status: 'lead', clientName: 'Лід' }], siteUrl: 'https://x' })
+  assert.equal(buyer.name, 'Сидоренко Олег')
+  assert.equal(buyer.description, 'Купив кораблик 12.06.2025, ремонтів не було')
+  assert.equal(buyer.linkToCrmUrl, 'https://x/boat-orders/bo1')
+  // «ім'я» з цифр (телефон замість імені) пропускаємо
+  assert.equal(buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [], orders: [{ id: 'b', status: 'done', clientName: '0671233727' }] }).name, '067 549 95 55')
+
+  const nobody = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [], profile: null })
   assert.equal(nobody.name, '067 549 95 55')
   assert.equal(nobody.description, 'Новий номер, заявок немає')
   assert.equal(nobody.linkToCrmUrl, 'https://my.runferry.com/service-requests')
-  assert.equal(buildCustomerData({ phone: '+380675499555', requests: [], profile: { name: 'Олег' } }).name, 'Олег')
-  assert.equal(buildCustomerData({ phone: '+380675499555', requests: [] }).assignedToEmployeeNumber, undefined)
+  const asked = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [], profile: { name: 'Олег' } })
+  assert.equal(asked.name, 'Олег')
+  assert.equal(asked.description, 'Звертався, заявок немає')
+  assert.equal(buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [] }).assignedToEmployeeNumber, undefined)
 })
 
 test('pickRequests і clip', () => {
@@ -161,7 +219,7 @@ test('pickRequests і clip', () => {
 })
 
 // ---------- маршрут цілком на підробленому Firestore ----------
-function fakeDb({ routing, requests = [], profile = null, slowMs = 0 }) {
+function fakeDb({ routing, requests = [], profile = null, orders = [], slowMs = 0, journalMs = 0 }) {
   const writes = []
   const delay = (v) => new Promise((r) => setTimeout(() => r(v), slowMs))
   let auto = 0
@@ -178,11 +236,15 @@ function fakeDb({ routing, requests = [], profile = null, slowMs = 0 }) {
               if (name === 'clientProfiles') return delay({ exists: !!profile, data: () => profile })
               return { exists: false, data: () => null }
             },
-            set: async (data) => { writes.push({ coll: name, id: docId, data }) },
+            set: async (data) => {
+              if (journalMs && name === 'binotelEvents') await new Promise((r) => setTimeout(r, journalMs))
+              writes.push({ coll: name, id: docId, data })
+            },
           }
         },
         where(field, op, value) {
-          return { limit: () => ({ get: async () => delay({ docs: requests.filter((r) => r[field] === value).map((r) => ({ id: r.id, data: () => r })) }) }) }
+          const src = name === 'boatOrders' ? orders : requests
+          return { limit: () => ({ get: async () => delay({ docs: src.filter((r) => r[field] === value).map((r) => ({ id: r.id, data: () => r })) }) }) }
         },
       }
     },
@@ -263,4 +325,44 @@ test('route: повільний Firestore → {} у межах бюджету, �
     const r = await fetch(`http://127.0.0.1:${s2.address().port}/api/binotel/call-settings`, { method: 'POST', body: FORM })
     assert.equal(r.status, 503)
   } finally { s2.close() }
+})
+
+test('route: журнал записаний ДО відповіді; повільний журнал тримає відповідь ≤ бюджету; покупець з boatOrders', async () => {
+  const routing = { scope: 'all', mode: 'byClient', categoryRoutes: { openRequest: 501, knownClient: 502 } }
+  const orders = [{ id: 'bo1', clientPhone: '+380675499555', status: 'done', clientName: 'Сидоренко Олег', soldAt: '2025-06-12T09:00:00Z' }]
+  const db = fakeDb({ routing, orders })
+  await withServer(db, async (base) => {
+    const r = await fetch(`${base}/api/binotel/call-settings`, { method: 'POST', body: FORM, headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-binotel-token': 'test-token', 'x-binotel-via': '1c' } })
+    const j = await r.json()
+    assert.deepEqual(j.routeData, { type: 'routeWithTime', id: 502 })
+    assert.equal(j.customerData.name, 'Сидоренко Олег')
+    // без settle(): запис уже є в момент відповіді
+    const e = db.writes.find((w) => w.coll === 'binotelEvents')
+    assert.ok(e, 'journal must be written before the response')
+    assert.equal(e.data.contentType, 'application/x-www-form-urlencoded')
+    assert.equal(e.data.routingMode, 'byClient')
+    assert.equal(e.data.category, 'knownClient')
+    assert.equal(e.data.decision, 'byClient:knownClient')
+  })
+
+  const slow = fakeDb({ routing, journalMs: 1500 })
+  await withServer(slow, async (base) => {
+    const t0 = Date.now()
+    const r = await fetch(`${base}/api/binotel/call-settings`, { method: 'POST', body: FORM, headers: { 'x-binotel-token': 'test-token' } })
+    await r.json()
+    const took = Date.now() - t0
+    assert.ok(took >= 280 && took < 900, `took ${took} ms`)
+  })
+})
+
+test('route: короткий, порожній і прихований номер → {} без пошуку', async () => {
+  const db = fakeDb({ routing: { scope: 'all', mode: 'route', routeId: 466367 } })
+  await withServer(db, async (base) => {
+    for (const n of ['', '12345678', 'anonymous', '0']) {
+      const r = await fetch(`${base}/api/binotel/call-settings`, { method: 'POST', body: `requestType=apiCallSettings&externalNumber=${n}&pbxNumber=0443338049&callType=0`, headers: { 'x-binotel-token': 'test-token' } })
+      assert.deepEqual(await r.json(), {}, `number «${n}»`)
+    }
+    const decisions = db.writes.filter((w) => w.coll === 'binotelEvents').map((w) => w.data.decision)
+    assert.deepEqual(decisions, ['no-phone', 'no-phone', 'no-phone', 'no-phone'])
+  })
 })

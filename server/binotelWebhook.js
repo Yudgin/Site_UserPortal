@@ -13,12 +13,16 @@
 //     (вихідний), companyID, callType (0 — вхідний, 1 — вихідний).
 //     Відповідь: завжди HTTP 200 і JSON — {customerData?, routeData?} або {} («нам нічого сказати» —
 //     1С тоді відповідає Binotel по-старому; сам Binotel на {} іде за сценарієм лінії).
-//     Критичний шлях — лише Firestore (3 читання паралельно, бюджет LOOKUP_BUDGET_MS), без зовнішніх
-//     викликів; журнал пишеться ПІСЛЯ відповіді.
+//     Критичний шлях — лише Firestore (4 читання паралельно: маршрутизація, заявки, профіль, замовлення корабликів;
+//     бюджет LOOKUP_BUDGET_MS), без зовнішніх викликів; запис журналу стартує до відповіді, чекаємо його
+//     ≤ JOURNAL_BUDGET_MS (на Cloud Run з троттлінгом CPU фонова запис після res.send ненадійна).
 //
 // Маршрутизацію перемикає документ Firestore system/binotelRouting (без деплою; див. DEFAULT_ROUTING і
 // normalizeRouting): поза scope (за замовчуванням — лише testNumbers) відповідаємо {}, тож реальні клієнти
-// живуть на логіці 1С, поки сесія дзвінків не скаже scope:'all'.
+// живуть на логіці 1С, поки сесія дзвінків не скаже scope:'all'. Порядок для вхідного: персональний override →
+// mode ('route' — один сценарій; 'byClient' — S2 «Відкрита заявка» / S1 «Відомий клієнт» / без routeData → S0
+// лінії, див. isOpen і clientCategory). Вихідний (callType 1) — ніколи без routeData. Поки працює 1С-проксі,
+// персональний Клиенты.Сценарий 1С важливіший за наш routeData (так зроблено у фрагменті 1С).
 // Журнал: binotelEvents/{autoId} (kind 'call-settings'; сире тіло, наша відповідь, рішення, затримка),
 // expireAt = +180 днів (TTL-політика Firestore). У callEvents (операторська дошка) — лише прапорцем
 // mirrorCallEvents і лише вхідні, на які ми відповіли по суті: туди вже пише call.incoming старий
@@ -29,9 +33,13 @@ import { normPhone } from './phone.js'
 
 const nowIso = () => new Date().toISOString()
 const LOOKUP_BUDGET_MS = Number(process.env.BINOTEL_LOOKUP_BUDGET_MS || 1200) // 1С чекає нас ≤ 2 с
+// Журнал пишемо ДО відповіді, але чекаємо його не довше цього: після res.send інстансу Cloud Run з троттлінгом CPU
+// (економія з 2026-10-14) майже не дають процесора, фонова запис могла б загубитися. Не встиг — відповідаємо однаково.
+const JOURNAL_BUDGET_MS = Number(process.env.BINOTEL_JOURNAL_BUDGET_MS || 300)
 const RAW_MAX_STORE = 8 * 1024 // скільки сирого тіла кладемо в журнал
 const JOURNAL_TTL_DAYS = 180
 const SR_SCAN_LIMIT = 25 // заявок одного телефону для вибору «головної»
+const ORDER_SCAN_LIMIT = 10 // замовлень корабликів одного телефону
 export const NAME_MAX = 43 // Binotel: довше обрізає плагін/телефон
 export const DESC_MAX = 70
 
@@ -113,6 +121,9 @@ export const DEFAULT_ROUTING = {
   // mode 'byClient': {openRequest: S2, knownClient: S1, unknown: —} — routeId | {id, type}; тип за замовчуванням
   // routeWithTime (робочий час рахує Binotel); категорії немає або id порожній → без routeData (сценарій лінії S0)
   categoryRoutes: {},
+  // Пороги «незакритої» заявки (днів від останньої справжньої дії) — див. isOpen
+  openMaxAgeDays: 60,
+  doneGraceDays: 14,
   sendCustomerData: true,
   assignedToEmployeeNumber: null, // 1С зараз завжди шле 906
   mirrorCallEvents: false,
@@ -143,6 +154,11 @@ export function normalizeRouting(doc) {
   const categoryRoutes = {}
   const cr = d.categoryRoutes && typeof d.categoryRoutes === 'object' ? d.categoryRoutes : {}
   for (const c of CATEGORIES) if (cr[c] != null) categoryRoutes[c] = routeEntry(cr[c], 'routeWithTime')
+  // Синонім у термінах сценаріїв Binotel (S2 «Відкрита заявка», S1 «Відомий клієнт»); categoryRoutes важливіший.
+  const sc = d.scenarioIds && typeof d.scenarioIds === 'object' ? d.scenarioIds : {}
+  if (categoryRoutes.openRequest == null && sc.S2 != null) categoryRoutes.openRequest = routeEntry(sc.S2, 'routeWithTime')
+  if (categoryRoutes.knownClient == null && sc.S1 != null) categoryRoutes.knownClient = routeEntry(sc.S1, 'routeWithTime')
+  const days = (v, def) => (Number.isFinite(Number(v)) && Number(v) >= 0 && v !== null && v !== '' ? Number(v) : def)
   const assigned = d.assignedToEmployeeNumber == null ? '' : String(d.assignedToEmployeeNumber).trim()
   return {
     enabled: d.enabled !== false,
@@ -153,6 +169,8 @@ export function normalizeRouting(doc) {
     routeType: routeTypeOf(d.routeType),
     overrides,
     categoryRoutes,
+    openMaxAgeDays: days(d.openMaxAgeDays, DEFAULT_ROUTING.openMaxAgeDays),
+    doneGraceDays: days(d.doneGraceDays, DEFAULT_ROUTING.doneGraceDays),
     sendCustomerData: d.sendCustomerData !== false,
     assignedToEmployeeNumber: assigned === '' ? null : /^\d+$/.test(assigned) ? Number(assigned) : assigned, // числом, як шле 1С
     mirrorCallEvents: d.mirrorCallEvents === true,
@@ -169,56 +187,103 @@ const nationalPretty = (e164) => {
   const d = String(e164 || '').replace(/\D/g, '').slice(-9) // 671234567
   return d.length === 9 ? `0${d.slice(0, 2)} ${d.slice(2, 5)} ${d.slice(5, 7)} ${d.slice(7)}` : ''
 }
-const isActive = (sr) => !['done', 'cancelled'].includes(sr.status) && sr.stage !== 'shipped'
-const tsOf = (sr) => String(sr.updatedAt || sr.createdAt || '')
 const numberOf = (sr) => String(sr?.onec?.number || '').replace(/^0+/, '')
+const ddmmyyyy = (iso) => {
+  const t = Date.parse(iso || '')
+  if (!Number.isFinite(t)) return ''
+  const d = new Date(t)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getUTCDate())}.${p(d.getUTCMonth() + 1)}.${d.getUTCFullYear()}`
+}
+// Ім'я, схоже на номер телефону (в імпорті продажів трапляється), іменем не вважаємо.
+const realName = (s) => (s && String(s).replace(/\D/g, '').length < 7 ? String(s) : '')
 
-// Головна заявка: спершу активні (не виконані/скасовані/відправлені), серед них — найсвіжіша.
-export function pickRequests(list) {
+// ---------- клієнт: заявки, покупки, категорія ----------
+
+const DAY_MS = 86400 * 1000
+// Записи stageHistory, які пишуться автоматично з часом прогону, а не події: синхронізація 1С і бекфіл.
+// np-ttn (рух посилки Новою Поштою) — справжня подія, її рахуємо.
+const AUTO_STAGE_BY = new Set(['1c-sync', 'backfill'])
+const msOf = (iso) => {
+  const t = Date.parse(iso || '')
+  return Number.isFinite(t) ? t : 0
+}
+// Остання справжня дія по заявці. updatedAt НЕ беремо: масові прогони синхронізації 1С (2026-09-21, 10-06, 10-13,
+// 10-14) і бекфіл оновили його майже всім заявкам. createdAt у заявок з 1С = дата документа 1С (parse1cDate).
+export const lastActivityMs = (sr) => Math.max(
+  msOf(sr?.createdAt),
+  msOf(sr?.diagnostics?.at),
+  ...(Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).filter((h) => h && !AUTO_STAGE_BY.has(h.by)).map((h) => msOf(h.at)),
+)
+// Незакрита заявка (узгоджено з сесією «1С телефонія міграція», 2026-10-16). Не скасована і:
+//   - не виконана, а остання дія не старша за openMaxAgeDays: ~560 ремонтів з 1С отримали статус один раз при імпорті
+//     (inferStatus), покинуті старі назавжди лишились 'new';
+//   - або виконана, але остання дія не старша за doneGraceDays: клієнт дзвонить «де мій кораблик».
+export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
+  if (!sr || sr.status === 'cancelled') return false
+  const ageDays = (nowMs - lastActivityMs(sr)) / DAY_MS
+  return sr.status === 'done' ? ageDays <= cfg.doneGraceDays : ageDays <= cfg.openMaxAgeDays
+}
+// Справжня історія з клієнтом: будь-яка заявка, крім скасованої без жодної ТТН; або купівля кораблика (не лід і не
+// скасоване замовлення). Самого clientProfiles НЕ досить: профіль створюється автоматично з будь-якої форми чи чату.
+const isHistory = (sr) => !!sr && !(sr.status === 'cancelled' && !sr.waybillNumber && !sr.returnTtn)
+const isPurchase = (o) => !!o && !['lead', 'cancelled'].includes(o.status)
+const purchaseTs = (o) => msOf(o.soldAt) || msOf(o.createdAt)
+
+// Головна заявка: спершу незакриті, серед них — з найсвіжішою дією; інакше найсвіжіша будь-яка.
+export function pickRequests(list, nowMs = Date.now(), cfg = DEFAULT_ROUTING) {
   const arr = (list || []).filter(Boolean)
-  const active = arr.filter(isActive).sort((a, b) => tsOf(b).localeCompare(tsOf(a)))
-  const rest = arr.filter((x) => !isActive(x)).sort((a, b) => tsOf(b).localeCompare(tsOf(a)))
-  return { main: active[0] || rest[0] || null, activeCount: active.length, total: arr.length }
+  const byActivity = (a, b) => lastActivityMs(b) - lastActivityMs(a)
+  const open = arr.filter((x) => isOpen(x, nowMs, cfg)).sort(byActivity)
+  const rest = arr.filter((x) => !isOpen(x, nowMs, cfg)).sort(byActivity)
+  return { main: open[0] || rest[0] || null, mainOpen: open.length > 0, openCount: open.length, total: arr.length }
 }
 
-export function buildCustomerData({ phone, requests, profile, siteUrl, assignedToEmployeeNumber }) {
-  const { main, activeCount, total } = pickRequests(requests)
-  const name = clip(main?.clientName || profile?.name || nationalPretty(phone) || 'Невідомий номер', NAME_MAX)
+// Категорія клієнта для mode 'byClient': незакрита заявка → openRequest (S2); справжня історія → knownClient (S1);
+// інакше unknown (сценарій лінії S0). Картки, які 1С створює на кожен дзвінок, сюди не потрапляють — у нашій базі
+// їх немає. Пошук не встиг → null (маршрут не віддаємо).
+export function clientCategory(lookup, nowMs = Date.now(), cfg = DEFAULT_ROUTING) {
+  if (!lookup) return null
+  const reqs = (lookup.requests || []).filter(Boolean)
+  if (reqs.some((x) => isOpen(x, nowMs, cfg))) return 'openRequest'
+  if (reqs.some(isHistory) || (lookup.orders || []).some(isPurchase)) return 'knownClient'
+  return 'unknown'
+}
+
+export function buildCustomerData({ phone, requests, orders, profile, siteUrl, assignedToEmployeeNumber, nowMs = Date.now(), cfg = DEFAULT_ROUTING }) {
+  const { main, mainOpen, openCount, total } = pickRequests(requests, nowMs, cfg)
+  const purchase = (orders || []).filter(isPurchase).sort((a, b) => purchaseTs(b) - purchaseTs(a))[0] || null
+  const name = clip(realName(main?.clientName) || realName(profile?.name) || realName(purchase?.clientName) || nationalPretty(phone) || 'Невідомий номер', NAME_MAX)
+  const base = String(siteUrl || 'https://my.runferry.com').replace(/\/+$/, '')
   let description
+  let linkToCrmUrl = `${base}/service-requests`
+  let linkToCrmTitle = 'Заявки'
   if (main) {
     const no = numberOf(main)
-    const head = `${isActive(main) ? 'Ремонт' : 'Останній ремонт'}${no ? ` №${no}` : ''}`
+    const head = `${mainOpen ? 'Ремонт' : 'Останній ремонт'}${no ? ` №${no}` : ''}`
     const state = STAGE_UK[main.stage] || STATUS_UK[main.status] || ''
-    const more = activeCount > 1 ? ` (+${activeCount - 1})` : ''
+    const more = openCount > 1 ? ` (+${openCount - 1})` : ''
     const parts = [head + more, state, main.boat, main.complaint].filter(Boolean)
     description = clip(parts.join(' · '), DESC_MAX)
+    linkToCrmUrl = `${base}/service-request/${encodeURIComponent(main.id)}`
+    linkToCrmTitle = clip(`Заявка${no ? ` №${no}` : ''}${total > 1 ? ` (усього ${total})` : ''}`, DESC_MAX)
+  } else if (purchase) {
+    const date = ddmmyyyy(purchase.soldAt || purchase.createdAt)
+    description = clip(`Купив кораблик${date ? ` ${date}` : ''}, ремонтів не було`, DESC_MAX)
+    if (purchase.id) {
+      linkToCrmUrl = `${base}/boat-orders/${encodeURIComponent(purchase.id)}`
+      linkToCrmTitle = 'Замовлення кораблика'
+    }
   } else {
-    description = profile ? 'Клієнт без заявок' : 'Новий номер, заявок немає'
+    description = profile ? 'Звертався, заявок немає' : 'Новий номер, заявок немає'
   }
-  const base = String(siteUrl || 'https://my.runferry.com').replace(/\/+$/, '')
-  const cd = {
-    name,
-    description,
-    linkToCrmUrl: main ? `${base}/service-request/${encodeURIComponent(main.id)}` : `${base}/service-requests`,
-    linkToCrmTitle: main ? clip(`Заявка${numberOf(main) ? ` №${numberOf(main)}` : ''}${total > 1 ? ` (усього ${total})` : ''}`, DESC_MAX) : 'Заявки',
-  }
+  const cd = { name, description, linkToCrmUrl, linkToCrmTitle }
   if (assignedToEmployeeNumber) cd.assignedToEmployeeNumber = assignedToEmployeeNumber
   return cd
 }
 
-// Категорія клієнта для mode 'byClient': незакрита заявка (не done/cancelled/shipped) → openRequest; реальна історія
-// (будь-яка заявка або профіль клієнта з сайту/ботів) → knownClient; інакше unknown. Картки, які 1С створює на кожен
-// дзвінок, сюди не потрапляють — у нашій базі їх немає. Пошук не встиг → null (маршрут не віддаємо).
-export function clientCategory(lookup) {
-  if (!lookup) return null
-  const reqs = (lookup.requests || []).filter(Boolean)
-  if (reqs.some(isActive)) return 'openRequest'
-  if (reqs.length || lookup.profile) return 'knownClient'
-  return 'unknown'
-}
-
 // Рішення: що відповісти на apiCallSettings. Повертає {response, decision, routeId, category}.
-export function decideCallSettings({ fields, routing, lookup, siteUrl }) {
+export function decideCallSettings({ fields, routing, lookup, siteUrl, nowMs = Date.now() }) {
   const phone = normPhone(fields.externalNumber)
   if (fields.requestType && fields.requestType !== 'apiCallSettings') return { response: {}, decision: 'not-call-settings' }
   if (!phone) return { response: {}, decision: 'no-phone' }
@@ -227,7 +292,10 @@ export function decideCallSettings({ fields, routing, lookup, siteUrl }) {
   const incoming = String(fields.callType ?? '0') !== '1'
   const response = {}
   if (routing.sendCustomerData && lookup) {
-    response.customerData = buildCustomerData({ phone, requests: lookup.requests, profile: lookup.profile, siteUrl, assignedToEmployeeNumber: routing.assignedToEmployeeNumber })
+    response.customerData = buildCustomerData({
+      phone, requests: lookup.requests, orders: lookup.orders, profile: lookup.profile, siteUrl,
+      assignedToEmployeeNumber: routing.assignedToEmployeeNumber, nowMs, cfg: routing,
+    })
   }
   let routeId = null
   let category = null
@@ -243,7 +311,7 @@ export function decideCallSettings({ fields, routing, lookup, siteUrl }) {
       routeId = routing.routeId
       decision = 'route'
     } else if (routing.mode === 'byClient') {
-      category = clientCategory(lookup)
+      category = clientCategory(lookup, nowMs, routing)
       const entry = category ? routing.categoryRoutes[category] : null
       if (entry?.id) {
         routeId = entry.id
@@ -287,13 +355,15 @@ export function registerBinotelWebhook(app, deps) {
 
   const lookupClient = async (phone) => {
     const digits = phone.replace(/\D/g, '')
-    const [srSnap, profSnap] = await Promise.all([
+    const [srSnap, profSnap, orderSnap] = await Promise.all([
       adminDb.collection('serviceRequests').where('clientPhone', '==', phone).limit(SR_SCAN_LIMIT).get(),
       adminDb.collection('clientProfiles').doc(digits).get(),
+      adminDb.collection('boatOrders').where('clientPhone', '==', phone).limit(ORDER_SCAN_LIMIT).get(),
     ])
     return {
       requests: srSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
       profile: profSnap.exists ? profSnap.data() : null,
+      orders: orderSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
     }
   }
   const loadRouting = async () => {
@@ -329,56 +399,66 @@ export function registerBinotelWebhook(app, deps) {
       console.error('binotel/call-settings:', e.message)
       result = { response: {}, decision: 'error' }
     }
-    const latencyMs = Date.now() - started
+    const latencyMs = Date.now() - started // час до рішення; журнал нижче — окремо
+
+    // ---- журнал: запис стартує до відповіді, чекаємо його ≤ JOURNAL_BUDGET_MS ----
+    let journalRef = null
+    let main = null
+    const f = parsed.data || {}
+    const phone = normPhone(f.externalNumber) || null
+    const at = nowIso()
+    if (adminDb) {
+      try {
+        journalRef = adminDb.collection('binotelEvents').doc()
+        const nowMs = Date.now()
+        main = lookup ? pickRequests(lookup.requests, nowMs, routing || DEFAULT_ROUTING).main : null
+        const entry = {
+          kind: 'call-settings',
+          via: String(req.get('x-binotel-via') || 'direct').slice(0, 32),
+          format: parsed.format,
+          contentType: String(req.get('content-type') || '').slice(0, 100) || null,
+          requestType: f.requestType ? String(f.requestType) : null,
+          callType: f.callType != null && f.callType !== '' ? Number(f.callType) : null,
+          externalNumber: phone,
+          externalNumberRaw: f.externalNumber != null ? String(f.externalNumber).slice(0, 32) : null,
+          pbxNumber: f.pbxNumber != null ? String(f.pbxNumber) : null,
+          internalNumber: f.internalNumber != null ? String(f.internalNumber) : null,
+          companyID: f.companyID != null ? String(f.companyID) : null,
+          generalCallID: f.generalCallID != null ? String(f.generalCallID) : null,
+          raw: parsed.raw.length > RAW_MAX_STORE ? parsed.raw.slice(0, RAW_MAX_STORE) : parsed.raw,
+          rawTruncated: parsed.raw.length > RAW_MAX_STORE,
+          parsed: parsed.raw.length <= RAW_MAX_STORE ? f : null,
+          response: result.response,
+          decision: result.decision,
+          routingMode: routing?.mode || null,
+          routeId: result.routeId || null,
+          category: result.category || null,
+          serviceRequestId: main?.id || null,
+          latencyMs,
+          at,
+          expireAt: new Date(nowMs + JOURNAL_TTL_DAYS * DAY_MS),
+        }
+        // Ключі розібраного тіла — від АТС; якщо Firestore відкине якесь ім'я поля (__x__ тощо), пишемо без parsed.
+        const write = journalRef.set(entry).catch(() => journalRef.set({ ...entry, parsed: null, parsedRejected: true }))
+        write.catch((e) => console.error('binotel/call-settings journal:', e.message))
+        await withBudget(write, JOURNAL_BUDGET_MS)
+      } catch (e) {
+        console.error('binotel/call-settings journal:', e.message)
+      }
+    }
     res.status(200).json(result.response)
 
-    // ---- журнал (після відповіді, поза критичним шляхом) ----
-    if (!adminDb) return
-    try {
-      const f = parsed.data || {}
-      const phone = normPhone(f.externalNumber) || null
-      const ref = adminDb.collection('binotelEvents').doc()
-      const at = nowIso()
-      const main = lookup ? pickRequests(lookup.requests).main : null
-      const entry = {
-        kind: 'call-settings',
-        via: String(req.get('x-binotel-via') || 'direct').slice(0, 32),
-        format: parsed.format,
-        requestType: f.requestType ? String(f.requestType) : null,
-        callType: f.callType != null ? Number(f.callType) : null,
-        externalNumber: phone,
-        externalNumberRaw: f.externalNumber != null ? String(f.externalNumber).slice(0, 32) : null,
-        pbxNumber: f.pbxNumber != null ? String(f.pbxNumber) : null,
-        internalNumber: f.internalNumber != null ? String(f.internalNumber) : null,
-        companyID: f.companyID != null ? String(f.companyID) : null,
-        generalCallID: f.generalCallID != null ? String(f.generalCallID) : null,
-        raw: parsed.raw.length > RAW_MAX_STORE ? parsed.raw.slice(0, RAW_MAX_STORE) : parsed.raw,
-        rawTruncated: parsed.raw.length > RAW_MAX_STORE,
-        parsed: parsed.raw.length <= RAW_MAX_STORE ? f : null,
-        response: result.response,
-        decision: result.decision,
-        routeId: result.routeId || null,
-        category: result.category || null,
-        serviceRequestId: main?.id || null,
-        latencyMs,
-        at,
-        expireAt: new Date(Date.now() + JOURNAL_TTL_DAYS * 86400 * 1000),
-      }
-      // Ключі розібраного тіла — від АТС; якщо Firestore відкине якесь ім'я поля (__x__ тощо), пишемо без parsed.
-      await ref.set(entry).catch(() => ref.set({ ...entry, parsed: null, parsedRejected: true }))
-      // Дзеркало — лише для вхідних, на які ми відповіли по суті (інакше дублювали б картки старого бота).
-      if (routing?.mirrorCallEvents && phone && String(f.callType ?? '0') !== '1' && Object.keys(result.response).length) {
-        const callId = `binotel-cs-${ref.id}`
-        await adminDb.collection('callEvents').doc(callId).set({
-          callId, source: 'binotel-settings', kind: 'incoming', phone,
-          clientName: result.response.customerData?.name || null,
-          line: f.pbxNumber != null ? String(f.pbxNumber) : null,
-          serviceRequestId: main?.id || null, routeId: result.routeId || null, binotelEventId: ref.id,
-          direction: 'inbound', at, lastType: 'call.incoming', updatedAt: at,
-        }, { merge: true })
-      }
-    } catch (e) {
-      console.error('binotel/call-settings journal:', e.message)
+    // Дзеркало в callEvents — некритичне, після відповіді; лише для вхідних, на які ми відповіли по суті (інакше
+    // дублювали б картки старого бота).
+    if (adminDb && journalRef && routing?.mirrorCallEvents && phone && String(f.callType ?? '0') !== '1' && Object.keys(result.response).length) {
+      const callId = `binotel-cs-${journalRef.id}`
+      adminDb.collection('callEvents').doc(callId).set({
+        callId, source: 'binotel-settings', kind: 'incoming', phone,
+        clientName: result.response.customerData?.name || null,
+        line: f.pbxNumber != null ? String(f.pbxNumber) : null,
+        serviceRequestId: main?.id || null, routeId: result.routeId || null, binotelEventId: journalRef.id,
+        direction: 'inbound', at, lastType: 'call.incoming', updatedAt: at,
+      }, { merge: true }).catch((e) => console.error('binotel/call-settings mirror:', e.message))
     }
   })
 }
