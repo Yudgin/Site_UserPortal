@@ -1234,8 +1234,9 @@ registerEstimates(app, { adminDb, notifyClient })
 registerPayments(app, { adminDb })
 // Управление ФОПами (владелец): мета в Firestore, секреты write-only (fopSecrets, backend-only).
 registerFopsAdmin(app, { adminDb, refreshFops })
-// Создание ТТН Новой Почты (InternetDocument.save) по шаблону — сценарий «приём кораблика».
-registerNpTtn(app, { adminDb })
+// Создание ТТН Новой Почты (InternetDocument.save) по шаблону: власник — будь-який шаблон; директор із
+// застосунку — шаблон «з ремонту» свого центру (+ превʼю /api/np/ttn/preview, за бажанням notifyClient).
+registerNpTtn(app, { adminDb, notifyClient })
 // Deep-link Telegram: генерация ссылки t.me/<бот>?start=<токен> из заявки (владелец).
 registerTelegramLinks(app, { adminDb })
 // Операторский бот (поглощение TelegramBot): спит без TELEGRAM_OPERATOR_BOT_TOKEN (фазы Б1-Б4).
