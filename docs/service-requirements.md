@@ -886,10 +886,23 @@ JSON — `customerData` по заявке `sr-test-pbx-call`; номер вне 
 этап «Отримано» в карточке выполненного ремонта, поиск только по `+380…` (теперь `in` по `+380…`/`380…`/`0…`), лимит
 25 заявок на номер (теперь 100), чувствительность пропуска парсеров к регистру пути.
 
-**Открыто.** Записывающие статус места (`payments.js`, `estimateEngine.updateRequest`, хаб, приложение) не ставят время
-завершения, поэтому `doneGraceDays` срабатывает только от действия человека (этап, диагностика, ТТН через наш НП);
-читатель уже понимает `doneAt`/`statusChangedAt`/`paidAt`. Телефон без нормализации пишут `ManagerInboxPage` и
-`BoatOrderPage` (поиск по вариантам это компенсирует, кроме форматов со скобками). Документ `system/binotelRouting` создан (`scope: test`,
+**Закрыто 2026-10-16 (ветка `claude/status-times-phones`).** Время статуса заявки ставят все места смены статуса:
+`statusChangedAt` — при настоящей смене (тот же статус повторно ничего не пишет), `doneAt` — при переходе в `done`,
+`paidAt` — когда пришли деньги (первое подтверждение, повтор после ошибки Checkbox его не сдвигает; скасованная заявка
+остаётся скасованной, но `paidAt` получает). Общий помощник `server/statusTimes.js`; пишут `payments.js` (оплата и
+выбор варианта клиентом → `approved`), `estimateEngine.updateRequest`, `estimateActions` (факт → `in_work`) и на фронте
+`serviceRequestService.save` (карточка, редакторы предложения и факта, перенос из 1С). Импорт (синк 1С,
+`BoatImportPage`) время не ставит: статус там выведен, а не изменён. Телефон пишется каноническим `+380XXXXXXXXX` в
+`serviceRequestService.save` и `boatOrderService.save` (значит, и в `ManagerInboxPage`, `BoatOrderPage`, лиде из
+журнала звонков); иностранный номер остаётся как набран. `boatOrders.clientPhone` нормализован один раз скриптом
+`server/scripts/normalize-boat-order-phones.mjs` (286 заказов, исправлено 2: формат со скобками и `0…`; `updatedAt` не
+трогали); в `serviceRequests` нестандартных номеров нет (567 из 567). Приложение «RunFerry Сервіс» (отмена, первая
+диагностика) — задача сессии «Функционал мобильного приложения обслуживания» (бриф
+`runferry-briefs/service-app/status-times-app-brief-2026-10-16.md`). Задеплоено 2026-10-16: бэкенд
+`runferry-backend-00073-k4n` (ветка `claude/status-times-phones` = `claude/vigilant-turing-7b0f39` + эти правки; env и
+секреты прежние), фронт — Firebase Hosting. **Кто деплоит бэкенд следующим — смержите `claude/status-times-phones`.**
+
+**Открыто.** Документ `system/binotelRouting` создан (`scope: test`,
 `mode: passthrough`, три тестовых номера владельца, `assignedToEmployeeNumber: 906`), TTL-политика на
 `binotelEvents.expireAt` включена. Фрагмент в 1С вставляет владелец; до этого приёмник вызывается только тестами.
 

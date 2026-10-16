@@ -11,6 +11,7 @@ import {
   createEstimateOps, round2, nowIso, requestVisible, canEditRequest, canEditEstimate, withLines, needsReapproval,
   estimate2goods, extraLine,
 } from './estimateEngine.js'
+import { statusTimes } from './statusTimes.js'
 
 // Ключи способов оплаты (src/types/pricing.ts PAY_METHOD_KEYS) — порядок важен для fopId «первого способа».
 export const PAY_METHOD_KEYS = ['liqpayCard', 'liqpayPaypart', 'monoChast', 'monoAcquire', 'privatPaypart', 'cod']
@@ -140,7 +141,7 @@ export function createEstimateActions({ adminDb }) {
       const srPatch = { actualEstimateId: estId, updatedAt: now, lastEditedBy: staff.email || null, lastEditedVia: via }
       // Политика статуса (1): как редактор факта — заявка → «в роботі», но не воскрешаем
       // скасовану/виконану и не откатываем оплаченную.
-      if (cur.status !== 'cancelled' && cur.status !== 'done' && !cur.paymentId) srPatch.status = 'in_work'
+      if (cur.status !== 'cancelled' && cur.status !== 'done' && !cur.paymentId) Object.assign(srPatch, { status: 'in_work' }, statusTimes(cur.status, 'in_work', now))
       if (pending.length) srPatch.extraExpenses = (cur.extraExpenses || []).map((x) => (x && x.id && !x.appliedToEstimateId ? { ...x, appliedToEstimateId: estId } : x))
       tx.set(srRef, srPatch, { merge: true })
       // Факт собран по выбранному варианту → «замораживаем» пропозицію (переизбор клиентом запрещён).

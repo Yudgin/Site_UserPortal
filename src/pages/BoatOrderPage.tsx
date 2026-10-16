@@ -28,6 +28,7 @@ import {
   type BoatModel, type BoatOption, type BoatOrder, type BoatOrderLine, type BoatOrderStatus, type Dropshipper,
 } from '@/types/boats'
 import { secureId } from '@/utils/id'
+import { canonicalPhone } from '@/utils/phone'
 import { useTtnStatuses, ttnChipColor } from '@/hooks/useTtnStatuses'
 
 const fmtUah = (n: number) => `${(n || 0).toLocaleString('uk-UA')} грн`
@@ -125,14 +126,15 @@ export default function BoatOrderPage() {
     setSaving(true)
     const res = await boatOrderService.save(order)
     setSaving(false)
-    if (res) { setDirty(false); notify('Збережено') } else notify('Не вдалося зберегти', 'error')
+    // Сервіс записав телефон канонічним — показуємо те, що збережено.
+    if (res) { setOrder((o) => (o ? { ...o, clientPhone: canonicalPhone(o.clientPhone) } : o)); setDirty(false); notify('Збережено') } else notify('Не вдалося зберегти', 'error')
   }
 
   // Зміна статусу: історія + миттєве збереження (щоб хід виконання не губився без «Зберегти»).
   const setStatus = async (s: BoatOrderStatus) => {
     if (!order || s === order.status) return
     const next: BoatOrder = {
-      ...order, status: s,
+      ...order, clientPhone: canonicalPhone(order.clientPhone), status: s,
       statusHistory: [...(order.statusHistory || []), { status: s, at: new Date().toISOString(), by: user?.email || null }],
       ...(s === 'done' && !order.soldAt ? { soldAt: new Date().toISOString().slice(0, 10) } : {}),
     }

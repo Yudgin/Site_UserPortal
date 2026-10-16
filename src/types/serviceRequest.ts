@@ -89,6 +89,10 @@ export interface ServiceRequest {
   boat?: string // модель/название кораблика (если известно)
   complaint: string // сводная жалоба/описание
   status: ServiceRequestStatus
+  // Час подій статусу (правило входящих Binotel «виконаний ремонт ще 14 днів»; updatedAt освіжає синк 1С):
+  statusChangedAt?: string | null // остання справжня зміна статусу
+  doneAt?: string | null // перехід у «Виконано»
+  paidAt?: string | null // оплата пройшла (пише лише backend)
   // Диагностика после получения кораблика: выявленные неисправности (текстом). Помогает уточнить
   // предварительную калькуляцию (мастер точнее определил неисправность).
   diagnostics?: { text: string; at: string; by: string | null } | null

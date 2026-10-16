@@ -10,6 +10,7 @@
 // клиентом — 10 % от предварительной (NO_REAPPROVAL_DEVIATION_PCT в src/types/chat.ts), history ≤ 20.
 // Персистенция — firebase-admin (доверенный backend, минуя клиентские правила).
 import crypto from 'crypto'
+import { statusTimes } from './statusTimes.js'
 
 export const STAFF_ROLES = ['owner', 'director', 'accountant', 'master']
 export const NO_REAPPROVAL_DEVIATION_PCT = 10
@@ -350,7 +351,10 @@ export function createEstimateOps({ adminDb }) {
       changes.push({ field: 'boat', label: `кораблик: ${fields.boat || '—'}`, value: fields.boat })
     }
     if (!changes.length) return fail('NOTHING', 'Немає що змінювати.')
-    await col('serviceRequests').doc(String(sr0.id)).set({ ...fields, updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+    const now = nowIso()
+    // Час зміни статусу (doneAt при «Виконано») — для правила входящих Binotel; той самий статус нічого не ставить.
+    Object.assign(fields, statusTimes(sr0.status, fields.status, now))
+    await col('serviceRequests').doc(String(sr0.id)).set({ ...fields, updatedAt: now, lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
     return { ok: true, code: 'UPDATED', data: { request: reqInfo(sr0), fields, changes } }
   }
 
