@@ -25,6 +25,8 @@ import { registerBinotelWebhook } from './binotelWebhook.js'
 import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
 import { registerVoiceTranscribe } from './voiceTranscribe.js'
+import { registerRequestLink } from './requestLink.js'
+import { registerReturnTracking } from './returnTracking.js'
 import { registerEstimates } from './estimates.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
@@ -1226,6 +1228,9 @@ registerClientProfiles(app, { adminDb })
 registerUserProfiles(app, { adminDb })
 // Журнал информирования клиента: авто-выбор канала (мессенджер в окне / иначе SMS).
 const { notifyClient } = registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUrl: SITE_URL })
+// Повторне посилання на сторінку заявки (/serviceshare/<GUID 1С>) через notifyClient: ШІ голосового шлюзу
+// (POST /api/voice-gateway/resend-link, Bearer VOICE_GATEWAY_TOKEN) і співробітник (POST /api/service-requests/:id/resend-link).
+registerRequestLink(app, { adminDb, notifyClient, siteUrl: SITE_URL })
 // Фактичний кошторис із застосунку сервісу: створити за обраним варіантом, витрата поза прайсом,
 // вилучити витрату (ядро розрахунків — estimateEngine.js, спільне з Telegram-ботом співробітників).
 registerEstimates(app, { adminDb, notifyClient })
@@ -1257,6 +1262,9 @@ if (process.env.BINOTEL_KEY && process.env.BINOTEL_SECRET) {
 registerBinotelWebhook(app, { adminDb, siteUrl: SITE_URL })
 // Синхронизация картотеки ремонтов из 1С (admin/scheduler): upsert в serviceRequests.
 registerOnecSync(app, { adminDb })
+// «Клієнт отримав кораблик» (clientReceivedAt) за статусом зворотної ТТН НП: POST /api/np/return-tracking/reconcile
+// (Cloud Scheduler, x-admin-token = PAYMENTS_ADMIN_TOKEN; ?dryRun=1 — без запису).
+registerReturnTracking(app, { adminDb, np: npRequest })
 // Голосова надиктовка з застосунку сервісу: POST /api/ai/transcribe (staff, аудіо → текст; рушій у stt.js,
 // ключ ELEVENLABS_API_KEY у Secret Manager). Далі текст іде в існуючий /api/ai/improve-text без змін.
 registerVoiceTranscribe(app, { adminDb })

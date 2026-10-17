@@ -1076,3 +1076,40 @@ Smoke: `/api/np/ttn/preview`, `/api/np/ttn/create`, `/api/estimates/actual` бе
 **Открыто.** Закрытие «гроші за наложкою отримано» (нет ни эндпоинта, ни чека); конфликт номеров портал ↔ 1С (синк
 fill-only, первый записанный побеждает); второй шаблон центра (большой/малый) и курьерская доставка — по запросу
 владельца; печать этикетки НП.
+
+## 32. Повторная ссылка на страницу заявки и отметка «клиент получил кораблик» (2026-10-18)
+
+**Требования (владелец, 2026-10-17; `runferry-briefs/telephony/ai-first-discussion-join-2026-10-17.md` §12 пп. 4–5).**
+(1) Ссылку на страницу заявки, которую клиент получил в SMS/мессенджере, «надо сделать возможным повторно отправить» —
+ИИ-помощник голосового шлюза (инструмент `resend_request_link`) и, по желанию владельца, кнопка в приложении/портале.
+(2) «Заявка завершена, когда клиент получил кораблик и прошло 2 недели»; до этого она «відкрита». Отметки «получил» не
+было. Записка с контрактом и решениями: `runferry-briefs/telephony/resend-link-and-client-received-2026-10-18.md`.
+
+**Повторная ссылка (`server/requestLink.js`).** Ссылка — та же, что 1С шлёт в SMS: `/serviceshare/<GUID ремонта 1С>`
+(`onec.guid`, иначе `externalRequestId`, если это GUID). Нет GUID → 409 `NO_CLIENT_PAGE` (страница читает 1С и без GUID
+не откроется), другой ссылки не шлём. Отправка — `notifyClient` событием `link` (канал авто: Telegram / Viber в окне /
+SMS), запись в журнал `notifications` с `meta.source` (`voice-gateway` | `staff`) и `gcid`. Входы:
+`POST /api/voice-gateway/resend-link` (`Authorization: Bearer VOICE_GATEWAY_TOKEN`, тело `{serviceRequestId, gcid?}`,
+один лист на звонок по `gcid`) и `POST /api/service-requests/:id/resend-link` (owner/director/master, не-владелец —
+только свой центр, `{clientKey?}`). Общий лимит `RESEND_LINK_PER_DAY` (3) на заявку за 24 ч — Firestore
+`notifyQuota/link-<id>` (несколько инстансов Cloud Run), неудачная отправка лимит не тратит; 429 `LIMIT` + `Retry-After`.
+Телефона и текста в ответах нет. `/api/notify` событие `link` по-прежнему не принимает. Текст SMS — черновик на
+согласование: «Сторінка вашої заявки RunFerry: <посилання>» (2 сегмента).
+
+**«Клиент получил» (`server/returnTracking.js`).** Поля заявки: `clientReceivedAt` (ISO; `RecipientDateTime` НП, нет —
+время обнаружения и `clientReceivedApprox: true`), `clientReceivedTtn`, `clientReceivedSource: 'np'`, `returnTracking
+{ttn, code, status, firstCheckedAt, changedAt, final?}`. Не путать с этапом `stage: 'received'` («кораблик у нас»);
+`status` не меняется (он системный). `POST /api/np/return-tracking/reconcile` (Cloud Scheduler, `x-admin-token` =
+`PAYMENTS_ADMIN_TOKEN`; `?dryRun=1` — без записи) опрашивает `TrackingDocument.getStatusDocuments` по 100 ТТН с телефоном
+получателя: коды 9/10/11/106 → получено; 102/103/108 → отказ, 2 → удалена, 3 → не найдена (через 3 дня), 45 дней без
+получения → `stale` — дальше не опрашиваем. Пишет в заявку только при смене кода или финале.
+
+**«Відкрита» (`server/binotelWebhook.js isOpen`, общий для приёмника Binotel и шлюза).** Зворотная ТТН ещё в дороге или
+на отделении (`returnTracking` той же ТТН без `final`) → открыта, как невыполненная; есть `clientReceivedAt` → открыта
+`doneGraceDays` (14) от получения или более позднего настоящего действия; без этих полей — прежнее правило.
+`clientReceivedAt` входит в `lastActivityMs`.
+
+**Статус.** Код и тесты (`server/requestLink.test.js` 11, `server/returnTracking.test.js` 12; всего 111/111) — ветка
+`claude/resend-link-received` от `origin/feat/calc`, НЕ задеплоено. До деплоя (только с «да» владельца): секрет
+`voice-gateway-token` в Secret Manager → env `VOICE_GATEWAY_TOKEN`; задание Cloud Scheduler на reconcile; согласовать
+текст SMS. Живых отправок и вызовов НП не было.

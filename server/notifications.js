@@ -8,6 +8,7 @@
 // Пороги настраиваются через env (в часах): NOTIFY_VIBER_WINDOW_H (24), NOTIFY_TELEGRAM_WINDOW_H (0=без лимита).
 import { verifyFirebaseStaff } from './adminAuth.js'
 import { rateLimit, combine } from './rateLimit.js'
+import { clientPageLink } from './requestLink.js'
 
 const nowIso = () => new Date().toISOString()
 
@@ -25,6 +26,10 @@ const customLimiter = combine(
 const NP_TRACK_URL = 'https://novaposhta.ua/tracking/?cargo_number='
 // Події, які приймає /api/notify. Невідоме імʼя раніше проходило як «вільний текст» повз cap/ліміт.
 const ALLOWED_EVENTS = ['offer', 'actual', 'ttn', 'custom']
+// 'link' (повторне посилання на сторінку заявки) — лише через /api/voice-gateway/resend-link і
+// /api/service-requests/:id/resend-link (requestLink.js): там ліміт на заявку за добу, тут його немає.
+// Події, ідемпотентні за ключем виклику (clientKey), а не одна на заявку.
+const KEYED_EVENTS = ['custom', 'link']
 // ТТН Нової Пошти — 14 цифр; приймаємо 8–20 цифр після очищення (інші формати перевізників).
 const normTtn = (v) => { const d = String(v ?? '').replace(/\D/g, ''); return d && d !== '0' ? d : '' }
 const TTN_RE = /^\d{8,20}$/
@@ -43,6 +48,9 @@ const template = (event, ctx) => {
       return `Роботи по вашому корабликові виконано — готова фактична калькуляція.${ctx.link ? ` Деталі та оплата: ${ctx.link}` : ''}`
     case 'ttn':
       return `Ваш кораблик RunFerry відправлено 📦${ctx.ttn ? ` ТТН: ${ctx.ttn}.` : ''}${ctx.link ? ` Відстежити: ${ctx.link}` : ''}`
+    case 'link':
+      // ЧЕРНЕТКА на погодження власнику. Коротко: з посиланням (~72 знаки) — 2 SMS-сегменти кирилицею.
+      return ctx.link ? `Сторінка вашої заявки RunFerry: ${ctx.link}` : ''
     default:
       return ctx.text || ''
   }
@@ -86,7 +94,8 @@ export function registerNotifications(app, deps) {
 
   // Основной вызов: отправить оповещение клиенту. Авто-выбор канала (мессенджер → иначе SMS).
   // Идемпотентно по (serviceRequestId, event) для авто-событий (offer/actual/ttn) — не задваивает.
-  async function notifyClient({ serviceRequestId = null, sessionId = null, phone = null, text = null, event = 'custom', link = null, ttn = null, by = null, clientKey = null }) {
+  // meta — необов'язкові службові поля в запис журналу (напр. {source: 'voice-gateway', gcid}), без PII.
+  async function notifyClient({ serviceRequestId = null, sessionId = null, phone = null, text = null, event = 'custom', link = null, ttn = null, by = null, clientKey = null, meta = null }) {
     // Подтягиваем заявку (получатель, ссылки).
     let req = null
     if (serviceRequestId) {
@@ -103,7 +112,9 @@ export function registerNotifications(app, deps) {
     if (!resolvedLink && req) {
       if (event === 'offer' && req.offerId) resolvedLink = `${siteUrl}/offer/${req.offerId}`
       if (event === 'actual' && req.actualEstimateId) resolvedLink = `${siteUrl}/estimate/${req.actualEstimateId}`
+      if (event === 'link') resolvedLink = clientPageLink(req, siteUrl)
     }
+    if (event === 'link' && !resolvedLink) throw Object.assign(new Error('У заявки немає сторінки клієнта'), { code: 'NO_CLIENT_PAGE', status: 400 })
     // ТТН відправлення клієнту: явний номер → returnTtn («→ клієнту»). waybillNumber — ТТН «до нас»,
     // її клієнту НЕ шлемо (легасі-записи переносить бекфіл). Посилання на трекінг НП — з цифр номера.
     const resolvedTtn = event === 'ttn' ? (normTtn(ttn) || normTtn(req?.returnTtn) || null) : null
@@ -120,9 +131,10 @@ export function registerNotifications(app, deps) {
     // custom — ідемпотентний за clientKey (ключ генерує клієнт на кожне нове повідомлення; формат
     // валідовано вище), без ключа — як раніше, окремий документ на кожну відправку.
     const ttnSlug = String(resolvedTtn || 'none').replace(/[^\w-]+/g, '').slice(0, 40)
-    const customKey = event === 'custom' && clientKey && CLIENT_KEY_RE.test(String(clientKey)) ? String(clientKey) : null
-    const autoId = serviceRequestId && (event !== 'custom' || customKey)
-      ? (event === 'ttn' ? `ntf-${serviceRequestId}-ttn-${ttnSlug}` : event === 'custom' ? `ntf-${serviceRequestId}-custom-${customKey}` : `ntf-${serviceRequestId}-${event}`)
+    const keyed = KEYED_EVENTS.includes(event)
+    const customKey = keyed && clientKey && CLIENT_KEY_RE.test(String(clientKey)) ? String(clientKey) : null
+    const autoId = serviceRequestId && (!keyed || customKey)
+      ? (event === 'ttn' ? `ntf-${serviceRequestId}-ttn-${ttnSlug}` : keyed ? `ntf-${serviceRequestId}-${event}-${customKey}` : `ntf-${serviceRequestId}-${event}`)
       : null
     const ref = autoId ? adminDb.collection('notifications').doc(autoId) : adminDb.collection('notifications').doc()
     if (autoId) {
@@ -191,6 +203,7 @@ export function registerNotifications(app, deps) {
       error: error || null,
       text: body,
       by: by || null,
+      ...(meta && typeof meta === 'object' ? { meta } : {}),
     }
     await ref.set(rec)
     return rec

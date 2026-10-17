@@ -246,6 +246,7 @@ export const lastActivityMs = (sr) => Math.max(
   msOf(sr?.createdAt),
   msOf(sr?.diagnostics?.at),
   msOf(sr?.doneAt),
+  msOf(sr?.clientReceivedAt), // клієнт отримав кораблик (returnTracking.js, за зворотною ТТН НП)
   msOf(sr?.statusChangedAt),
   msOf(sr?.paidAt),
   ...(Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).filter(isRealStageEvent).map((h) => msOf(h.at)),
@@ -255,9 +256,18 @@ export const lastActivityMs = (sr) => Math.max(
 //     імпорті (inferStatus), покинуті старі назавжди лишилися б 'new' — поріг лише страховка на майбутнє;
 //   - або виконана чи вже відправлена (stage 'shipped'), але остання дія не старша за doneGraceDays: клієнт дзвонить
 //     «де мій кораблик». Без цього відправка через np-ttn (жива дія) тримала б заявку відкритою ще 180 днів.
+// Рішення власника 2026-10-17 (записка ai-first-discussion-join, розділ 12 п. 4): заявка завершена, коли клієнт
+// отримав кораблик і минуло 2 тижні. Тому, якщо відомо більше, ніж статус:
+//   - зворотна ТТН ще в дорозі чи на відділенні (returnTracking тієї ж ТТН без final) — відкрита, як невиконана;
+//   - клієнт отримав (clientReceivedAt) — відкрита doneGraceDays (14) від отримання чи пізнішої справжньої дії.
+// Без цих полів (старі заявки, НП ще не опитана) — колишнє правило нижче.
+const sameTtn = (a, b) => { const x = String(a ?? '').replace(/\D/g, ''); return !!x && x === String(b ?? '').replace(/\D/g, '') }
+export const returnInTransit = (sr) => !!sr?.returnTracking && !sr.returnTracking.final && sameTtn(sr.returnTracking.ttn, sr.returnTtn)
 export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   if (!sr || sr.status === 'cancelled') return false
   const ageDays = (nowMs - lastActivityMs(sr)) / DAY_MS
+  if (returnInTransit(sr)) return ageDays <= cfg.openMaxAgeDays
+  if (msOf(sr.clientReceivedAt)) return ageDays <= cfg.doneGraceDays
   return sr.status === 'done' || sr.stage === 'shipped' ? ageDays <= cfg.doneGraceDays : ageDays <= cfg.openMaxAgeDays
 }
 // Справжня історія з клієнтом: будь-яка заявка, крім скасованої без жодної ТТН; або купівля кораблика (не лід і не
