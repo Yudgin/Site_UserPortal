@@ -105,8 +105,9 @@ const inferStatus = (raw) => {
 //     цикл: shippedAt — його початок, deliveredAt — ПЕРШЕ «отримано/вручено» в ньому (1С дописує «отримано» на кожному
 //     опитуванні, тож пізніші — не подія); мітки часу — час опитування в 1С, тобто оцінка «не раніше»;
 //   - «отримано відправником» (повернення нам) і відмова — не отримання клієнтом;
-//   - буває побайтна копія вхідної історії — таку відкидаємо; події до приїзду кораблика до нас (перше «отримано» у
-//     вхідній історії) не беремо.
+//   - події до приїзду кораблика до нас (перше «отримано» у вхідній історії) не беремо; буває побайтна копія вхідної
+//     історії — з неї беремо лише новий цикл, що почався ПІСЛЯ приїзду (інакше «отримано» вхідної посилки вийшло б
+//     «отриманням клієнтом»), а копія без такого циклу не дає нічого.
 const kyivLocalToIso = (s) => {
   const str = String(s || '').trim()
   if (!str) return null
@@ -134,11 +135,12 @@ export const returnDeliveryOf = (raw) => {
   const incoming = Array.isArray(raw?.shipment?.statusHistory) ? raw.shipment.statusHistory : []
   const copyOfIncoming = hist.length > 0 && incoming.length > 0 && JSON.stringify(hist) === JSON.stringify(incoming)
   const arrivedAt = events(incoming).find((e) => DELIVERED_RE.test(e.s))?.t || null
-  const ev = (copyOfIncoming ? [] : events(hist)).filter((e) => !arrivedAt || e.t >= arrivedAt)
-  if (!ev.length) return ttn ? { ttn, shippedAt: null, deliveredAt: null } : null
-  let start = 0
+  let ev = events(hist).filter((e) => !arrivedAt || e.t > arrivedAt)
+  let start = -1
   ev.forEach((e, i) => { if (CYCLE_START_RE.test(e.s)) start = i })
-  const cycle = ev.slice(start)
+  if (copyOfIncoming && start < 0) ev = []
+  if (!ev.length) return ttn ? { ttn, shippedAt: null, deliveredAt: null } : null
+  const cycle = ev.slice(Math.max(start, 0))
   return { ttn, shippedAt: cycle[0].t, deliveredAt: cycle.find((e) => isDelivered(e.s))?.t || null }
 }
 const sameDelivery = (a, b) => !!a && !!b && (a.ttn || null) === (b.ttn || null) && (a.shippedAt || null) === (b.shippedAt || null)

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import express from 'express'
 import {
   parseNestedForm, parseBinotelBody, normalizeRouting, decideCallSettings, buildCustomerData, pickRequests,
-  clip, NAME_MAX, DESC_MAX, registerBinotelWebhook, clientCategory, isOpen, lastActivityMs, DEFAULT_ROUTING,
+  clip, NAME_MAX, DESC_MAX, registerBinotelWebhook, clientCategory, isOpen, lastActivityMs, DEFAULT_ROUTING, currentDelivery,
 } from './binotelWebhook.js'
 
 const FORM = 'requestType=apiCallSettings&externalNumber=0675499555&pbxNumber=0443338049&companyID=12345&callType=0'
@@ -594,4 +594,35 @@ test('ревʼю правила: «Клієнт отримав» — дата з
   const reopened = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'in_work', stage: 'received', returnDelivery: { ttn: null, deliveredAt: daysAgo(40) },
     createdAt: daysAgo(60), stageHistory: [{ stage: 'received', at: daysAgo(2), by: 'master@x' }] })] })
   assert.ok(!reopened.description.includes('отримав'), reopened.description)
+})
+
+test('повторна перевірка: гарантія на оплаченій (done зафіксовано), самовивіз+гарантія, повторна відправка 1С новим номером, запис 1c-sync тієї ж відправки', () => {
+  // 1) оплачено 80 днів тому, отримано 76 днів тому, майстер прийняв по гарантії 3 дні тому → кораблик у нас → відкрита
+  const warranty = SR({ status: 'done', paymentId: 'o', paidAt: daysAgo(80), doneAt: daysAgo(80), statusChangedAt: daysAgo(80), stage: 'diagnosed',
+    returnDelivery: { ttn: null, shippedAt: daysAgo(78), deliveredAt: daysAgo(76) }, createdAt: daysAgo(99),
+    stageHistory: [{ stage: 'received', at: daysAgo(99), by: '1c-sync' }, { stage: 'received', at: daysAgo(3), by: 'master@x' }, { stage: 'diagnosed', at: daysAgo(2), by: 'master@x' }] })
+  assert.equal(isOpen(warranty, NOW), true)
+  // 2) оплачено, самовивіз (без ТТН), потім гарантійний прийом → відкрита
+  const pickupWarranty = SR({ status: 'done', paidAt: daysAgo(60), doneAt: daysAgo(60), stage: 'received', createdAt: daysAgo(90),
+    stageHistory: [{ stage: 'received', at: daysAgo(5), by: 'master@x' }] })
+  assert.equal(isOpen(pickupWarranty, NOW), true)
+  // старий імпорт 'done' без часу, а потім справжня подія майстра → у роботі → відкрита
+  assert.equal(isOpen(SR({ status: 'done', stage: 'received', createdAt: daysAgo(300), stageHistory: [{ stage: 'received', at: daysAgo(40), by: 'master@x' }] }), NOW), true)
+  // звичайний потік: етапи до оплати → 21 день від оплати
+  const normal = SR({ status: 'done', doneAt: daysAgo(10), paidAt: daysAgo(10), createdAt: daysAgo(30), stageHistory: [{ stage: 'diagnosed', at: daysAgo(25), by: 'm' }] })
+  assert.equal(isOpen(normal, NOW), true)
+  assert.equal(isOpen({ ...normal, doneAt: daysAgo(22), paidAt: daysAgo(22) }, NOW), false)
+  // запаковано після оплати, ще не відправлено → у нас
+  assert.equal(isOpen({ ...normal, doneAt: daysAgo(40), paidAt: daysAgo(40), stageHistory: [{ stage: 'packed', at: daysAgo(30), by: 'm' }] }, NOW), true)
+  // 3) 1С відправила повторно з новим номером B (у заявці лишився старий A), клієнт отримав учора → відкрита
+  const reship1c = SR({ status: 'done', returnTtn: '20451000000001', stage: 'shipped', createdAt: daysAgo(60),
+    returnDelivery: { ttn: '20451000000002', shippedAt: daysAgo(3), deliveredAt: daysAgo(1) },
+    stageHistory: [{ stage: 'received', at: daysAgo(59), by: '1c-sync' }, { stage: 'shipped', at: daysAgo(40), by: '1c-sync', note: 'ТТН 20451000000001' }] })
+  assert.equal(isOpen(reship1c, NOW), true)
+  // 4) запис 1c-sync 'shipped' часом прогону (після отримання) не перекриває доставку тієї ж посилки
+  const sameShip = SR({ status: 'in_work', returnTtn: '7', stage: 'shipped', createdAt: daysAgo(40),
+    returnDelivery: { ttn: '7', shippedAt: daysAgo(17), deliveredAt: daysAgo(16.7) },
+    stageHistory: [{ stage: 'received', at: daysAgo(39), by: '1c-sync' }, { stage: 'shipped', at: daysAgo(16.5), by: '1c-sync', note: 'ТТН 7' }] })
+  assert.equal(currentDelivery(sameShip)?.deliveredAt, daysAgo(16.7))
+  assert.equal(isOpen(sameShip, NOW), false) // 16,7 днів після отримання > 14
 })

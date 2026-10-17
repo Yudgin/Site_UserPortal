@@ -271,25 +271,27 @@ export const lastActivityMs = (sr) => Math.max(
 //   3. Виконана, а про відправку нічого (оплата/хаб без ТТН, самовивіз, старий імпорт 1С) → ≤ transitMaxDays від
 //      завершення (doneAt / paidAt / statusChangedAt, інакше остання дія) — наближення з брифу власника.
 //   4. Інакше кораблик у нас → ≤ openMaxAgeDays (180) від останньої дії — страховка від покинутих ремонтів з 1С.
-// returnDelivery НЕ беремо, якщо після нього є новіша справжня подія (повторне відкриття по гарантії, нова відправка,
-// діагностика, зміна статусу не на 'done') або в ньому інший номер ТТН, ніж у заявці (обидва непорожні).
-const shippedEventMs = (sr) => Math.max(0, ...(Array.isArray(sr?.stageHistory) ? sr.stageHistory : [])
-  .filter((h, i) => h && h.stage === 'shipped' && isRealStageEvent(h, i)).map((h) => msOf(h.at)))
+// Коли фаз кілька, перемагає найпізніша: відправка, повернення в роботу (гарантія, етап після завершення) чи
+// завершення. returnDelivery НЕ беремо, якщо після нього є нова відправка порталом/людиною або повернення в роботу.
+// Записи 1c-sync 'shipped' доставку не перекривають: це той самий сигнал із тієї ж 1С, записаний часом прогону.
+// Номер ТТН заявки з returnDelivery не звіряємо: returnTtn у заявці пишеться лише раз і застаріває, коли 1С
+// відправляє повторно з новим номером (ревʼю 2026-10-17).
+const stageEvents = (sr) => (Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).filter(isRealStageEvent)
+const shippedEventMs = (sr, skip1c = false) => Math.max(0, ...stageEvents(sr)
+  .filter((h) => h.stage === 'shipped' && !(skip1c && h.by === '1c-sync')).map((h) => msOf(h.at)))
+// Повернення в роботу: справжній етап, крім 'shipped', діагностика, зміна статусу не на 'done'.
+const reopenEventMs = (sr) => Math.max(0, ...stageEvents(sr).filter((h) => h.stage !== 'shipped').map((h) => msOf(h.at)),
+  msOf(sr?.diagnostics?.at), sr?.status !== 'done' ? msOf(sr?.statusChangedAt) : 0)
 const normTtnDigits = (v) => { const d = String(v ?? '').replace(/\D/g, ''); return d && d !== '0' ? d : '' }
 // Посилки запчастин/купівлі (npScenario parts/purchase) — не повернення кораблика.
 const boatShipStage = (sr) => sr?.stage === 'shipped' && !['parts', 'purchase'].includes(sr?.npScenario)
 export function currentDelivery(sr) {
   const rd = sr?.returnDelivery
   if (!rd || typeof rd !== 'object') return null
-  const a = normTtnDigits(rd.ttn), b = normTtnDigits(sr.returnTtn)
-  if (a && b && a !== b) return null
   const anchor = msOf(rd.deliveredAt) || msOf(rd.shippedAt)
   if (!anchor) return null
-  const hist = Array.isArray(sr.stageHistory) ? sr.stageHistory : []
-  const newer = hist.some((h, i) => isRealStageEvent(h, i) && msOf(h.at) > anchor)
-    || msOf(sr.diagnostics?.at) > anchor
-    || (sr.status !== 'done' && msOf(sr.statusChangedAt) > anchor)
-  return newer ? null : rd
+  if (shippedEventMs(sr, true) > anchor || reopenEventMs(sr) > anchor) return null
+  return rd
 }
 export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   if (!sr || sr.status === 'cancelled') return false
@@ -297,13 +299,15 @@ export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   const rd = currentDelivery(sr)
   const deliveredMs = msOf(rd?.deliveredAt)
   if (deliveredMs) return days(deliveredMs) <= cfg.doneGraceDays
-  if (rd || boatShipStage(sr) || (!!normTtnDigits(sr.returnTtn) && sr.status === 'done')) {
-    const shipMs = Math.max(msOf(rd?.shippedAt), shippedEventMs(sr)) || lastActivityMs(sr)
-    return days(shipMs) <= cfg.transitMaxDays
-  }
+  const reopenMs = reopenEventMs(sr)
+  const shipMs = Math.max(msOf(rd?.shippedAt), shippedEventMs(sr))
+  const shipped = !!rd || boatShipStage(sr) || (!!normTtnDigits(sr.returnTtn) && sr.status === 'done')
+  if (shipped && shipMs >= reopenMs) return days(shipMs || lastActivityMs(sr)) <= cfg.transitMaxDays
   if (sr.status === 'done') {
-    const doneMs = Math.max(msOf(sr.doneAt), msOf(sr.paidAt), msOf(sr.statusChangedAt)) || lastActivityMs(sr)
-    return days(doneMs) <= cfg.transitMaxDays
+    const doneMs = Math.max(msOf(sr.doneAt), msOf(sr.paidAt), msOf(sr.statusChangedAt))
+    // Після завершення (або старого імпорту без часу) кораблик повернули в роботу — він у нас.
+    if (reopenMs > doneMs) return days(lastActivityMs(sr)) <= cfg.openMaxAgeDays
+    return days(doneMs || lastActivityMs(sr)) <= cfg.transitMaxDays
   }
   return days(lastActivityMs(sr)) <= cfg.openMaxAgeDays
 }
