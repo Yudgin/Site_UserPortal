@@ -59,6 +59,12 @@ const CHANNEL_MAP = {
 }
 
 const TERMINAL = new Set(['summarized', 'skipped', 'no_answer', 'failed', 'no_recording', 'error'])
+// Документи, які веде цей конвеєр: наші дзвінки з застосунку (binotel) і розмови ШІ-співрозмовника
+// голосового шлюзу (voice-gateway, лінія 901/907). Шлюз сам пише розшифровку й резюме і ставить
+// recordingOnly: true + status 'finished' — конвеєр лише забирає запис Binotel за generalCallID у бакет
+// (кнопка «Прослухати») і закриває документ як summarized, не перезаписуючи transcript/summary.
+const PIPELINE_PROVIDERS = new Set(['binotel', 'voice-gateway'])
+const isRecordingOnly = (d) => d && d.recordingOnly === true
 const RETRYABLE = new Set(['error', 'no_recording', 'skipped']) // з яких терміналів власник може повторити
 const FINAL_DISPOSITIONS = new Set(['ANSWER', 'TRANSFER', 'BUSY', 'NOANSWER', 'CANCEL', 'CONGESTION', 'CHANUNAVAIL', 'VM', 'VM-SUCCESS'])
 const SUCCESS_DISPOSITIONS = new Set(['ANSWER', 'TRANSFER'])
@@ -212,13 +218,22 @@ export function registerBinotelCalls(app, deps) {
 
   // ---------- крок 2: запис → Cloud Storage ----------
   const stepRecording = async (ref, d) => {
+    const onlyRec = isRecordingOnly(d)
+    // ШІ-розмова без generalCallID (шлюз не отримав X-BINOTEL-GCID) — запису в АТС не знайти, документ уже повний.
+    if (onlyRec && !d.generalCallID) {
+      return patch(ref, { status: 'summarized', statusAt: nowIso(), nextCheckAt: null, recordingError: { code: 'NO_GCID', message: 'Немає ідентифікатора дзвінка АТС — запис недоступний', at: nowIso() } })
+    }
     let rs = d.recordingStatus
     if (rs !== 'uploaded') {
       const c = await callDetails(d.generalCallID)
       rs = String(c?.recordingStatus || '')
       if (rs !== 'uploaded') {
         const waitedMin = (Date.now() - new Date(d.finishedAt || d.createdAt).getTime()) / 60000
-        if (waitedMin > RECORDING_WAIT_MAX_MIN) return fail(ref, 'no_recording', 'NO_RECORDING', 'АТС не віддала запис розмови')
+        if (waitedMin > RECORDING_WAIT_MAX_MIN) {
+          // У ШІ-розмови розшифровка й резюме вже є — закриваємо як summarized, позначивши, що запису немає.
+          if (onlyRec) return patch(ref, { status: 'summarized', statusAt: nowIso(), nextCheckAt: null, recordingError: { code: 'NO_RECORDING', message: 'АТС не віддала запис розмови', at: nowIso() } })
+          return fail(ref, 'no_recording', 'NO_RECORDING', 'АТС не віддала запис розмови')
+        }
         return patch(ref, { recordingStatus: rs, nextCheckAt: addSec(waitedMin < 2 ? 10 : 60), checks: (d.checks || 0) + 1 })
       }
     }
@@ -230,9 +245,9 @@ export function registerBinotelCalls(app, deps) {
     const path = `call-recordings/${d.serviceRequestId}/${d.id}.mp3`
     await getStorage().bucket(BUCKET).file(path).save(buf, { contentType: 'audio/mpeg', resumable: false, metadata: { cacheControl: 'private, max-age=3600' } })
     return patch(ref, {
-      status: 'recorded', statusAt: nowIso(), recordingStatus: 'uploaded',
+      status: onlyRec ? 'summarized' : 'recorded', statusAt: nowIso(), recordingStatus: 'uploaded',
       recording: { bucket: BUCKET, path, bytes: buf.length, contentType: 'audio/mpeg', readyAt: nowIso() },
-      nextCheckAt: addSec(1),
+      nextCheckAt: onlyRec ? null : addSec(1),
     })
   }
 
@@ -347,7 +362,10 @@ export function registerBinotelCalls(app, deps) {
       const d = { ...claimed, id: ref.id }
       let ok = false
       try {
-        if (d.status === 'dialing' || d.status === 'connected') await stepDial(ref, d)
+        if (isRecordingOnly(d) && d.status !== 'finished') {
+          // ШІ-розмова: опитування стану, розшифровка й резюме не потрібні — лише запис.
+          await patch(ref, { status: 'summarized', statusAt: nowIso(), nextCheckAt: null })
+        } else if (d.status === 'dialing' || d.status === 'connected') await stepDial(ref, d)
         else if (d.status === 'finished') await stepRecording(ref, d)
         else if (d.status === 'recorded') await stepTranscribe(ref, d)
         else if (d.status === 'transcribed') await stepSummarize(ref, d)
@@ -557,7 +575,7 @@ export function registerBinotelCalls(app, deps) {
   const reconcile = async ({ limit = 20, budgetMs = 120000, concurrency = 3 } = {}) => {
     const q = await adminDb.collectionGroup('calls').where('nextCheckAt', '<=', nowIso()).orderBy('nextCheckAt').limit(limit).get()
     const stats = { scanned: q.size, processed: 0, skipped: 0, deferred: 0 }
-    const docs = q.docs.filter((doc) => doc.data().provider === 'binotel')
+    const docs = q.docs.filter((doc) => PIPELINE_PROVIDERS.has(doc.data().provider))
     const deadline = Date.now() + budgetMs
     let i = 0
     const worker = async () => {
