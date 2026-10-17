@@ -11,11 +11,13 @@
 // з'єднався б жоден дзвінок).
 // VG_NO_ANSWER_MODE=ai — замість «лінія зайнята» і в неробочий час відповідає ШІ-співрозмовник (ElevenLabs Agents):
 // потрібен рушій зі звуком до мозку (engine/sip-engine-ai, ready.audio) і агент ElevenLabs (ai-setup-elevenlabs.mjs).
+// VG_ANSWER_MODE=ai — ШІ бере трубку одразу (вступ 80, перша фраза за даними); VG_JOIN_ON_CALLBACK=1 — менеджер, що
+// передзвонив, приєднується до клієнта (міст або REFER); VG_HOLD_TONE=ringback — гудки замість 05-hold у нових гілках.
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
 import { Writable } from 'node:stream'
-import { loadConfig, extUri, isOff, NO_ANSWER_MODES } from './config.mjs'
+import { loadConfig, extUri, isOff, NO_ANSWER_MODES, CLIENT_PROMPT_KEYS } from './config.mjs'
 import { startEngine } from './engine.mjs'
 import { createDispatcher, callerAllowed, managerCaller, externalCallbackOn, maskNumber } from './flow.mjs'
 import { makeCallbackStore, resolveManagers, isInternalKey, partyKey } from './callbacks.mjs'
@@ -23,11 +25,11 @@ import { buildCard } from './card.mjs'
 import { makeTts, readWavInfo, isTelephonyWav } from './tts.mjs'
 import { makeTokenSource, accessSecret } from './gcp.mjs'
 import { makeJournal } from './journal.mjs'
-import { ensurePrivateDir, makeDailyLog, pruneGatewayData, makeVoicemailPath, ensureBeep, repairVoicemailHeaders, repairWavHeader, findGitRoot, saveAiTranscript } from './storage.mjs'
+import { ensurePrivateDir, makeDailyLog, pruneGatewayData, makeVoicemailPath, ensureBeep, ensureRingback, repairVoicemailHeaders, repairWavHeader, findGitRoot, saveAiTranscript } from './storage.mjs'
 import { startAudioServer } from './audiosock.mjs'
 import { createAgent } from './agent.mjs'
 import { makeElevenLabsProvider } from './realtime-elevenlabs.mjs'
-import { buildInstructions, FIRST_MESSAGES, TOOL_DEFS } from './aiprompt.mjs'
+import { buildInstructions, firstMessageFor, TOOL_DEFS } from './aiprompt.mjs'
 import { hoursText } from './hours.mjs'
 import { makeAiCallStore } from './aicalls.mjs'
 
@@ -209,11 +211,17 @@ export function summary(e) {
   if (e.kind !== 'callback' && e.pendingRemoved) bits.push(`ожидание перезвона снято (${e.pendingRemoved})`)
   if (e.voicemail?.empty) bits.push(`сообщения нет (запись ${e.voicemail.sec != null ? `${e.voicemail.sec.toFixed(1)} с` : '—'}${e.voicemail.removed ? ', пустой файл удалён' : ''})`)
   else if (e.voicemail?.file) bits.push(`сообщение ${e.voicemail.sec != null ? `${e.voicemail.sec.toFixed(1)} с` : '(длина неизвестна)'}: ${e.voicemail.file}`)
+  if (e.route?.branch === 'classic') bits.push(`«ИИ сразу» не включился (${e.route.why === 'breaker' ? 'предохранитель' : 'ИИ недоступен'}) — сначала менеджер`)
+  if (e.join) {
+    const j = e.join
+    const res = { bridged: 'соединены мостом', connected: 'соединены переводом', connected_unconfirmed: 'соединены переводом', refer_failed_bridged: 'перевод не прошёл — мост', client_gone: 'клиент положил трубку', manager_gone: 'менеджер положил трубку' }[j.result] || j.result || 'не завершено'
+    bits.push(`присоединение менеджера (из фазы ${j.fromPhase}, ${j.mode === 'refer' ? 'REFER' : 'мост'}): ${res}${j.ms != null ? ` за ${secs(j.ms)}` : ''}`)
+  }
   if (e.ai) {
     const a = e.ai
     const cost = (a.sessions || []).reduce((x, y) => x + (Number(y.costUsd) || 0), 0)
     const secsAi = (a.sessions || []).reduce((x, y) => x + (y.durationMs || 0), 0)
-    bits.push(`ИИ (${a.kind === 'after_hours' ? 'нерабочее время' : 'вместо «линия занята»'}): ${secs(secsAi)}, ≈$${cost.toFixed(3)}` +
+    bits.push(`ИИ (${a.kind === 'after_hours' ? 'нерабочее время' : a.kind === 'first' ? 'сразу' : 'вместо «линия занята»'}): ${secs(secsAi)}, ≈$${cost.toFixed(3)}` +
       `${a.note ? `, вопрос записан${a.note.urgent ? ' (срочно)' : ''}${a.note.callback === false ? ', без перезвона' : ''}` : ''}` +
       `${a.transfers ? `, передал менеджеру ${a.transfers} раз` : ''}${a.error ? `, ошибка ${a.error}` : ''}`)
   }
@@ -248,7 +256,7 @@ async function main() {
     }
     config.noAnswerMode = args.noAnswer
   }
-  if (config.noAnswerMode === 'ai' && config.workHoursError) {
+  if ((config.noAnswerMode === 'ai' || config.answerMode === 'ai') && config.workHoursError) {
     process.stdout.write(`${config.workHoursError}\n`)
     process.exit(2)
   }
@@ -343,15 +351,26 @@ async function main() {
   }
   // Фрази підтвердження й передзвону: свій WAV (VG_*_WAV) або синтез тим самим голосом (кеш cache/prompt-<sha1>.wav).
   // Не вийшло — фразу пропускаємо (дзвінок іде далі); синтез пробуємо знову з наступним дзвінком, не частіше раз на хвилину.
-  const PROMPT_LABELS = { confirm: 'вопрос менеджеру «1 / 2»', busy: '«линия занята» клиенту', cbConnecting: '«соединяем с клиентом» менеджеру', cbNone: '«нет ждущих клиентов» менеджеру', cbGreeting: 'приветствие клиенту при перезвоне', cbNoAnswer: '«клиент не отвечает» менеджеру', pin: '«введите пин-код» менеджеру', cbClientBusy: '«клиент говорит с ИИ, перезвоните» менеджеру' }
-  for (const [name, file] of Object.entries(config.promptFiles)) {
+  const PROMPT_LABELS = { confirm: 'вопрос менеджеру «1 / 2»', busy: '«линия занята» клиенту', cbConnecting: '«соединяем с клиентом» менеджеру', cbNone: '«нет ждущих клиентов» менеджеру', cbGreeting: 'приветствие клиенту при перезвоне', cbNoAnswer: '«клиент не отвечает» менеджеру', pin: '«введите пин-код» менеджеру', cbClientBusy: '«клиент говорит с ИИ, перезвоните» менеджеру',
+    mgrJoin: '«клиент на линии с ИИ — соединяю» менеджеру', mgrJoinBusy: '«клиента уже соединяют» менеджеру', mgrJoinGone: '«клиент положил трубку» менеджеру', intro: 'вступление 80 клиенту', joinClient: '«менеджер уже на линии» клиенту (81)', aiDown: '«соединяем с менеджером» клиенту (82)' }
+  for (const [name, file] of [...Object.entries(config.promptFiles), ...Object.entries(config.aiFirstPromptFiles || {})]) {
     if (file) config.prompts[name] = checkPrompt(PROMPT_LABELS[name] || name, path.resolve(file), { required: false })
   }
   let promptsAt = 0
   let promptsBusy = false
-  // Фраза PIN потрібна лише з передзвоном із зовнішніх номерів; «клієнт говорить із ШІ» — лише в режимі ai
-  const promptNeeded = (k) => (k !== 'pin' || externalCallbackOn(config)) && (k !== 'cbClientBusy' || config.noAnswerMode === 'ai')
-  const missingPrompts = () => Object.keys(config.promptTexts).filter((k) => !config.prompts[k] && promptNeeded(k))
+  // Клієнтські фрази 80/81/82 шлюз синтезує лише як ПРОБНІ (VG_CLIENT_SYNTH=trial) і лише для тестових номерів
+  // (VG_ALLOWED_CALLERS непорожній) — правило власника «аудіо лише після погодження текстів»
+  const clientTrial = config.clientSynth === 'trial' && config.allowedCallers.length > 0
+  if (config.clientSynth === 'trial' && !clientTrial) warn('VG_CLIENT_SYNTH=trial без VG_ALLOWED_CALLERS — клиентские фразы 80/81/82 не синтезирую (проба — только на тестовых номерах)')
+  const promptText = (k) => config.promptTexts[k] ?? config.joinPromptTexts?.[k] ?? (CLIENT_PROMPT_KEYS.includes(k) ? config.clientTrialTexts?.[k] : null)
+  // Фраза PIN потрібна лише з передзвоном із зовнішніх номерів; «клієнт говорить із ШІ» — лише в режимі ai; фрази
+  // приєднання — лише з VG_JOIN_ON_CALLBACK; клієнтські 80/82 — лише з VG_ANSWER_MODE=ai, 81 — з приєднанням, і всі три —
+  // лише пробним синтезом
+  const promptNeeded = (k) => (k !== 'pin' || externalCallbackOn(config)) && (k !== 'cbClientBusy' || config.noAnswerMode === 'ai' || config.answerMode === 'ai') &&
+    (!(k in (config.joinPromptTexts || {})) || config.joinOnCallback === true) &&
+    (!CLIENT_PROMPT_KEYS.includes(k) || (clientTrial && (k === 'joinClient' ? config.joinOnCallback === true : config.answerMode === 'ai')))
+  const allPromptKeys = [...Object.keys(config.promptTexts), ...Object.keys(config.joinPromptTexts || {}), ...CLIENT_PROMPT_KEYS]
+  const missingPrompts = () => allPromptKeys.filter((k) => !config.prompts[k] && promptNeeded(k) && promptText(k))
   const synthPrompts = async (first = false) => {
     const missing = missingPrompts()
     if (!tts || !missing.length || promptsBusy || (!first && Date.now() - promptsAt < 60000)) return
@@ -360,7 +379,7 @@ async function main() {
     const failed = []
     for (const k of missing) { // по черзі: не впираємось у ліміт одночасних запитів ElevenLabs
       try {
-        config.prompts[k] = (await tts(config.promptTexts[k], { prefix: 'prompt' })).file
+        config.prompts[k] = (await tts(promptText(k), { prefix: 'prompt' })).file
       } catch (e) {
         failed.push(`${PROMPT_LABELS[k] || k}: ${e.message}`)
       }
@@ -370,7 +389,7 @@ async function main() {
     else status(`фразы подтверждения и перезвона готовы: ${missing.length} (синтез или кэш)`)
   }
   if (tts) synthPrompts(true)
-  else if (missingPrompts().length) warn(`синтез выключен — нет фраз: ${missingPrompts().map((k) => PROMPT_LABELS[k] || k).join(', ')} (их WAV: VG_CONFIRM_WAV, VG_BUSY_WAV, VG_CB_*_WAV); звонки идут без них`)
+  else if (missingPrompts().length) warn(`синтез выключен — нет фраз: ${missingPrompts().map((k) => PROMPT_LABELS[k] || k).join(', ')} (их WAV: VG_CONFIRM_WAV, VG_BUSY_WAV, VG_CB_*_WAV${config.joinOnCallback ? ', VG_MGR_JOIN*_WAV' : ''}); звонки идут без них`)
 
   let lookup = null
   if (config.lookupEnabled) {
@@ -385,7 +404,7 @@ async function main() {
   let aiFactory = null
   let audioServer = null
   let aiStore = null
-  if (config.noAnswerMode === 'ai') {
+  if (config.noAnswerMode === 'ai' || config.answerMode === 'ai') {
     let agentFile = null
     try {
       agentFile = JSON.parse(fs.readFileSync(path.join(config.dataDir, 'ai-elevenlabs.json'), 'utf8'))
@@ -417,8 +436,9 @@ async function main() {
         server: audioServer,
         provider,
         connectOpts: {
-          instructions: buildInstructions({ kind: o.kind, hoursText: hours, category: o.category, transferAllowed: o.transferAllowed, statusDetail: config.aiStatusDetail, note: o.note }),
-          firstMessage: FIRST_MESSAGES[o.kind] || FIRST_MESSAGES.busy,
+          // v2 — режим «ШІ одразу»: нові перші фрази (за даними, з вступом 80 і без) і правила переводу (VG_AI_FIRST_TRANSFER)
+          instructions: buildInstructions({ kind: o.kind, hoursText: hours, category: o.category, transferAllowed: o.transferAllowed, statusDetail: config.aiStatusDetail, note: o.note, v2: o.v2 === true, transferMode: config.aiFirstTransfer }),
+          firstMessage: firstMessageFor({ kind: o.kind, variant: o.variant, intro: o.intro === true, note: o.note, v2: o.v2 === true }),
           // Інструменти цієї сесії: без права з'єднати (неробочий час, ліміт з'єднань) модель transfer_to_manager не бачить
           tools: o.transferAllowed ? allTools : allTools.filter((n) => n !== 'transfer_to_manager'),
         },
@@ -432,6 +452,7 @@ async function main() {
       if (config.aiSave === 'firestore') aiStore = makeAiCallStore({ projectId: config.firebaseProject, log: status })
       status(`ИИ-собеседник: ElevenLabs Agents ${config.aiElUrl ? `(локально ${config.aiElUrl})` : `агент ${agentId}`}, LLM ${agentFile?.llm || config.aiElLlm}; рабочее время ${hours || 'всегда'} (Киев)${config.aiAfterHours ? ', в нерабочее — сразу ИИ' : ''}; про заявку — ${config.aiStatusDetail === 'stage' ? 'есть/номер/этап' : 'есть/номер'}; до ${config.aiMaxSec} с; соединить с менеджером — до ${config.aiTransferMax} раз; разговоры — ${config.aiSave === 'firestore' ? 'в заявку (Firestore) и локально' : 'локально'}`)
     }
+    if (config.answerMode === 'ai' && !aiFactory) warn('VG_ANSWER_MODE=ai, но ИИ не готов (агент, провайдер или сокет звука) — работаю по-старому: сначала менеджер')
   }
 
   // Дані шлюзу (номери, імена голосом у кеші) — лише власнику; старе прибираємо на старті й раз на 6 год
@@ -453,6 +474,18 @@ async function main() {
       config.beepFile = ensureBeep({ cacheDir: config.cacheDir })
     } catch (e) {
       warn(`сигнал перед записью: ${e.message} — запись без сигнала`)
+    }
+  }
+  // Гудки, поки шлюз дзвонить менеджеру в нових гілках (VG_HOLD_TONE=ringback): свій файл (VG_RINGBACK_WAV) або один раз
+  // згенерований тон 425 Гц (1 с звук / 4 с тиша) у кеші
+  if (config.holdTone === 'ringback') {
+    if (config.ringbackFile) config.ringbackFile = checkPrompt('гудки', path.resolve(config.ringbackFile), { required: false })
+    if (!config.ringbackFile) {
+      try {
+        config.ringbackFile = ensureRingback({ cacheDir: config.cacheDir })
+      } catch (e) {
+        warn(`гудки: ${e.message} — вместо гудков обычное ожидание`)
+      }
     }
   }
   // Відкладені передзвони й «останній клієнт» менеджера: <data>/callbacks.json і last-clients.json (номери клієнтів, 0600)
@@ -501,6 +534,13 @@ async function main() {
   }[config.noAnswerMode]
   status(`режим: ${args.local ? 'локальный' : 'линия Binotel'}; менеджер ${config.managerUri}; ${config.confirmEnabled ? `подтверждение «1» (ждём ${config.confirmTimeoutSec} с, вопрос ещё ${config.confirmRepeats} раз)` : 'без подтверждения «1»'}; не взял/«2»/без «1» → ${noAnswer}; движок ${config.enginePath}`)
   status(`перезвон: менеджеры ${config.managers.map((g) => g.join('=')).join(', ') || 'нет'} (внешние номера — ${externalCallbackOn(config) ? 'с PIN' : 'нет, 486'}); ждёт ${config.callbackTtlHours} ч, не взял ${config.callbackMaxAttempts || '∞'} раз — снят, не чаще ${config.callbackMaxDialsPerDay || '∞'} наборов клиента в сутки; последний клиент — ${config.lastClientTtlDays} дн; клиента набираю ${config.clientUriTemplate}; REFER на ноге ${config.callbackReferOn === 'client' ? 'клиента' : 'менеджера'}`)
+  // Нові режими (черга A записки 2026-10-17) — рядок лише коли щось увімкнено
+  const newModes = []
+  if (config.answerMode === 'ai') newModes.push(`ИИ сразу${aiFactory ? '' : ' (ИИ не готов — по-старому)'} (вступление ${config.prompts.intro ? 'есть' : 'нет'}, перевод по просьбе ${config.aiFirstTransfer === 'always' ? 'сразу' : 'по правилам заявки'}, предохранитель ${config.aiBreaker ? `${config.aiBreaker.fails}/${config.aiBreaker.windowMs / 60000}/${config.aiBreaker.offMs / 60000}` : 'выкл'})`)
+  if (config.joinOnCallback) newModes.push(`присоединение перезвонившего менеджера (${config.joinMode === 'refer' ? 'REFER, при сбое мост' : 'мост'})`)
+  if (config.holdTone === 'ringback') newModes.push(`гудки${config.ringbackFile ? '' : ' (файла нет)'}`)
+  if (config.clientSynth === 'trial') newModes.push(`пробный синтез клиентских фраз${clientTrial ? '' : ' — выключен: нет VG_ALLOWED_CALLERS'}`)
+  if (newModes.length) status(`новые режимы: ${newModes.join('; ')}`)
   const internal = config.allowedInternal.length ? `внутренние ${config.allowedInternal.join(', ')}` : 'внутренние'
   if (!config.allowedCallers.length) status('ВНИМАНИЕ: список разрешённых звонящих пуст — все внешние звонки получат «занято» и пойдут дальше по сценарию Binotel. Задайте VG_ALLOWED_CALLERS или --allow.')
   status(`разрешены: ${config.allowedCallers.join(', ') || 'никто'} + ${internal} + менеджеры; синтез ${config.ttsEnabled ? 'вкл' : 'выкл'}; поиск ${config.lookupEnabled ? 'вкл' : 'выкл'}${config.genericCardFile ? '; общая карточка есть' : ''}${config.trace ? '; трасса вкл' : ''}`)

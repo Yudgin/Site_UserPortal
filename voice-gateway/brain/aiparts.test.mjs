@@ -1,12 +1,17 @@
 // Дрібні частини ШІ-співрозмовника: робочий час, інструкції й перші фрази, документ дзвінка kind 'ai', файл
-// розшифровки (0600), інструменти й агент ElevenLabs (ai-setup-elevenlabs.mjs).
+// розшифровки (0600), інструменти й агент ElevenLabs (ai-setup-elevenlabs.mjs); режим «ШІ одразу» — тексти й правила
+// переводу, нові змінні, гудки 425 Гц, рядок підсумку в консолі.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { parseHours, inHours, hoursText } from './hours.mjs'
-import { buildInstructions, FIRST_MESSAGES, TOOL_DEFS, requestStatusFor, summaryText } from './aiprompt.mjs'
+import { buildInstructions, FIRST_MESSAGES, TOOL_DEFS, requestStatusFor, summaryText, firstMessageFor, REQUEST_PAGE_TEXT, SECOND_LINE_TEXT } from './aiprompt.mjs'
+import { loadConfig, parseBreaker, CLIENT_TRIAL_TEXTS, JOIN_PROMPT_TEXTS } from './config.mjs'
+import { ringbackWav, ensureRingback } from './storage.mjs'
+import { readWavInfo, isTelephonyWav } from './tts.mjs'
+import { summary } from './gateway.mjs'
 import { buildAiCallDoc, buildAiCallEvent, aiTalked, makeAiCallStore } from './aicalls.mjs'
 import { saveAiTranscript, pruneGatewayData } from './storage.mjs'
 import { toolConfig, agentBody } from './ai-setup-elevenlabs.mjs'
@@ -194,4 +199,92 @@ test('ElevenLabs: дії після фрази — post_tool_speech, помил�
   assert.ok(!ce.includes('queue_status'), 'queue_status шлють завжди — у ClientEvent його немає')
   assert.equal(new Set(ce).size, ce.length)
   assert.deepEqual(a.conversation_config.agent.prompt.tool_ids, ['t1'])
+})
+
+test('«ШІ одразу»: перші фрази з вступом 80 і без, transfer_failed у двох варіантах; без v2 — рівно старі тексти', () => {
+  assert.equal(firstMessageFor({ kind: 'first', variant: 'request', intro: true, v2: true }), 'Я віртуальний помічник, штучний інтелект, розмова записується. Бачу, що за вашим номером є відкрита заявка. Чим можу допомогти?')
+  assert.equal(firstMessageFor({ kind: 'first', variant: 'general', intro: false, v2: true }), 'Вітаю! Це віртуальний помічник Runferry, штучний інтелект, розмова записується. Підкажіть, будь ласка: ви щодо ремонту, покупки чи налаштування кораблика?')
+  assert.equal(firstMessageFor({ kind: 'first', variant: 'nodata', intro: true, v2: true }), 'Я віртуальний помічник, штучний інтелект, розмова записується. Чим можу допомогти?')
+  assert.match(firstMessageFor({ kind: 'after_hours', intro: true, v2: true }), /^Я віртуальний помічник, штучний інтелект, розмова записується\. Зараз неробочий час/)
+  assert.equal(firstMessageFor({ kind: 'transfer_failed', note: { question: 'Де?' }, v2: true }), 'На жаль, менеджер зараз не відповідає. Ваше питання я передам — він вам передзвонить. Чим ще можу допомогти?')
+  assert.equal(firstMessageFor({ kind: 'transfer_failed', note: null, v2: true }), 'На жаль, менеджер зараз не відповідає. Він побачить пропущений дзвінок і передзвонить вам. Що йому передати?')
+  for (const k of ['busy', 'after_hours', 'transfer_failed']) assert.equal(firstMessageFor({ kind: k, note: { question: 'x' } }), FIRST_MESSAGES[k])
+  // кожна перша фраза каже, що це ШІ і що розмова записується (крім transfer_failed — клієнт уже чув)
+  for (const variant of ['request', 'general', 'nodata']) for (const intro of [true, false]) {
+    const t = firstMessageFor({ kind: 'first', variant, intro, v2: true })
+    assert.match(t, /штучний інтелект/)
+    assert.match(t, /розмова записується/)
+  }
+})
+
+test('«ШІ одразу»: правила переводу (рішення 20/21) — з відкритою заявкою раз сторінка заявки й винятки, без заявки одразу, always одразу; «сторінка заявки», друга лінія, «запитання/питання»; номера клієнта немає', () => {
+  const open = buildInstructions({ kind: 'first', category: 'openRequest', transferAllowed: true, v2: true })
+  assert.match(open, /один раз скажи/)
+  assert.ok(open.includes(REQUEST_PAGE_TEXT))
+  assert.match(open, /знову просить менеджера — з'єднай/)
+  assert.match(open, /претензія щодо якості, гарантійне питання, небезпечна ситуація/)
+  assert.match(open, /ми не відповіли вчасно або клієнту складно користуватися посиланням/)
+  assert.doesNotMatch(open, /кабінет/)
+  assert.ok(open.includes(SECOND_LINE_TEXT))
+  assert.match(open, /«запитання» — коли про щось питають/)
+  assert.match(open, /безкоштовну розмову з майстром/)
+  const none = buildInstructions({ kind: 'first', category: 'unknown', transferAllowed: true, v2: true })
+  assert.match(none, /Відкритої заявки за цим номером немає: клієнт просить менеджера — з'єднай одразу/)
+  assert.doesNotMatch(none, /один раз скажи/)
+  const nodata = buildInstructions({ kind: 'first', category: null, transferAllowed: true, v2: true })
+  assert.match(nodata, /спершу перевір get_request_status/)
+  const always = buildInstructions({ kind: 'first', category: 'openRequest', transferAllowed: true, v2: true, transferMode: 'always' })
+  assert.match(always, /з'єднай одразу: transfer_to_manager/)
+  assert.doesNotMatch(always, /один раз скажи/)
+  const night = buildInstructions({ kind: 'after_hours', category: 'openRequest', transferAllowed: false, v2: true })
+  assert.match(night, /З'єднати з менеджером зараз не можна/)
+  assert.doesNotMatch(night, /transfer_to_manager\. За номером/)
+  for (const t of [open, none, nodata, always, night]) assert.doesNotMatch(t, /0500000001|380\d{9}/)
+  // стан заявки в новому режимі — «сторінка заявки», без особистих даних
+  const sr = { id: 'a', status: 'diagnostics', stage: 'diagnosed', clientName: 'Іван', onec: { number: '7' }, createdAt: '2026-10-10T00:00:00Z' }
+  const r = requestStatusFor({ requests: [sr], profile: null, orders: [] }, { nowMs: Date.parse('2026-10-16T10:00:00Z'), v2: true })
+  assert.match(r.note, /сторінка заявки/)
+  assert.ok(!JSON.stringify(r).includes('Іван'))
+})
+
+test('config: нові змінні черги A — типово все вимкнено; VG_AI_BREAKER «збоїв/хв/хв»; клієнтські фрази — окремо від фраз менеджеру', () => {
+  const c = loadConfig({})
+  assert.deepEqual([c.answerMode, c.joinOnCallback, c.joinMode, c.holdTone, c.clientSynth, c.aiFirstTransfer, c.routeDecideGraceMs, c.ringbackFile],
+    ['manager', false, 'bridge', 'phrase', 'off', 'ask', 1000, null])
+  assert.deepEqual(c.aiBreaker, { fails: 3, windowMs: 600000, offMs: 1800000 })
+  assert.deepEqual(Object.values(c.aiFirstPromptFiles), [null, null, null, null, null, null])
+  const c2 = loadConfig({ VG_ANSWER_MODE: ' AI ', VG_JOIN_ON_CALLBACK: '1', VG_JOIN_MODE: 'refer', VG_HOLD_TONE: 'ringback', VG_CLIENT_SYNTH: 'trial', VG_AI_FIRST_TRANSFER: 'always', VG_INTRO_WAV: '/w/80.wav', VG_JOIN_CLIENT_WAV: '/w/81.wav', VG_AI_DOWN_WAV: '/w/82.wav', VG_MGR_JOIN_WAV: '/w/mj.wav', VG_ROUTE_DECIDE_GRACE_MS: '700' })
+  assert.deepEqual([c2.answerMode, c2.joinOnCallback, c2.joinMode, c2.holdTone, c2.clientSynth, c2.aiFirstTransfer, c2.routeDecideGraceMs], ['ai', true, 'refer', 'ringback', 'trial', 'always', 700])
+  assert.deepEqual([c2.aiFirstPromptFiles.intro, c2.aiFirstPromptFiles.joinClient, c2.aiFirstPromptFiles.aiDown, c2.aiFirstPromptFiles.mgrJoin], ['/w/80.wav', '/w/81.wav', '/w/82.wav', '/w/mj.wav'])
+  assert.deepEqual(parseBreaker('2/5/15'), { fails: 2, windowMs: 300000, offMs: 900000 })
+  assert.equal(parseBreaker('0'), null)
+  assert.equal(parseBreaker('off'), null)
+  assert.deepEqual(parseBreaker('щось'), { fails: 3, windowMs: 600000, offMs: 1800000 })
+  assert.equal(CLIENT_TRIAL_TEXTS.intro, 'Вітаємо! Це багатоканальна лінія компанії Runferry.')
+  assert.doesNotMatch(CLIENT_TRIAL_TEXTS.intro, /запис/) // про запис скаже перша фраза ШІ
+  assert.equal(CLIENT_TRIAL_TEXTS.joinClient, "Менеджер уже на лінії — з'єдную вас.")
+  assert.equal(JOIN_PROMPT_TEXTS.mgrJoinBusy, "Клієнта вже з'єднують з менеджером.")
+  assert.ok(!('intro' in c.promptTexts) && !('mgrJoin' in c.promptTexts), 'старий набір фраз (і їх синтез при старті) не змінився')
+})
+
+test('гудки 425 Гц: 1 с тону + 4 с тиші, WAV 8 кГц моно 16 біт, у кеші 0600', () => {
+  const w = ringbackWav()
+  assert.ok(isTelephonyWav(readWavInfo(w)))
+  assert.equal(w.length, 44 + 8000 * 2 * 5)
+  const pcm = w.subarray(44)
+  const peak = (from, to) => { let m = 0; for (let i = from; i < to; i += 2) m = Math.max(m, Math.abs(pcm.readInt16LE(i))); return m }
+  assert.ok(peak(0, 16000) > 5000, 'перша секунда — тон')
+  assert.equal(peak(16000, pcm.length), 0, 'далі — тиша')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rf-vg-rb-'))
+  const f = ensureRingback({ cacheDir: dir })
+  assert.equal(path.basename(f), 'ringback-425hz.wav')
+  assert.equal(fs.statSync(f).mode & 0o777, 0o600)
+  assert.equal(ensureRingback({ cacheDir: dir }), f)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('консоль: підсумок — «ШІ одразу», старий режим через запобіжник, приєднання менеджера', () => {
+  assert.match(summary({ number: '+380500000001', outcome: 'ai_noted', ai: { kind: 'first', sessions: [{ durationMs: 30000, costUsd: 0.05 }], note: { urgent: false } }, route: { branch: 'ai_first' }, t: {} }), /ИИ \(сразу\): 30\.0 с/)
+  assert.match(summary({ number: '+380500000001', outcome: 'connected', route: { branch: 'classic', why: 'breaker' }, t: {} }), /«ИИ сразу» не включился \(предохранитель\)/)
+  assert.match(summary({ number: '+380500000001', outcome: 'bridged_join', join: { fromPhase: 'ai', mode: 'bridge', result: 'bridged', ms: 4200 }, t: {} }), /присоединение менеджера \(из фазы ai, мост\): соединены мостом за 4\.2 с/)
 })

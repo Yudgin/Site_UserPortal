@@ -4,7 +4,13 @@
 // взяв — ШІ знову; помилки ШІ — як busy; клієнт поклав; без фабрики ШІ — як busy. Крайові випадки: сокет ШІ закрився
 // раніше за DISCONNECTED клієнта (пауза AI_DOWN_GRACE_MS); відмова від передзвону тримається; передзвін знову після
 // невдалого з'єднання; пропущений у менеджера до ШІ; кілька з'єднань (aiTransferMax); свій ліміт повторів у раунді на
-// запит ШІ; рушій без звуку (ai.available() false) — як busy; менеджер передзвонює, поки клієнт із ШІ.
+// запит ШІ; рушій без звуку (ai.available() false) — як busy; менеджер передзвонює, поки клієнт із ШІ (прапорець
+// приєднання вимкнено — «передзвоніть за хвилину», увімкнено — приєднання).
+// Режим «ШІ одразу» (answerMode ai) і приєднання менеджера, що передзвонив (joinOnCallback): ШІ сразу без перезвону на
+// старті, перша фраза за даними, вступ 80; перевід на прохання (з заявкою і без), гудки; ШІ не піднявся → 82 → набір
+// («зайнята» лише після набору); запобіжник; приєднання з фази ai і під час набору того самого менеджера; другий дзвінок
+// менеджера → «вже з'єднують»; клієнт / менеджер поклав під час приєднання; end_call / transfer і приєднання впритул;
+// допуск +1 до maxCalls; двоє клієнтів — кого набирали останнім; REFER-приєднання.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createDispatcher } from './flow.mjs'
@@ -697,7 +703,7 @@ test('рушій без звуку до мозку (ai.available() === false): �
 const MGR_IN = { ev: 'incoming', call: 10, from: 'sip:907@sip14.binotel.com', number: '907', name: 'Менеджер', gcid: null, to: 'sip:901@sip14.binotel.com' }
 const CB_PROMPTS = { ...PROMPTS, cbClientBusy: '/p/cb-client-busy.wav', cbNoAnswer: '/p/cb-no-answer.wav', cbConnecting: '/p/cb-connecting.wav', cbNone: '/p/cb-none.wav' }
 
-test('менеджер передзвонює, поки клієнт говорить із ШІ: не чекаємо й не набираємо — «Клієнт зараз розмовляє з віртуальним помічником…» (cbClientBusy), client_with_ai; є інший у черзі — набираємо його', async () => {
+test('менеджер передзвонює, поки клієнт говорить із ШІ (VG_JOIN_ON_CALLBACK вимкнено): не чекаємо й не набираємо — «Клієнт зараз розмовляє з віртуальним помічником…» (cbClientBusy), client_with_ai; є інший у черзі — набираємо його', async () => {
   {
     const h = harness({ config: { prompts: CB_PROMPTS } })
     const s = await toAi(h)
@@ -725,5 +731,555 @@ test('менеджер передзвонює, поки клієнт говор�
     await toAi(h)
     await h.ev(MGR_IN)
     assert.deepEqual(h.sent('dial').at(-1), { cmd: 'dial', ref: 'cb-10-1', uri: 'sip:0500000002@sip14.binotel.com;transport=udp' })
+  }
+})
+
+// ---------- приєднання менеджера, що передзвонив (VG_JOIN_ON_CALLBACK=1) ----------
+
+const JOIN_PROMPTS = { ...CB_PROMPTS, mgrJoin: '/p/mgr-join.wav', mgrJoinBusy: '/p/mgr-join-busy.wav', mgrJoinGone: '/p/mgr-join-gone.wav', joinClient: '/p/join-client.wav' }
+// Нога менеджера, якого приєднали: CONFIRMED і звук
+async function joinLegUp(h, call = 10) {
+  await h.ev({ ev: 'state', call, state: 'CONFIRMED', code: 200 })
+  await h.ev({ ev: 'media', call, active: true })
+}
+const byKind = (h, kind) => h.journal.filter((x) => x.kind === kind)
+
+test('менеджер передзвонює, поки клієнт говорить із ШІ (VG_JOIN_ON_CALLBACK=1): приєднання — ШІ стоп, клієнту 81, менеджеру «Клієнт на лінії…», «1» не питаємо → міст; bridged_join + callback_joined, перезвін знято', async () => {
+  const h = harness({ config: { prompts: JOIN_PROMPTS, joinOnCallback: true } })
+  const s = await toAi(h)
+  s.speak()
+  assert.equal(h.callbacks.listPending('907').length, 1)
+  await h.ev(MGR_IN)
+  assert.deepEqual(h.cmds.at(-1), { cmd: 'answer', call: 10, code: 200 })
+  assert.equal(s.stopped, 'joined', 'сесію ШІ закрито')
+  assert.equal(h.d.active, 1, 'нового сценарію для менеджера немає')
+  // запізніле завершення сесії (модель устигла попросити з'єднати) — ігнорується
+  s.end({ reason: 'tool', action: 'transfer' })
+  assert.equal(h.sent('dial').length, 1, 'менеджеру вдруге не дзвонимо')
+  await joinLegUp(h)
+  assert.deepEqual(h.sent('play').filter((c) => c.call === 1).at(-1), { cmd: 'play', call: 1, file: '/p/join-client.wav', loop: false, tag: 'join' })
+  assert.deepEqual(h.sent('play').filter((c) => c.call === 10), [{ cmd: 'play', call: 10, file: '/p/mgr-join.wav', loop: false, tag: 'mgrJoin' }])
+  await h.ev({ ev: 'play_done', call: 1, tag: 'join' })
+  assert.equal(h.sent('bridge').length, 0, 'міст — коли обидві фрази дограно')
+  await h.ev({ ev: 'play_done', call: 10, tag: 'mgrJoin' })
+  assert.deepEqual(h.cmds.at(-1), { cmd: 'bridge', a: 1, b: 10 })
+  assert.equal(h.sent('play').filter((c) => c.call === 10 && (c.tag === 'confirm' || c.tag === 'cbConnecting' || c.tag === 'cbClientBusy')).length, 0, '«1» не питаємо, «передзвоніть за хвилину» немає')
+  assert.equal(h.callbacks.listPending('907').length, 0, 'перезвін знято')
+  assert.equal(h.sent('dial').filter((c) => c.ref.startsWith('cb-')).length, 0)
+  await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+  assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 10 })
+  assert.equal(h.journal.length, 2)
+  const [e] = byKind(h, 'client')
+  const [m] = byKind(h, 'callback')
+  assert.equal(e.outcome, 'bridged_join')
+  assert.deepEqual([e.join.fromPhase, e.join.mode, e.join.result, e.join.attempts, e.join.question], ['ai', 'bridge', 'bridged', 1, false])
+  assert.ok(e.join.ms >= 0)
+  assert.deepEqual([e.pendingRemoved, e.ai.joins, e.route], [1, 1, undefined])
+  assert.deepEqual([m.outcome, m.number, m.callback.source, m.callback.removed, m.join.result], ['callback_joined', '907', 'join', true, 'bridged'])
+  assert.ok(!/\d{4}/.test(JSON.stringify(e.join)), 'у join немає номерів')
+})
+
+const FIRST = { answerMode: 'ai', prompts: { ...PROMPTS, intro: '/p/intro.wav' } }
+
+test('ШІ одразу: вступ 80 → пошук клієнта під нього → ШІ first (є відкрита заявка) без утримання і без перезвону на старті; менеджеру не дзвонимо; питання → перезвін; route у журналі', async () => {
+  const h = harness({ config: FIRST })
+  await answered(h)
+  assert.deepEqual(h.sent('play'), [{ cmd: 'play', call: 1, file: '/p/intro.wav', loop: false, tag: 'intro' }])
+  await h.clock.advance(3000)
+  assert.equal(h.ai.sessions.length, 0, 'ШІ — після вступу')
+  assert.equal(h.sent('dial').length, 0, 'менеджеру не дзвонимо')
+  await h.ev({ ev: 'play_done', call: 1, tag: 'intro' })
+  assert.equal(h.ai.sessions.length, 1)
+  const s = h.ai.sessions[0]
+  assert.deepEqual([s.opts.kind, s.opts.variant, s.opts.intro, s.opts.v2, s.opts.category, s.opts.transferAllowed], ['first', 'request', true, true, 'openRequest', true])
+  assert.equal(h.sent('audio_start').length, 1)
+  assert.equal(h.sent('play').length, 1, 'ні привітання, ні утримання перед ШІ')
+  assert.equal(h.callbacks.listPending().length, 0, 'перезвону на старті немає')
+  s.speak()
+  assert.equal(h.sent('stop').length, 0, 'утримання не було — зупиняти нічого')
+  const st = await s.tool('get_request_status')
+  assert.match(st.note, /сторінка заявки/)
+  assert.ok(!JSON.stringify(st).includes('Петренко') && !JSON.stringify(st).includes('380500000001'))
+  const sq = await s.tool('save_question_for_manager', { question: 'Коли буде готовий ремонт?', topic: 'repair', callback: true })
+  assert.deepEqual([sq.saved, sq.callback], [true, true])
+  assert.equal(h.callbacks.listPending('907').length, 1, 'перезвін — коли ШІ записав питання')
+  s.end({ reason: 'tool', action: 'end' })
+  await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+  const e = h.journal[0]
+  assert.deepEqual([e.outcome, e.reason, e.dials.length], ['ai_noted', null, 0])
+  assert.deepEqual([e.ai.kind, e.ai.variant, e.ai.transfers], ['first', 'request', 0])
+  assert.deepEqual(e.route, { branch: 'ai_first', why: null, dataMs: e.t.lookupDone, decidedBy: 'data', variant: 'request' })
+  assert.ok(e.t.intro != null && e.t.introDone != null)
+})
+
+test('ШІ одразу: перша фраза за даними — немає відкритої заявки → general; пошук не встиг → nodata (без вступу — 1,5 с, зі вступом — 1 с після нього); пошук упав → nodata; клієнт поклав під час вступу — без перезвону', async () => {
+  {
+    const h = harness({ config: { answerMode: 'ai' }, lookup: async () => ({ requests: [], profile: null, orders: [] }) })
+    await answered(h)
+    const s = h.ai.sessions[0]
+    assert.deepEqual([s.opts.kind, s.opts.variant, s.opts.intro, s.opts.category], ['first', 'general', false, 'unknown'])
+    assert.equal(h.sent('play').length, 0, 'вступу немає — тиша до першої фрази ШІ')
+  }
+  {
+    const h = harness({ config: { answerMode: 'ai' }, lookup: () => new Promise(() => {}) })
+    await answered(h)
+    await h.clock.advance(1499)
+    assert.equal(h.ai.sessions.length, 0)
+    await h.clock.advance(1)
+    assert.deepEqual([h.ai.sessions[0].opts.variant, h.ai.sessions[0].opts.category], ['nodata', null])
+    h.d.abortAll('shutdown')
+    assert.deepEqual(h.journal[0].route, { branch: 'ai_first', why: 'timeout', dataMs: null, decidedBy: 'timeout', variant: 'nodata' })
+  }
+  {
+    const h = harness({ config: FIRST, lookup: () => new Promise(() => {}) })
+    await answered(h)
+    await h.clock.advance(4000)
+    await h.ev({ ev: 'play_done', call: 1, tag: 'intro' })
+    await h.clock.advance(999)
+    assert.equal(h.ai.sessions.length, 0)
+    await h.clock.advance(1)
+    assert.deepEqual([h.ai.sessions[0].opts.variant, h.ai.sessions[0].opts.intro], ['nodata', true])
+  }
+  {
+    const h = harness({ config: { answerMode: 'ai' }, lookup: async () => { throw new Error('boom') } })
+    await answered(h)
+    assert.equal(h.ai.sessions[0].opts.variant, 'nodata')
+    h.d.abortAll('shutdown')
+    assert.equal(h.journal[0].route.why, 'no_data')
+  }
+  {
+    const h = harness({ config: FIRST })
+    await answered(h)
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    assert.deepEqual([h.journal[0].outcome, h.journal[0].callback, h.ai.sessions.length, h.callbacks.listPending().length], ['client_hangup', null, 0, 0])
+  }
+})
+
+test('ШІ одразу: перевід на прохання — з першої сесії; гудки 425 Гц замість 05-hold; картка з проханням; «1» → REFER → connected; перезвону не ставили', async () => {
+  const h = harness({ config: { answerMode: 'ai', holdTone: 'ringback', ringbackFile: '/cache/ringback-425hz.wav' } })
+  await answered(h)
+  const s = h.ai.sessions[0]
+  assert.equal(s.opts.transferAllowed, true)
+  s.speak()
+  assert.deepEqual(await s.tool('transfer_to_manager', { reason: 'хоче поговорити з людиною' }), { ok: true })
+  s.end({ reason: 'tool', action: 'transfer' })
+  assert.deepEqual(h.sent('play').at(-1), { cmd: 'play', call: 1, file: '/cache/ringback-425hz.wav', loop: true, tag: 'hold' })
+  assert.deepEqual(h.sent('dial'), [{ cmd: 'dial', ref: 'mgr-1-1', uri: MGR }])
+  await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+  await h.ev({ ev: 'state', call: 2, state: 'EARLY', code: 180 })
+  await h.ev({ ev: 'state', call: 2, state: 'CONFIRMED', code: 200 })
+  await h.ev({ ev: 'media', call: 2, active: true })
+  await h.clock.flush()
+  assert.match(h.ttsTexts.at(-1), /Клієнт просить менеджера: хоче поговорити з людиною/)
+  await h.ev({ ev: 'play_done', call: 2, tag: 'card' })
+  await h.clock.advance(700)
+  await h.ev({ ev: 'dtmf', call: 2, digit: '1', method: 'rfc2833' })
+  assert.deepEqual(h.cmds.at(-1), { cmd: 'xfer_replaces', call: 1, dest: 2 })
+  await h.ev({ ev: 'xfer', call: 1, code: 200, final: true })
+  await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+  await h.ev({ ev: 'state', call: 2, state: 'DISCONNECTED', code: 200 })
+  const e = h.journal[0]
+  assert.equal(e.outcome, 'connected')
+  assert.equal(e.callback, null, 'перезвін не ставили')
+  assert.deepEqual(e.dials.map((x) => [x.attempt, x.ai ?? 0]), [[1, 1]])
+  assert.equal(e.ai.transfers, 1)
+})
+
+test('ШІ одразу: менеджер на прохання не взяв → гудки зупинено, перезвін поставлено, знову ШІ (transfer_failed, нові тексти); клієнт поклав під час набору — пропущений перезвін', async () => {
+  {
+    const h = harness({ config: { answerMode: 'ai', holdTone: 'ringback', ringbackFile: '/cache/rb.wav' } })
+    await answered(h)
+    const s = h.ai.sessions[0]
+    await s.tool('transfer_to_manager', {})
+    s.end({ reason: 'tool', action: 'transfer' })
+    await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+    await h.ev({ ev: 'state', call: 2, state: 'DISCONNECTED', code: 486 })
+    const onA = h.cmds.filter((c) => c.call === 1)
+    assert.deepEqual(onA.slice(-2).map((c) => c.cmd), ['stop', 'audio_start'], 'гудки зупинено — тиша, поки ШІ не заговорить')
+    const s2 = h.ai.sessions[1]
+    assert.deepEqual([s2.opts.kind, s2.opts.v2, s2.opts.transferAllowed], ['transfer_failed', true, false])
+    assert.equal(h.callbacks.listPending('907').length, 1, 'перезвін — коли з\'єднати не вдалося')
+    s2.end({ reason: 'tool', action: 'end' })
+    assert.deepEqual([h.journal[0].outcome, h.journal[0].callback.restored], ['ai_answered', true])
+  }
+  {
+    const h = harness({ config: { answerMode: 'ai' } })
+    await answered(h)
+    const s = h.ai.sessions[0]
+    await s.tool('transfer_to_manager', {})
+    s.end({ reason: 'tool', action: 'transfer' })
+    await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+    await h.ev({ ev: 'state', call: 2, state: 'EARLY', code: 180 })
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 2 })
+    const e = h.journal[0]
+    assert.equal(e.outcome, 'client_hangup')
+    assert.deepEqual([e.callback.stored, e.callback.missed, e.callback.managerKey], [true, true, '907'])
+    assert.equal(h.callbacks.listPending('907')[0].missed, true)
+  }
+})
+
+test('ШІ одразу: ШІ не піднявся, менеджеру ще не дзвонили → 82 → набір менеджера з карткою і «1» → connected; «лінія зайнята» — лише після справжнього набору (не взяв → busy_callback); ai_start — те саме одразу', async () => {
+  const P = { ...PROMPTS, aiDown: '/p/ai-down.wav' }
+  {
+    const h = harness({ config: { answerMode: 'ai', prompts: P } })
+    await answered(h)
+    const s = h.ai.sessions[0]
+    s.end({ reason: 'ai_error' })
+    await h.clock.advance(499)
+    assert.equal(h.sent('dial').length, 0, 'спершу чекаємо, чи не клієнт поклав')
+    await h.clock.advance(1)
+    assert.deepEqual(h.sent('play').at(-1), { cmd: 'play', call: 1, file: '/p/ai-down.wav', loop: false, tag: 'aiDown' })
+    assert.deepEqual(h.sent('dial'), [{ cmd: 'dial', ref: 'mgr-1-1', uri: MGR }])
+    assert.equal(busyPlays(h), 0)
+    await h.ev({ ev: 'play_done', call: 1, tag: 'aiDown' })
+    assert.deepEqual(h.sent('play').at(-1), { cmd: 'play', call: 1, file: '/p/hold.wav', loop: true, tag: 'hold' })
+    await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+    await h.ev({ ev: 'state', call: 2, state: 'CONFIRMED', code: 200 })
+    await h.ev({ ev: 'media', call: 2, active: true })
+    await h.clock.flush()
+    assert.equal(h.sent('play').at(-1).tag, 'card')
+    assert.match(h.ttsTexts.at(-1), /^Дзвонить Петренко Іван/)
+    await h.ev({ ev: 'play_done', call: 2, tag: 'card' })
+    await h.clock.advance(700)
+    await h.ev({ ev: 'dtmf', call: 2, digit: '1', method: 'rfc2833' })
+    await h.ev({ ev: 'xfer', call: 1, code: 200, final: true })
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    await h.ev({ ev: 'state', call: 2, state: 'DISCONNECTED', code: 200 })
+    const e = h.journal[0]
+    assert.deepEqual([e.outcome, e.ai.error, e.callback], ['connected', 'ai_error', null])
+    assert.deepEqual(e.dials.map((x) => [x.attempt, x.ai ?? 0]), [[1, 0]])
+    assert.equal(busyPlays(h), 0)
+  }
+  {
+    const h = harness({ config: { answerMode: 'ai', prompts: P }, ai: fakeAi({ startFails: true }) })
+    await answered(h)
+    assert.equal(h.sent('play').at(-1).tag, 'aiDown')
+    assert.equal(h.sent('dial').length, 1)
+    await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+    await h.ev({ ev: 'state', call: 2, state: 'DISCONNECTED', code: 486 })
+    assert.equal(busyPlays(h), 0, '82 не обриваємо')
+    await h.ev({ ev: 'play_done', call: 1, tag: 'aiDown' })
+    const iDial = h.cmds.findIndex((c) => c.cmd === 'dial')
+    const iBusy = h.cmds.findIndex((c) => c.cmd === 'play' && c.tag === 'busy')
+    assert.ok(iDial >= 0 && iBusy > iDial, '«лінія зайнята» — після набору')
+    await h.ev({ ev: 'play_done', call: 1, tag: 'busy' })
+    const e = h.journal[0]
+    assert.deepEqual([e.outcome, e.reason, e.ai.error], ['busy_callback', 'manager_486', 'ai_start'])
+    assert.equal(h.callbacks.listPending('907').length, 1)
+  }
+})
+
+test('запобіжник ШІ (2/10/30): 2 збої ШІ за 10 хв → 30 хв по-старому (привітання, спершу менеджер, route classic/breaker); потім знову ШІ одразу; без фабрики ШІ — старий режим (no_ai)', async () => {
+  const ai = fakeAi({ startFails: true })
+  const h = harness({ ai, config: { answerMode: 'ai', aiBreaker: { fails: 2, windowMs: 600000, offMs: 1800000 } } })
+  const call = async (id) => {
+    await h.ev({ ...INCOMING, call: id })
+    await h.ev({ ev: 'media', call: id, active: true })
+    await h.ev({ ev: 'state', call: id, state: 'CONFIRMED', code: 200 })
+  }
+  await call(1)
+  assert.equal(ai.sessions.length, 1)
+  await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+  await h.clock.advance(60000)
+  await call(11)
+  assert.equal(ai.sessions.length, 2)
+  await h.ev({ ev: 'state', call: 11, state: 'DISCONNECTED', code: 200 })
+  assert.equal(h.d.breaker.open, true)
+  await h.clock.advance(60000)
+  await call(21)
+  assert.equal(ai.sessions.length, 2, 'ШІ не пробуємо — запобіжник')
+  assert.equal(h.sent('play').filter((c) => c.call === 21)[0].tag, 'greeting')
+  await h.clock.advance(1000)
+  assert.equal(h.sent('dial').at(-1).ref, 'mgr-21-1')
+  await h.ev({ ev: 'state', call: 21, state: 'DISCONNECTED', code: 200 })
+  assert.deepEqual(h.journal[2].route, { branch: 'classic', why: 'breaker', dataMs: null, decidedBy: null })
+  await h.clock.advance(30 * 60000)
+  await call(31)
+  assert.equal(ai.sessions.length, 3, 'через 30 хв — знову ШІ одразу')
+  // без фабрики ШІ: старий режим, у журналі чому
+  const h2 = harness({ ai: null, config: { answerMode: 'ai' } })
+  await answered(h2)
+  assert.equal(h2.sent('play')[0].tag, 'greeting')
+  h2.d.abortAll('shutdown')
+  assert.deepEqual(h2.journal[0].route, { branch: 'classic', why: 'no_ai', dataMs: null, decidedBy: null })
+})
+
+test('ШІ одразу в неробочий час: вступ → ШІ after_hours (нові тексти, перезвін одразу, з\'єднати не можна), менеджеру не дзвонимо', async () => {
+  const h = harness({ start: NIGHT, config: FIRST })
+  await answered(h)
+  assert.equal(h.sent('play')[0].tag, 'intro')
+  await h.ev({ ev: 'play_done', call: 1, tag: 'intro' })
+  const s = h.ai.sessions[0]
+  assert.deepEqual([s.opts.kind, s.opts.v2, s.opts.intro, s.opts.transferAllowed], ['after_hours', true, true, false])
+  assert.equal(h.callbacks.listPending('907').length, 1)
+  assert.equal(h.sent('play').filter((c) => c.tag === 'hold').length, 0)
+  assert.equal((await s.tool('transfer_to_manager', {})).ok, false)
+  s.end({ reason: 'tool', action: 'end' })
+  const e = h.journal[0]
+  assert.deepEqual([e.route.branch, e.ai.kind, e.reason, e.dials.length], ['after_hours', 'after_hours', 'after_hours', 0])
+})
+
+test('ШІ одразу + приєднання: ШІ записав питання → менеджер передзвонив → «Питання клієнта: …» менеджеру (без телефонів), якщо синтез устиг за 2 с → міст; не встиг — без питання', async () => {
+  const cfg = { answerMode: 'ai', joinOnCallback: true, prompts: JOIN_PROMPTS }
+  {
+    const h = harness({ config: cfg })
+    await answered(h)
+    const s = h.ai.sessions[0]
+    s.speak()
+    await s.tool('save_question_for_manager', { question: 'Передзвоніть на 050 000 00 09, мотор не крутиться', topic: 'repair', callback: true })
+    await h.ev(MGR_IN)
+    assert.equal(s.stopped, 'joined')
+    assert.match(h.ttsTexts.at(-1), /^Питання клієнта: .*мотор не крутиться/)
+    assert.doesNotMatch(h.ttsTexts.at(-1), /050|000 00/)
+    await joinLegUp(h)
+    await h.ev({ ev: 'play_done', call: 10, tag: 'mgrJoin' })
+    assert.deepEqual(h.sent('play').filter((c) => c.call === 10).at(-1), { cmd: 'play', call: 10, file: `/cache/card-${h.ttsTexts.length}.wav`, loop: false, tag: 'mgrJoinQ' })
+    await h.ev({ ev: 'play_done', call: 1, tag: 'join' })
+    assert.equal(h.sent('bridge').length, 0)
+    await h.ev({ ev: 'play_done', call: 10, tag: 'mgrJoinQ' })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'bridge', a: 1, b: 10 })
+    await h.ev({ ev: 'state', call: 10, state: 'DISCONNECTED', code: 200 })
+    const [e] = byKind(h, 'client')
+    assert.deepEqual([e.outcome, e.join.question, e.join.fromPhase], ['bridged_join', true, 'ai'])
+    assert.equal(h.callbacks.listPending('907').length, 0)
+  }
+  {
+    const h = harness({ config: cfg, tts: () => new Promise(() => {}) })
+    await answered(h)
+    await h.ai.sessions[0].tool('save_question_for_manager', { question: 'Де посилка?', callback: true })
+    await h.ev(MGR_IN)
+    await h.clock.advance(2000)
+    await joinLegUp(h)
+    await h.ev({ ev: 'play_done', call: 1, tag: 'join' })
+    await h.ev({ ev: 'play_done', call: 10, tag: 'mgrJoin' })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'bridge', a: 1, b: 10 })
+    assert.equal(h.sent('play').filter((c) => c.tag === 'mgrJoinQ').length, 0)
+  }
+})
+
+test('приєднання, поки шлюз дзвонить тому самому менеджеру на прохання ШІ: набір скасовано (у менеджера не два дзвінки) → міст; менеджер передзвонив ще до dialing — запізнілий набір кладемо', async () => {
+  const cfg = { answerMode: 'ai', joinOnCallback: true, prompts: JOIN_PROMPTS }
+  {
+    const h = harness({ config: cfg })
+    await answered(h)
+    const s = h.ai.sessions[0]
+    await s.tool('transfer_to_manager', {})
+    s.end({ reason: 'tool', action: 'transfer' })
+    await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+    await h.ev({ ev: 'state', call: 2, state: 'EARLY', code: 180 })
+    await h.ev(MGR_IN)
+    assert.deepEqual(h.cmds.slice(-2), [{ cmd: 'hangup', call: 2 }, { cmd: 'answer', call: 10, code: 200 }])
+    await h.ev({ ev: 'state', call: 2, state: 'DISCONNECTED', code: 487 })
+    await joinLegUp(h)
+    await h.ev({ ev: 'play_done', call: 1, tag: 'join' })
+    await h.ev({ ev: 'play_done', call: 10, tag: 'mgrJoin' })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'bridge', a: 1, b: 10 })
+    await h.clock.advance(60000)
+    assert.equal(h.sent('dial').length, 1, 'тайм-аути набору скасовано')
+    await h.ev({ ev: 'state', call: 10, state: 'DISCONNECTED', code: 200 })
+    const [e] = byKind(h, 'client')
+    assert.deepEqual([e.outcome, e.join.fromPhase, e.dials[0].code, e.callback], ['bridged_join', 'dialing', 487, null])
+    assert.equal(byKind(h, 'callback')[0].outcome, 'callback_joined')
+  }
+  {
+    const h = harness({ config: cfg })
+    await answered(h)
+    const s = h.ai.sessions[0]
+    await s.tool('transfer_to_manager', {})
+    s.end({ reason: 'tool', action: 'transfer' })
+    await h.ev(MGR_IN)
+    await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 2 })
+  }
+})
+
+test('другий дзвінок менеджера, поки клієнта вже приєднують, — «Клієнта вже з\'єднують з менеджером.» і відбій (callback_join_busy); клієнт у картці з цим менеджером — так само', async () => {
+  {
+    const h = harness({ config: { joinOnCallback: true, prompts: JOIN_PROMPTS } })
+    await toAi(h)
+    await h.ev(MGR_IN)
+    await h.ev({ ...MGR_IN, call: 11 })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'answer', call: 11, code: 200 })
+    await h.ev({ ev: 'state', call: 11, state: 'CONFIRMED', code: 200 })
+    await h.ev({ ev: 'media', call: 11, active: true })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'play', call: 11, file: '/p/mgr-join-busy.wav', loop: false, tag: 'mgrJoinBusy' })
+    await h.ev({ ev: 'play_done', call: 11, tag: 'mgrJoinBusy' })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 11 })
+    const b = h.journal.find((x) => x.outcome === 'callback_join_busy')
+    assert.deepEqual([b.kind, b.reason], ['callback', 'join_busy'])
+    assert.equal(h.sent('dial').filter((c) => c.ref.startsWith('cb-')).length, 0)
+    assert.equal(h.sent('play').filter((c) => c.call === 10 && c.tag === 'mgrJoinBusy').length, 0, 'перше приєднання триває')
+  }
+  {
+    const h = harness({ config: { joinOnCallback: true, prompts: JOIN_PROMPTS } })
+    await answered(h)
+    await h.ev({ ev: 'play_done', call: 1, tag: 'greeting' })
+    await h.clock.advance(1000)
+    await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+    await h.ev({ ev: 'state', call: 2, state: 'CONFIRMED', code: 200 })
+    await h.ev(MGR_IN)
+    await joinLegUp(h)
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'play', call: 10, file: '/p/mgr-join-busy.wav', loop: false, tag: 'mgrJoinBusy' })
+  }
+})
+
+test('приєднання: клієнт поклав — менеджеру «Клієнт поклав слухавку.», відбій, перезвін лишається (callback_join_gone); менеджер поклав до з\'єднання — знову ШІ (transfer_failed), перезвін лишається', async () => {
+  {
+    const h = harness({ config: { joinOnCallback: true, prompts: JOIN_PROMPTS } })
+    await toAi(h)
+    await h.ev(MGR_IN)
+    await joinLegUp(h)
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'play', call: 10, file: '/p/mgr-join-gone.wav', loop: false, tag: 'mgrJoinGone' })
+    assert.equal(h.journal.length, 0, 'менеджер ще чує фразу')
+    await h.ev({ ev: 'play_done', call: 10, tag: 'mgrJoinGone' })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 10 })
+    const [e] = byKind(h, 'client')
+    const [m] = byKind(h, 'callback')
+    assert.deepEqual([e.outcome, e.join.result, m.outcome, m.reason], ['client_hangup', 'client_gone', 'callback_join_gone', 'client_hangup'])
+    assert.equal(h.callbacks.listPending('907').length, 1)
+    assert.equal(h.sent('bridge').length, 0)
+  }
+  {
+    const h = harness({ config: { joinOnCallback: true, prompts: JOIN_PROMPTS } })
+    await toAi(h)
+    await h.ev(MGR_IN)
+    await joinLegUp(h)
+    await h.ev({ ev: 'state', call: 10, state: 'DISCONNECTED', code: 200 })
+    const [m] = byKind(h, 'callback')
+    assert.deepEqual([m.outcome, m.reason, m.join.result], ['callback_cancelled', 'join_hangup', 'manager_gone'])
+    assert.equal(h.ai.sessions.length, 2)
+    const s2 = h.ai.sessions[1]
+    assert.deepEqual([s2.opts.kind, s2.opts.transferAllowed], ['transfer_failed', false])
+    // 81 обірвано, знову ШІ (у старому режимі — утримання, поки ШІ не заговорить)
+    assert.deepEqual(h.cmds.filter((c) => c.call === 1).slice(-3).map((c) => [c.cmd, c.tag ?? null]), [['stop', null], ['play', 'hold'], ['audio_start', null]])
+    assert.equal(h.callbacks.listPending('907').length, 1)
+    s2.end({ reason: 'tool', action: 'end' })
+    const [e] = byKind(h, 'client')
+    assert.deepEqual([e.outcome, e.join.result, e.reason], ['ai_answered', 'manager_gone', 'join_hangup'])
+  }
+})
+
+test('end_call / transfer і приєднання впритул: приєднання першим — запізнілі end_call і transfer ігноруються; end_call першим — клієнта вже немає, менеджеру звичний передзвін', async () => {
+  {
+    const h = harness({ config: { joinOnCallback: true, prompts: JOIN_PROMPTS } })
+    const s = await toAi(h)
+    assert.deepEqual(await s.tool('end_call'), { ok: true })
+    await h.ev(MGR_IN)
+    s.end({ reason: 'tool', action: 'end' })
+    assert.equal(h.sent('hangup').filter((c) => c.call === 1).length, 0, 'трубку клієнту не кладемо')
+    assert.equal(h.journal.length, 0)
+    assert.deepEqual(await s.tool('transfer_to_manager', {}), { ok: false, error: 'call_over' })
+    await joinLegUp(h)
+    await h.ev({ ev: 'play_done', call: 1, tag: 'join' })
+    await h.ev({ ev: 'play_done', call: 10, tag: 'mgrJoin' })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'bridge', a: 1, b: 10 })
+  }
+  {
+    const h = harness({ config: { joinOnCallback: true, prompts: JOIN_PROMPTS } })
+    const s = await toAi(h)
+    s.end({ reason: 'tool', action: 'end' })
+    assert.equal(h.journal[0].outcome, 'ai_answered')
+    await h.ev(MGR_IN)
+    assert.deepEqual(h.sent('dial').at(-1), { cmd: 'dial', ref: 'cb-10-1', uri: 'sip:0500000001@sip14.binotel.com;transport=udp' })
+    assert.equal(h.sent('bridge').length, 0)
+  }
+})
+
+test('maxCalls: менеджер, що приєднується, не рахується (нового сценарію немає); іншим дзвінкам менеджерів — допуск +1 лише з VG_JOIN_ON_CALLBACK; клієнтам — як і раніше', async () => {
+  {
+    const h = harness({ config: { maxCalls: 1, joinOnCallback: true, prompts: JOIN_PROMPTS } })
+    await toAi(h)
+    await h.ev(MGR_IN)
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'answer', call: 10, code: 200 })
+    assert.equal(h.d.active, 1)
+  }
+  {
+    // клієнт із ШІ без перезвону (ШІ одразу, питання не записане) — не приєднуємо, але й 486 менеджеру немає (+1)
+    const h = harness({ config: { maxCalls: 1, answerMode: 'ai', joinOnCallback: true, prompts: JOIN_PROMPTS } })
+    await answered(h)
+    assert.equal(h.ai.sessions.length, 1)
+    await h.ev(MGR_IN)
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'answer', call: 10, code: 200 })
+    assert.equal(h.d.active, 2)
+    await h.ev({ ...INCOMING, call: 20, gcid: '6929148399' })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 20, code: 486 }, 'клієнту понад maxCalls — 486, як і раніше')
+  }
+  {
+    const h = harness({ config: { maxCalls: 1, answerMode: 'ai', prompts: JOIN_PROMPTS } })
+    await answered(h)
+    await h.ev(MGR_IN)
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 10, code: 486 }, 'прапорець вимкнено — як раніше')
+  }
+})
+
+test('двоє клієнтів чекають того самого менеджера — приєднуємо того, кого йому набирали останнім; за рівності — хто чекає довше', async () => {
+  const cfg = { answerMode: 'ai', joinOnCallback: true, prompts: JOIN_PROMPTS, allowedCallers: ['+380500000001', '+380500000003'] }
+  const IN2 = { ...INCOMING, call: 20, number: '0500000003', gcid: '6929148399' }
+  const up = async (h, inc) => {
+    await h.ev(inc)
+    await h.ev({ ev: 'media', call: inc.call, active: true })
+    await h.ev({ ev: 'state', call: inc.call, state: 'CONFIRMED', code: 200 })
+  }
+  {
+    const h = harness({ config: cfg })
+    await up(h, INCOMING)
+    const a = h.ai.sessions[0]
+    await a.tool('save_question_for_manager', { question: 'Питання А', callback: true })
+    await h.clock.advance(5000)
+    await up(h, IN2)
+    const b = h.ai.sessions[1]
+    await b.tool('transfer_to_manager', {})
+    b.end({ reason: 'tool', action: 'transfer' })
+    await h.ev({ ev: 'dialing', ref: 'mgr-20-1', call: 21 })
+    await h.ev({ ev: 'state', call: 21, state: 'DISCONNECTED', code: 486 })
+    assert.equal(h.callbacks.listPending('907').length, 2)
+    await h.ev(MGR_IN)
+    assert.equal(a.ended, false, 'А далі говорить із ШІ')
+    assert.equal(h.ai.sessions[2].stopped, 'joined', 'приєднано Б — йому набирали останнім')
+  }
+  {
+    const h = harness({ config: cfg })
+    await up(h, INCOMING)
+    await h.ai.sessions[0].tool('save_question_for_manager', { question: 'А', callback: true })
+    await h.clock.advance(5000)
+    await up(h, IN2)
+    await h.ai.sessions[1].tool('save_question_for_manager', { question: 'Б', callback: true })
+    await h.ev(MGR_IN)
+    assert.equal(h.ai.sessions[0].stopped, 'joined', 'нікому не набирали — того, хто чекає довше')
+    assert.equal(h.ai.sessions[1].ended, false)
+  }
+})
+
+test('приєднання з VG_JOIN_MODE=refer: REFER на нозі клієнта з Replaces ноги менеджера → connected_join; REFER не вдався → міст (refer_failed_bridged)', async () => {
+  {
+    const h = harness({ config: { joinOnCallback: true, joinMode: 'refer', prompts: JOIN_PROMPTS } })
+    await toAi(h)
+    await h.ev(MGR_IN)
+    await joinLegUp(h)
+    await h.ev({ ev: 'play_done', call: 1, tag: 'join' })
+    await h.ev({ ev: 'play_done', call: 10, tag: 'mgrJoin' })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'xfer_replaces', call: 1, dest: 10 })
+    await h.ev({ ev: 'xfer', call: 1, code: 200, final: true })
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    await h.ev({ ev: 'state', call: 10, state: 'DISCONNECTED', code: 200 })
+    const [e] = byKind(h, 'client')
+    const [m] = byKind(h, 'callback')
+    assert.deepEqual([e.outcome, e.join.mode, e.join.result, m.outcome, m.callback.referOn], ['connected_join', 'refer', 'connected', 'callback_joined', 'client'])
+    assert.equal(h.callbacks.listPending('907').length, 0)
+  }
+  {
+    const h = harness({ config: { joinOnCallback: true, joinMode: 'refer', prompts: JOIN_PROMPTS } })
+    await toAi(h)
+    await h.ev(MGR_IN)
+    await joinLegUp(h)
+    await h.ev({ ev: 'play_done', call: 1, tag: 'join' })
+    await h.ev({ ev: 'play_done', call: 10, tag: 'mgrJoin' })
+    await h.ev({ ev: 'xfer', call: 1, code: 503, final: true })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'bridge', a: 1, b: 10 })
+    await h.ev({ ev: 'state', call: 10, state: 'DISCONNECTED', code: 200 })
+    const [e] = byKind(h, 'client')
+    assert.deepEqual([e.outcome, e.join.result], ['bridged_join', 'refer_failed_bridged'])
   }
 })

@@ -40,6 +40,42 @@ export const PROMPT_ENV = {
   pin: 'VG_PIN_WAV',
   cbClientBusy: 'VG_CB_CLIENT_BUSY_WAV',
 }
+// Режим «ШІ одразу» і приєднання менеджера, що передзвонив (записка runferry-briefs/telephony/
+// ai-first-discussion-join-2026-10-17.md, черга A). Фрази менеджеру — внутрішні: синтез дозволено, як у cb*. Окремий
+// словник, щоб без нових прапорців набір фраз (і їх синтез при старті) лишався рівно тим самим.
+export const JOIN_PROMPT_TEXTS = {
+  mgrJoin: "Клієнт на лінії з віртуальним помічником — з'єдную.", // менеджеру, що передзвонив, перед мостом
+  mgrJoinBusy: "Клієнта вже з'єднують з менеджером.", // другий дзвінок менеджера, поки клієнта вже з'єднують
+  mgrJoinGone: 'Клієнт поклав слухавку.', // клієнт поклав, поки менеджера приєднували
+}
+// Клієнтські фрази (80, 81, 82) — ПРОБНІ тексти записки (розд. 4). Шлюз їх сам НЕ синтезує (правило власника «аудіо
+// лише після погодження текстів»): лише свій WAV (VG_*_WAV) або VG_CLIENT_SYNTH=trial за непорожнього
+// VG_ALLOWED_CALLERS (проба на тестових номерах). Немає файла — фразу пропускаємо.
+export const CLIENT_TRIAL_TEXTS = {
+  intro: 'Вітаємо! Це багатоканальна лінія компанії Runferry.', // 80: перша фраза дзвінка в режимі ai (про запис — ні)
+  joinClient: "Менеджер уже на лінії — з'єдную вас.", // 81: менеджер передзвонив, поки клієнт із ШІ
+  aiDown: "Залишайтеся, будь ласка, на лінії — з'єднуємо вас із менеджером.", // 82: ШІ не піднявся, менеджеру ще не дзвонили
+}
+export const AI_FIRST_PROMPT_ENV = {
+  mgrJoin: 'VG_MGR_JOIN_WAV',
+  mgrJoinBusy: 'VG_MGR_JOIN_BUSY_WAV',
+  mgrJoinGone: 'VG_MGR_JOIN_GONE_WAV',
+  intro: 'VG_INTRO_WAV',
+  joinClient: 'VG_JOIN_CLIENT_WAV',
+  aiDown: 'VG_AI_DOWN_WAV',
+}
+export const CLIENT_PROMPT_KEYS = Object.keys(CLIENT_TRIAL_TEXTS)
+
+// Запобіжник ШІ (лише VG_ANSWER_MODE=ai): «сбоїв/за хвилин/вимкнено хвилин», типово 3/10/30 — 3 збої ШІ за 10 хв →
+// 30 хв шлюз працює по-старому (спершу менеджер). 0 / off — без запобіжника.
+export function parseBreaker(v) {
+  const s = String(v ?? '').trim()
+  if (isOff(s)) return null
+  const m = s.match(/^(\d+)\s*\/\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/)
+  if (!m || Number(m[1]) < 1) return { fails: 3, windowMs: 10 * 60000, offMs: 30 * 60000 }
+  return { fails: Number(m[1]), windowMs: Number(m[2]) * 60000, offMs: Number(m[3]) * 60000 }
+}
+
 export const NO_ANSWER_MODES = ['busy', 'fallback', 'voicemail', 'ai']
 // PIN менеджера для передзвону із зовнішнього номера: 4–8 цифр; інше — PIN не задано (зовнішні номери отримують 486)
 export const validPin = (v) => /^\d{4,8}$/.test(String(v ?? '').trim())
@@ -208,6 +244,31 @@ export function loadConfig(env = process.env) {
     aiElLlm: env.VG_AI_EL_LLM || 'claude-sonnet-5-5', // LLM агента (ai-setup-elevenlabs.mjs; у журнал)
     aiVoiceId: env.VG_AI_VOICE || env.VG_TTS_VOICE || 'zDLnIEu0UzYpFE8fq9aq', // той самий голос, що й фрази шлюзу
     aiPricePerMin: num(env.VG_AI_PRICE_PER_MIN, 0.08), // оцінка вартості в журнал, $/хв без LLM
+    // «ШІ одразу» (черга A записки 2026-10-17; усе типово вимкнено, без цих змінних шлюз працює рівно як раніше):
+    //   manager (типово) — спершу менеджер, як і було; ai — у робочий час трубку бере ШІ одразу: вступ 80 (VG_INTRO_WAV,
+    //   немає — без вступу), пошук клієнта під нього, перша фраза ШІ за даними; перезвін на старті не ставиться. Потрібен
+    //   агент (без нього — попередження і старий режим). Неробочий час — як і раніше (after_hours).
+    answerMode: String(env.VG_ANSWER_MODE || '').trim().toLowerCase() === 'ai' ? 'ai' : 'manager',
+    // Скільки чекати пошук клієнта після кінця вступу (без вступу — AI_INFO_WAIT_MS від відповіді); не встиг — «даних немає»
+    routeDecideGraceMs: num(env.VG_ROUTE_DECIDE_GRACE_MS, 1000),
+    // Перевід на прохання клієнта в режимі ai: ask — правила 20/21 (відкрита заявка — спершу раз «сторінка заявки»,
+    // з'єднуємо у винятках або на повторне прохання; без заявки — одразу); always — одразу на перше прохання
+    aiFirstTransfer: String(env.VG_AI_FIRST_TRANSFER || '').trim().toLowerCase() === 'always' ? 'always' : 'ask',
+    aiBreaker: parseBreaker(env.VG_AI_BREAKER ?? '3/10/30'),
+    // Що чує клієнт, поки шлюз дзвонить менеджеру на прохання ШІ (і після 82): phrase — як і було (05-hold);
+    // ringback — гудки 425 Гц (1 с звук / 4 с тиша), gateway.mjs генерує cache/ringback-425hz.wav (або VG_RINGBACK_WAV)
+    holdTone: String(env.VG_HOLD_TONE || '').trim().toLowerCase() === 'ringback' ? 'ringback' : 'phrase',
+    ringbackFile: env.VG_RINGBACK_WAV || null,
+    // Клієнтські фрази 80/81/82: off — лише свої WAV; trial — пробний синтез CLIENT_TRIAL_TEXTS (лише з VG_ALLOWED_CALLERS)
+    clientSynth: String(env.VG_CLIENT_SYNTH || '').trim().toLowerCase() === 'trial' ? 'trial' : 'off',
+    // Менеджер передзвонив на 901, поки клієнт чекає саме його (із ШІ з перезвоном у його групі або шлюз зараз йому
+    // дзвонить), — приєднуємо: ШІ стоп, клієнту 81, менеджеру «Клієнт на лінії…», далі міст (bridge) або REFER клієнта з
+    // Replaces ноги менеджера (refer; не вдалося — міст). Звонок менеджера, що приєднується, не рахується в maxCalls.
+    joinOnCallback: bool(env.VG_JOIN_ON_CALLBACK, false),
+    joinMode: String(env.VG_JOIN_MODE || '').trim().toLowerCase() === 'refer' ? 'refer' : 'bridge',
+    joinPromptTexts: { ...JOIN_PROMPT_TEXTS },
+    clientTrialTexts: { ...CLIENT_TRIAL_TEXTS },
+    aiFirstPromptFiles: Object.fromEntries(Object.entries(AI_FIRST_PROMPT_ENV).map(([k, v]) => [k, env[v] || null])),
     recordSupported: null, // чи вміє рушій record: gateway.mjs ставить за подією ready (false — пошти немає)
     xferClearMs: 4000, // після вдалого переведення АТС сама гасить обидві ноги; жива нога після цього — кладемо
     bridgeMaxMin: num(env.VG_BRIDGE_MAX_MIN, 60), // розмова через локальний міст — не довше (BYE міг загубитися)

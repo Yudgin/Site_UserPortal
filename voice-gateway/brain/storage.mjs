@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { ymd } from './journal.mjs'
-import { toneWav } from './tts.mjs'
+import { toneWav, wavFromPcm16 } from './tts.mjs'
 
 export const DIR_MODE = 0o700
 export const FILE_MODE = 0o600
@@ -240,8 +240,23 @@ export function findGitRoot(dir) {
 // Сигнал перед записом: <cacheDir>/beep-1000hz-400ms.wav, генеруємо один раз (атомарно, 0600). Повертає шлях.
 export const BEEP_NAME = 'beep-1000hz-400ms.wav'
 export function ensureBeep({ cacheDir }) {
-  const file = path.join(cacheDir, BEEP_NAME)
-  const wav = toneWav({ freq: 1000, ms: 400 })
+  return ensureToneFile({ cacheDir, name: BEEP_NAME, wav: toneWav({ freq: 1000, ms: 400 }) })
+}
+
+// Гудки, поки шлюз дзвонить менеджеру (VG_HOLD_TONE=ringback): 425 Гц 1 с + 4 с тиші — один період, рушій грає по
+// колу. Тексту немає — погоджувати нічого (рішення 11 записки 2026-10-17).
+export const RINGBACK_NAME = 'ringback-425hz.wav'
+export function ringbackWav() {
+  const tone = toneWav({ freq: 425, ms: 1000, amp: 0.3 })
+  const silence = Buffer.alloc(8000 * 2 * 4)
+  return wavFromPcm16(Buffer.concat([tone.subarray(44), silence]))
+}
+export function ensureRingback({ cacheDir }) {
+  return ensureToneFile({ cacheDir, name: RINGBACK_NAME, wav: ringbackWav() })
+}
+
+function ensureToneFile({ cacheDir, name, wav }) {
+  const file = path.join(cacheDir, name)
   try {
     if (fs.statSync(file).size === wav.length) return file
   } catch { /* ще немає */ }
