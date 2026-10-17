@@ -661,3 +661,14 @@ test('четверте коло: перекрита доставка 1С збе�
   // звичайний перший прийом (до нього нічого) — не повернення
   assert.equal(isOpen(SR({ ...paid, stage: 'packed', stageHistory: [{ stage: 'received', at: daysAgo(45), by: 'm@x' }, { stage: 'packed', at: daysAgo(29), by: 'm@x' }] }), NOW), false)
 })
+
+test('п\'яте коло: старий імпорт з відправкою без дати — гарантійна робота без «received» і «received» без запису shipped', () => {
+  const old = { status: 'done', returnTtn: '20451234567890', createdAt: daysAgo(330) }
+  // запис 'shipped' лише від 1c-sync/backfill (без справжньої дати), потім одразу 'waiting_parts' → у нас
+  assert.equal(isOpen(SR({ ...old, stage: 'waiting_parts', stageHistory: [{ stage: 'shipped', at: daysAgo(327), by: '1c-sync' }, { stage: 'waiting_parts', at: daysAgo(20), by: 'm' }] }), NOW), true)
+  assert.equal(isOpen(SR({ ...old, stage: 'shipped', stageHistory: [{ stage: 'shipped', at: daysAgo(300), by: 'backfill' }], diagnostics: { text: 'x', at: daysAgo(30), by: 'm' } }), NOW), true)
+  // без жодного запису 'shipped', але справжній 'received' на старому 'done' без часу → у нас
+  assert.equal(isOpen(SR({ ...old, stage: 'received', stageHistory: [{ stage: 'received', at: daysAgo(25), by: 'm' }] }), NOW), true)
+  // старий імпорт без жодних справжніх подій → давно отримано → закрита
+  assert.equal(isOpen(SR({ ...old, stage: 'shipped', stageHistory: [{ stage: 'shipped', at: daysAgo(327), by: '1c-sync' }] }), NOW), false)
+})

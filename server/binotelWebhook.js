@@ -292,8 +292,14 @@ const boatReceivedBack = (sr) => {
   const anyShipped = (Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).some((h) => h && h.stage === 'shipped' && msOf(h.at) && msOf(h.at) < rAt)
   const workBefore = evs.some((h) => h.stage !== 'shipped' && h.stage !== 'received' && msOf(h.at) < rAt)
   const doneMs = Math.max(msOf(sr?.doneAt), msOf(sr?.paidAt))
-  return (doneMs > 0 && rAt > doneMs) || anyShipped || workBefore
+  // Старий імпорт 'done' без часу завершення: будь-який справжній 'received' — уже після нього (п'яте коло ревʼю).
+  const legacyDone = sr?.status === 'done' && doneMs === 0
+  return (doneMs > 0 && rAt > doneMs) || legacyDone || anyShipped || workBefore
 }
+// Верхня межа часу відправки, коли справжньої дати немає: найпізніший запис 'shipped' в історії будь-якого походження
+// (1c-sync, backfill пишуть його тоді, коли відправку вже видно).
+const shippedBoundMs = (sr) => Math.max(0, ...(Array.isArray(sr?.stageHistory) ? sr.stageHistory : [])
+  .filter((h) => h && h.stage === 'shipped').map((h) => msOf(h.at)))
 const normTtnDigits = (v) => { const d = String(v ?? '').replace(/\D/g, ''); return d && d !== '0' ? d : '' }
 // Посилки запчастин/купівлі (npScenario parts/purchase) — не повернення кораблика.
 const boatShipStage = (sr) => sr?.stage === 'shipped' && !['parts', 'purchase'].includes(sr?.npScenario)
@@ -320,7 +326,11 @@ export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
     if (shipMs > 0 && shipMs >= reopenMs) return days(shipMs) <= cfg.transitMaxDays
     // Дата невідома (returnTtn без запису 'shipped'): у дорозі від останньої дії, якщо тільки кораблик не повернули
     // до нас (тоді він знову в нас; ревʼю 2026-10-17, третє й четверте коло).
-    if (shipMs === 0 && !boatReceivedBack(sr)) return days(lastActivityMs(sr)) <= cfg.transitMaxDays
+    if (shipMs === 0) {
+      const bound = shippedBoundMs(sr)
+      const back = boatReceivedBack(sr) || (bound > 0 && reopenMs > bound)
+      if (!back) return days(lastActivityMs(sr)) <= cfg.transitMaxDays
+    }
   }
   if (sr.status === 'done') {
     const doneMs = Math.max(msOf(sr.doneAt), msOf(sr.paidAt), msOf(sr.statusChangedAt))
