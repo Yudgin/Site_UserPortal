@@ -232,7 +232,7 @@ test('config: траса типово вимкнена; менеджер/зап�
   assert.deepEqual(c.allowedInternal, [])
   assert.equal(c.fallbackRingMs, 90000)
   assert.equal(c.bridgeMaxMin, 60)
-  assert.deepEqual(c.retentionDays, { logs: 14, cache: 30, journal: 90, voicemail: 90 })
+  assert.deepEqual(c.retentionDays, { logs: 14, cache: 30, journal: 90, voicemail: 90, ai: 90 })
   const c2 = loadConfig({ VG_MANAGER: '905', VG_ALLOWED_INTERNAL: '907, 906', VG_SIP_TRUST: '45.91.130.64 1.2.3.4' })
   assert.equal(extUri(c2.manager, 'sip15.binotel.com'), 'sip:905@sip15.binotel.com;transport=udp')
   assert.deepEqual(c2.allowedInternal, ['907', '906'])

@@ -3,7 +3,8 @@
 // тека 0700, файли 0600, запис атомарний (тимчасовий файл поруч + rename), прострочене відкидається при кожному
 // зверненні; тимчасові файли, що лишились після падіння процесу між записом і rename, прибирає prune().
 //   <dataDir>/callbacks.json     {v:1, pending:[{id, managerKey, clientNumber, gcid, serviceRequestId, card, ts,
-//                                  attempts?, lastTriedAt?, missed?}], dials:{<E.164>:[ts…]}}
+//                                  attempts?, lastTriedAt?, missed?, note?}], dials:{<E.164>:[ts…]}}
+//                                — note: питання клієнта, записане ШІ-співрозмовником ({question, topic, urgent})
 //                                — pending: клієнт не дочекався менеджера («лінія зайнята, передзвонить») або поклав
 //                                  трубку, поки менеджеру дзвонили (missed); TTL callbackTtlHours (24). attempts /
 //                                  lastTriedAt — невдалі передзвони (клієнт не взяв); після maxAttempts запис знімається.
@@ -201,10 +202,10 @@ export function makeCallbackStore({ dataDir = null, callbackTtlHours = 24, lastC
   const store = {
     // Новий відкладений передзвін. Той самий клієнт у того самого менеджера — лише один запис, найсвіжіший (і лічильник
     // невдалих спроб — з нуля: клієнт подзвонив знову).
-    addPending({ managerKey, clientNumber, gcid = null, serviceRequestId = null, card = null, missed = false, ts = now() }) {
+    addPending({ managerKey, clientNumber, gcid = null, serviceRequestId = null, card = null, missed = false, note = null, ts = now() }) {
       const number = strictPhone(clientNumber)
       if (!managerKey || !number) throw new Error('callback: need managerKey and E.164 clientNumber')
-      const entry = { id: `${Number(ts).toString(36)}-${crypto.randomBytes(3).toString('hex')}`, managerKey, clientNumber: number, gcid: gcid ?? null, serviceRequestId: serviceRequestId ?? null, card: card ?? null, ts: Number(ts), ...(missed ? { missed: true } : {}) }
+      const entry = { id: `${Number(ts).toString(36)}-${crypto.randomBytes(3).toString('hex')}`, managerKey, clientNumber: number, gcid: gcid ?? null, serviceRequestId: serviceRequestId ?? null, card: card ?? null, ts: Number(ts), ...(missed ? { missed: true } : {}), ...(note ? { note } : {}) }
       const live = livePending()
       live.pending = live.pending.filter((x) => !(x.managerKey === managerKey && x.clientNumber === number))
       live.pending.push(entry)
@@ -212,13 +213,14 @@ export function makeCallbackStore({ dataDir = null, callbackTtlHours = 24, lastC
       return entry
     },
     // Дописати те, що стало відомо пізніше (пошук клієнта закінчився вже після рішення «лінія зайнята»)
-    updatePending(id, { gcid, serviceRequestId, card } = {}) {
+    updatePending(id, { gcid, serviceRequestId, card, note } = {}) {
       const live = livePending()
       const e = live.pending.find((x) => x.id === id)
       if (!e) return false
       if (gcid !== undefined) e.gcid = gcid
       if (serviceRequestId !== undefined) e.serviceRequestId = serviceRequestId
       if (card !== undefined) e.card = card
+      if (note !== undefined) e.note = note
       write('pending', live)
       return true
     },

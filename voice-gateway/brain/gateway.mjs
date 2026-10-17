@@ -9,6 +9,8 @@
 // на шлюз — передзвін клієнту (flow.mjs; із зовнішнього номера — лише з VG_MANAGERS_EXTERNAL=1 і VG_MANAGER_PIN).
 // Рушій без DTMF при увімкненому підтвердженні «1» — шлюз не стартує (без «1» не переводимо, а з таким рушієм не
 // з'єднався б жоден дзвінок).
+// VG_NO_ANSWER_MODE=ai — замість «лінія зайнята» і в неробочий час відповідає ШІ-співрозмовник (ElevenLabs Agents):
+// потрібен рушій зі звуком до мозку (engine/sip-engine-ai, ready.audio) і агент ElevenLabs (ai-setup-elevenlabs.mjs).
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
@@ -21,7 +23,13 @@ import { buildCard } from './card.mjs'
 import { makeTts, readWavInfo, isTelephonyWav } from './tts.mjs'
 import { makeTokenSource, accessSecret } from './gcp.mjs'
 import { makeJournal } from './journal.mjs'
-import { ensurePrivateDir, makeDailyLog, pruneGatewayData, makeVoicemailPath, ensureBeep, repairVoicemailHeaders, repairWavHeader, findGitRoot } from './storage.mjs'
+import { ensurePrivateDir, makeDailyLog, pruneGatewayData, makeVoicemailPath, ensureBeep, repairVoicemailHeaders, repairWavHeader, findGitRoot, saveAiTranscript } from './storage.mjs'
+import { startAudioServer } from './audiosock.mjs'
+import { createAgent } from './agent.mjs'
+import { makeElevenLabsProvider } from './realtime-elevenlabs.mjs'
+import { buildInstructions, FIRST_MESSAGES } from './aiprompt.mjs'
+import { hoursText } from './hours.mjs'
+import { makeAiCallStore } from './aicalls.mjs'
 
 // ---------- аргументи ----------
 
@@ -40,7 +48,8 @@ const USAGE = `Использование:
   --engine PATH       путь к sip-engine (или env VG_ENGINE_PATH; с DTMF «1»/«2» и голосовой почтой — engine/sip-engine-next)
   --max-calls N       одновременных звонков (по умолчанию 2)
   --no-answer MODE    менеджер не взял: busy (по умолчанию: «линия занята», перезвон), fallback (запасная, потом
-                      голосовая почта), voicemail (сразу голосовая почта); или env VG_NO_ANSWER_MODE
+                      голосовая почта), voicemail (сразу голосовая почта), ai (ИИ-собеседник; и в нерабочее время);
+                      или env VG_NO_ANSWER_MODE
   --managers LIST     номера/линии менеджеров через запятую (один человек — через «=»: 907=0676575085); их звонок
                       на шлюз — перезвон клиенту. Линия --manager входит всегда. Или env VG_MANAGERS
   --client-uri TPL    как набирать клиента при перезвоне: {national} {e164} {digits} {server}
@@ -200,6 +209,14 @@ export function summary(e) {
   if (e.kind !== 'callback' && e.pendingRemoved) bits.push(`ожидание перезвона снято (${e.pendingRemoved})`)
   if (e.voicemail?.empty) bits.push(`сообщения нет (запись ${e.voicemail.sec != null ? `${e.voicemail.sec.toFixed(1)} с` : '—'}${e.voicemail.removed ? ', пустой файл удалён' : ''})`)
   else if (e.voicemail?.file) bits.push(`сообщение ${e.voicemail.sec != null ? `${e.voicemail.sec.toFixed(1)} с` : '(длина неизвестна)'}: ${e.voicemail.file}`)
+  if (e.ai) {
+    const a = e.ai
+    const cost = (a.sessions || []).reduce((x, y) => x + (Number(y.costUsd) || 0), 0)
+    const secsAi = (a.sessions || []).reduce((x, y) => x + (y.durationMs || 0), 0)
+    bits.push(`ИИ (${a.kind === 'after_hours' ? 'нерабочее время' : 'вместо «линия занята»'}): ${secs(secsAi)}, ≈$${cost.toFixed(3)}` +
+      `${a.note ? `, вопрос записан${a.note.urgent ? ' (срочно)' : ''}${a.note.callback === false ? ', без перезвона' : ''}` : ''}` +
+      `${a.transfers ? `, передал менеджеру ${a.transfers} раз` : ''}${a.error ? `, ошибка ${a.error}` : ''}`)
+  }
   if (e.errors?.length) bits.push(`ошибок ${e.errors.length}`)
   return bits.join(', ')
 }
@@ -230,6 +247,10 @@ async function main() {
       process.exit(2)
     }
     config.noAnswerMode = args.noAnswer
+  }
+  if (config.noAnswerMode === 'ai' && config.workHoursError) {
+    process.stdout.write(`${config.workHoursError}\n`)
+    process.exit(2)
   }
   if (args.managers != null) config.managersSpec = args.managers
   if (args.clientUri) config.clientUriTemplate = args.clientUri
@@ -308,14 +329,15 @@ async function main() {
   }
 
   // Синтез і пошук — необов'язкові: не вдалося підготувати → дзвінки йдуть без картки / лише з номером
+  // Ключ ElevenLabs (Secret Manager elevenlabs-api-key) — і для синтезу, і для ШІ-співрозмовника
+  let keyP = null
+  const getApiKey = () => {
+    keyP = keyP || accessSecret({ project: config.gcpProject, name: config.ttsSecret, getAccessToken }).then((k) => k.trim())
+    keyP.catch(() => { keyP = null }) // наступний дзвінок спробує ще раз
+    return keyP
+  }
   let tts = null
   if (config.ttsEnabled) {
-    let keyP = null
-    const getApiKey = () => {
-      keyP = keyP || accessSecret({ project: config.gcpProject, name: config.ttsSecret, getAccessToken }).then((k) => k.trim())
-      keyP.catch(() => { keyP = null }) // наступний дзвінок спробує ще раз
-      return keyP
-    }
     tts = makeTts({ cacheDir: config.cacheDir, getApiKey, voiceId: config.ttsVoiceId, model: config.ttsModel, timeoutMs: config.ttsTimeoutMs })
     getApiKey().then(() => status('ключ синтеза получен'), (e) => warn(`ключ синтеза: ${e.message} — карточки будут без синтеза, пока не получится`))
   }
@@ -355,6 +377,52 @@ async function main() {
     const l = makeLookup({ projectId: config.firebaseProject, budgetMs: config.lookupBudgetMs, log: warn })
     lookup = l.lookup
     l.warm().then(() => status('Firestore: соединение готово'), (e) => warn(`Firestore: ${e.message} — карточка будет только с номером`))
+  }
+
+  // ШІ-співрозмовник: сокет звуку для рушія, провайдер (ElevenLabs Agents), фабрика сесій для сценарію. Не вийшло
+  // підготувати — режим ai працює як busy («лінія зайнята»), шлюз про це пише.
+  let aiFactory = null
+  let audioServer = null
+  let aiStore = null
+  if (config.noAnswerMode === 'ai') {
+    let agentFile = null
+    try {
+      agentFile = JSON.parse(fs.readFileSync(path.join(config.dataDir, 'ai-elevenlabs.json'), 'utf8'))
+    } catch { /* агент не налаштовано — нижче попередження */ }
+    const agentId = config.aiElAgent || agentFile?.agentId || null
+    if (config.aiProvider !== 'elevenlabs') warn(`ИИ: провайдер ${config.aiProvider} не поддерживается (есть elevenlabs) — режим ai работает как busy`)
+    else if (!agentId && !config.aiElUrl) warn('ИИ: агент ElevenLabs не настроен (VG_AI_EL_AGENT или node voice-gateway/brain/ai-setup-elevenlabs.mjs) — режим ai работает как busy')
+    else {
+      try {
+        audioServer = await startAudioServer({ log: warn })
+      } catch (e) {
+        warn(`ИИ: сокет звука не создан (${e.message}) — режим ai работает как busy`)
+      }
+    }
+    if (audioServer) {
+      const provider = makeElevenLabsProvider({
+        getApiKey, agentId, apiBase: config.aiElApi, wsUrl: config.aiElUrl, voiceId: config.aiVoiceId, language: 'uk',
+        llm: agentFile?.llm || config.aiElLlm, maxDurationSec: config.aiMaxSec + 60, pricePerMin: config.aiPricePerMin, log: warn,
+      })
+      const hours = hoursText(config.workHours)
+      aiFactory = (o) => createAgent({
+        call: o.call,
+        server: audioServer,
+        provider,
+        connectOpts: {
+          instructions: buildInstructions({ kind: o.kind, hoursText: hours, category: o.category, transferAllowed: o.transferAllowed, statusDetail: config.aiStatusDetail, note: o.note }),
+          firstMessage: FIRST_MESSAGES[o.kind] || FIRST_MESSAGES.busy,
+        },
+        onTool: o.onTool,
+        onSpeaking: o.onSpeaking,
+        onEnd: o.onEnd,
+        clock: { now: Date.now, setTimeout, clearTimeout },
+        log: status,
+        limits: { maxSec: config.aiMaxSec, idleSec: config.aiIdleSec, wrapSec: config.aiWrapSec },
+      })
+      if (config.aiSave === 'firestore') aiStore = makeAiCallStore({ projectId: config.firebaseProject, log: status })
+      status(`ИИ-собеседник: ElevenLabs Agents ${config.aiElUrl ? `(локально ${config.aiElUrl})` : `агент ${agentId}`}, LLM ${agentFile?.llm || config.aiElLlm}; рабочее время ${hours || 'всегда'} (Киев)${config.aiAfterHours ? ', в нерабочее — сразу ИИ' : ''}; про заявку — ${config.aiStatusDetail === 'stage' ? 'есть/номер/этап' : 'есть/номер'}; до ${config.aiMaxSec} с; соединить с менеджером — до ${config.aiTransferMax} раз; разговоры — ${config.aiSave === 'firestore' ? 'в заявку (Firestore) и локально' : 'локально'}`)
+    }
   }
 
   // Дані шлюзу (номери, імена голосом у кеші) — лише власнику; старе прибираємо на старті й раз на 6 год
@@ -420,6 +488,7 @@ async function main() {
     busy: 'клиенту «линия занята», перезвон менеджера',
     fallback: `запасная ${config.fallbackUri || 'нет'}${config.fallbackUri ? (config.fallbackMode === 'blind' ? ' (слепой перевод)' : ' (набор, карточка, REFER/Replaces)') : ''}, потом голосовая почта ${config.voicemailEnabled ? `до ${config.voicemailMaxSec} с` : 'выкл'}`,
     voicemail: `голосовая почта ${config.voicemailEnabled ? `до ${config.voicemailMaxSec} с` : 'выкл'}`,
+    ai: aiFactory ? 'ИИ-собеседник (перезвон менеджера сохраняется)' : 'клиенту «линия занята», перезвон менеджера (ИИ не настроен)',
   }[config.noAnswerMode]
   status(`режим: ${args.local ? 'локальный' : 'линия Binotel'}; менеджер ${config.managerUri}; ${config.confirmEnabled ? `подтверждение «1» (ждём ${config.confirmTimeoutSec} с, вопрос ещё ${config.confirmRepeats} раз)` : 'без подтверждения «1»'}; не взял/«2»/без «1» → ${noAnswer}; движок ${config.enginePath}`)
   status(`перезвон: менеджеры ${config.managers.map((g) => g.join('=')).join(', ') || 'нет'} (внешние номера — ${externalCallbackOn(config) ? 'с PIN' : 'нет, 486'}); ждёт ${config.callbackTtlHours} ч, не взял ${config.callbackMaxAttempts || '∞'} раз — снят, не чаще ${config.callbackMaxDialsPerDay || '∞'} наборов клиента в сутки; последний клиент — ${config.lastClientTtlDays} дн; клиента набираю ${config.clientUriTemplate}; REFER на ноге ${config.callbackReferOn === 'client' ? 'клиента' : 'менеджера'}`)
@@ -464,8 +533,25 @@ async function main() {
       tts,
       voicemailPath: (o) => makeVoicemailPath({ dataDir: config.dataDir, timeZone: config.timeZone, ...o }),
       callbacks,
+      // Рушій без звуку до мозку (ready.audio) — сесії ШІ немає: сценарій піде як busy
+      ai: aiFactory ? (o) => (config.audioSupported ? aiFactory(o) : null) : null,
       log: status,
       onDone: (entry) => {
+        // Розшифровка розмови з ШІ — особисті дані: окремим файлом 0600 (і в заявку, якщо VG_AI_SAVE=firestore), у журнал — ні
+        const tr = entry.aiTranscript
+        delete entry.aiTranscript
+        if (tr && entry.ai) {
+          try {
+            entry.ai.transcriptFile = saveAiTranscript({ dataDir: config.dataDir, gcid: entry.gcid, number: entry.number, timeZone: config.timeZone, record: { startedAt: entry.startedAt, gcid: entry.gcid, serviceRequestId: entry.serviceRequestId, outcome: entry.outcome, ...tr } })
+          } catch (e) {
+            warn(`ИИ: расшифровка не сохранена: ${e.message}`)
+          }
+          if (aiStore) {
+            aiStore.save({ ...entry, aiTranscript: tr }).then((r) => {
+              if (r.skipped && r.skipped !== 'no_request') warn(`ИИ: в заявку не записано (${r.skipped})`)
+            }, (e) => warn(`ИИ: запись в Firestore не удалась: ${e.message}`))
+          }
+        }
         const vm = entry.voicemail
         if (vm?.file && vm.empty) {
           // Порожнє повідомлення (клієнт поклав одразу після сигналу): файл без звуку не лишаємо, у журналі — підсумок
@@ -507,6 +593,9 @@ async function main() {
           // (голосова пошта мобільного оператора забрала б клієнта), а чекати «1», якої не буде, — жоден дзвінок не
           // з'єднався б. Тому з увімкненим підтвердженням не стартуємо; без «1» — лише явне VG_CONFIRM=0.
           config.dtmfSupported = ev.dtmf === true
+          // Звук до мозку (audio_start) — для ШІ-співрозмовника: рушій engine/sip-engine-ai
+          config.audioSupported = ev.audio === true
+          if (aiFactory && !config.audioSupported) warn(`движок ${config.enginePath} не умеет поток звука (audio_start) — ИИ не будет, режим ai работает как busy. Новый движок: make -C voice-gateway/engine sip-engine-ai и VG_ENGINE_PATH=voice-gateway/engine/sip-engine-ai`)
           if (!config.dtmfSupported && config.confirmEnabled) {
             warn(`движок ${config.enginePath} не сообщает DTMF: подтверждение «1» невозможно, а переводить без «1» нельзя — шлюз не запускается. Новый движок: make -C voice-gateway/engine sip-engine-next и VG_ENGINE_PATH=voice-gateway/engine/sip-engine-next (переводить без «1» — только явно VG_CONFIRM=0)`)
             fatalCode = 2
@@ -518,7 +607,7 @@ async function main() {
             warnedNoDtmf = true
             warn(`движок ${config.enginePath} не сообщает DTMF — PIN не ввести: перезвон с внешних номеров менеджеров невозможен`)
           }
-          if (!config.recordSupported && config.voicemailEnabled && config.noAnswerMode !== 'busy' && !warnedNoRecord) {
+          if (!config.recordSupported && config.voicemailEnabled && ['fallback', 'voicemail'].includes(config.noAnswerMode) && !warnedNoRecord) {
             warnedNoRecord = true
             warn(`движок ${config.enginePath} не умеет запись — голосовой почты не будет. Новый движок: make -C voice-gateway/engine sip-engine-next и VG_ENGINE_PATH=voice-gateway/engine/sip-engine-next`)
           }
@@ -630,7 +719,10 @@ async function main() {
   }
   process.on('SIGINT', stop)
   process.on('SIGTERM', stop)
-  process.on('exit', () => engine?.kill('SIGKILL')) // шлюз завершується будь-як — рушій не лишаємо сиротою
+  process.on('exit', () => {
+    engine?.kill('SIGKILL') // шлюз завершується будь-як — рушій не лишаємо сиротою
+    audioServer?.close()
+  })
   boot()
 }
 

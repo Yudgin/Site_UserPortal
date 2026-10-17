@@ -47,6 +47,21 @@
 //   клієнта просто роз'єднувало через 4–5 с. У blind: немає жодної відповіді на REFER за xferTimeoutMs — кладемо A;
 //   REFER прийнято — чекаємо BYE від АТС або фінальний NOTIFY до fallbackRingMs.
 //
+// ШІ-СПІВРОЗМОВНИК (noAnswerMode 'ai', типово вимкнено; ai — фабрика сесій agent.mjs, дає gateway.mjs). Там, де в busy
+// клієнту звучало «лінія зайнята», відповідає ШІ: менеджер не взяв / зайнятий / «2» / без «1» / поклав, а також у
+// неробочий час (config.workHours, aiAfterHours) — тоді менеджеру не дзвонимо зовсім. Відкладений передзвін
+// зберігається одразу, як у busy (менеджер пропустив дзвінок). Привітання, якщо грає, догрує; утримання грає, доки ШІ не
+// заговорить; пошук клієнта чекаємо не довше AI_INFO_WAIT_MS. Сесія: send(ai.start()) — рушій пускає звук ноги A в сокет
+// мозку (audio_start). Інструменти моделі виконує сценарій (aiTool): get_request_status — з уже знайденого пошуку за
+// правилами приватності (aiprompt.mjs); save_question_for_manager — питання в запис передзвону (note; callback:false —
+// запис знято); transfer_to_manager — лише в робочий час і не більше aiTransferMax разів: сесію закрито (не платимо за
+// тишу), той самий шлях, що з менеджером уперше (набір із повторами, утримання, картка з питанням клієнта, «1»,
+// REFER/Replaces); не вийшло — нова сесія ШІ (kind transfer_failed), з'єднати вже не пропонує; end_call — відбій, коли
+// прощальну фразу дограно. Підсумки: ai_noted (питання записано), ai_answered (без питання), ai_client_hangup (клієнт
+// поклав, питання немає), connected (через ШІ — ai.transfers); ШІ не вдався (помилка провайдера / рушія) — як busy:
+// «лінія зайнята», busy_callback з reason ai_error. Розшифровка — у entry.aiTranscript (gateway.mjs зберігає окремо,
+// у журнал не пише).
+//
 // ПЕРЕДЗВІН (kind 'callback'): номер того, хто дзвонить, — із config.managers, порівнюємо ЦІЛКОМ (без підрядка).
 // Це менеджер, а не клієнт: його не вважаємо клієнтом і йому ж не дзвонимо (захист від петлі). Внутрішня лінія
 // (3–4 цифри без X-BINOTEL-GCID) — одразу передзвін. Зовнішній номер менеджера можна підробити: передзвін із нього —
@@ -65,9 +80,12 @@
 // (callback_cancelled).
 import { clientDialUri, isInternalKey, managerGroupOf, managerKeyOf, partyKey, resolveManagers, strictPhone } from './callbacks.mjs'
 import { validPin } from './config.mjs'
+import { requestStatusFor } from './aiprompt.mjs'
+import { inHours } from './hours.mjs'
+import { hidePhones } from './card.mjs'
 
 const ok2xx = (c) => Number(c) >= 200 && Number(c) < 300
-const NO_ANSWER_MODES = ['busy', 'fallback', 'voicemail']
+const NO_ANSWER_MODES = ['busy', 'fallback', 'voicemail', 'ai']
 
 // Внутрішній дзвінок — тризначний номер БЕЗ X-BINOTEL-GCID: дзвінки зі сценарію (клієнти, у т. ч. короткі
 // номери операторів) Binotel завжди позначає GCID, внутрішні з 907 — ні.
@@ -135,8 +153,10 @@ const VM_BEEP_MAX_MS = 3000
 const VM_DONE_WAIT_MS = 3000 // record_done після зупинки запису не прийшов — завершуємо без нього
 const PROMPT_MAX_MS = 30000 // play_done фрази (підтвердження, «лінія зайнята»…) не прийшов — ідемо далі все одно
 const NOTICE_CAP_MS = 60000 // остання фраза: нога A так і не готова / фраза не скінчилась — кладемо все одно
+const AI_INFO_WAIT_MS = 1500 // ШІ чекає результат пошуку клієнта не довше (бюджет пошуку — 1,2 с)
+const AI_NOTE_MAX = 500 // питання клієнта в записі передзвону — не довше
 
-export function createFlow({ incoming, config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, callbacks = null, partyBusy = null, log = () => {}, onDone = () => {}, rejectReason = null }) {
+export function createFlow({ incoming, config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, callbacks = null, partyBusy = null, ai = null, log = () => {}, onDone = () => {}, rejectReason = null }) {
   const A = incoming.call
   const number = String(incoming.number ?? '').trim()
   const gcid = incoming.gcid ?? null
@@ -232,6 +252,12 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   let servedDone = false
   let xferLeg = A // на якій нозі REFER (на передзвоні з callbackReferOn 'client' — на нозі клієнта)
   let cardP = Promise.resolve(null)
+  let lookupRes = null // результат пошуку клієнта (для інструмента ШІ «стан заявки»)
+  // ШІ: aiInfo — {kind, why, state: wait|live|done, note, transfers, sessions[], endReason, failed}; aiS — поточна сесія;
+  // aiRound — скільки разів ШІ передавав клієнта менеджеру (набір за запитом моделі)
+  let aiInfo = null
+  let aiS = null
+  let aiRound = 0
   const tm = {} // іменовані таймери
 
   const mark = (k) => { if (marks[k] == null) marks[k] = clock.now() - t0 }
@@ -265,7 +291,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   const bAlive = () => !!legB && !legB.down
   const legReady = (leg) => leg.confirmed && (leg.media || leg.grace)
   // На A вже не граємо привітання/утримання: розмова, пошта, остання фраза або дзвінок скінчився
-  const clientBusy = () => phase === 'bridged' || phase === 'connected' || phase === 'voicemail' || phase === 'notice' || phase === 'done'
+  const clientBusy = () => phase === 'bridged' || phase === 'connected' || phase === 'voicemail' || phase === 'notice' || phase === 'ai' || phase === 'done'
 
   // ---------- старт ----------
 
@@ -284,12 +310,23 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     send({ cmd: 'answer', call: A, code: 200 })
     mark('answer')
     if (pinRequired) return startPin()
+    if (!callback && aiAfterHours()) {
+      say('принят, нерабочее время — отвечает ИИ')
+      cardP = prepareCard({ synth: false })
+      return startAi('after_hours')
+    }
     phase = 'dialing'
     if (callback) return startCallback()
     say('принят, отвечаю')
     cardP = prepareCard()
     later('dial', config.dialDelayMs, dial)
   }
+
+  // ШІ доступний: режим ai, фабрика сесій є, це дзвінок клієнта і ШІ в цьому дзвінку ще не відмовив
+  const aiOn = () => noAnswerMode === 'ai' && !!ai && !callback && !aiInfo?.failed
+  // Неробочий час (VG_WORK_HOURS) і ШІ відповідає в неробочий час — менеджеру не дзвонимо
+  const aiAfterHours = () => aiOn() && config.aiAfterHours !== false && !!config.workHours?.length &&
+    !inHours(config.workHours, new Date(clock.now()), config.timeZone || 'Europe/Kyiv')
 
   // ---------- PIN менеджера, що передзвонює із зовнішнього номера ----------
   // Фраза prompts.pin (немає — мовчки) → цифри DTMF на нозі A; набрано стільки цифр, скільки в PIN, або «#» —
@@ -438,7 +475,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   }
 
   // Пошук → текст → синтез. Ніколи не відхиляється: будь-яка помилка → null (тоді genericCardFile або без картки).
-  function prepareCard() {
+  function prepareCard({ synth = true } = {}) {
     return (async () => {
       let res = null
       if (lookup && phone) {
@@ -451,6 +488,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         }
         mark('lookupDone')
       }
+      lookupRes = res
       let card = null
       try {
         card = buildCard(res, { number, phone, speakNumber: config.cardSpeakNumber === true })
@@ -463,7 +501,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       cardChars = card?.text ? card.text.length : null
       infoDone = true
       infoResolve()
-      if (!tts || !card?.text || done) return null // дзвінок уже скінчився — синтез не потрібен
+      if (!synth || !tts || !card?.text || done) return null // дзвінок уже скінчився (або ШІ вночі) — синтез не потрібен
       try {
         const r = await tts(card.text)
         mark('ttsDone')
@@ -496,6 +534,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     startHold() // на голосовій пошті й останній фразі утримання вже не вмикається (clientBusy)
     maybeVoicemail() // пошта чекала, поки привітання догра
     maybeNotice() // остання фраза — теж
+    maybeAi() // ШІ — теж
   }
 
   function startHold() {
@@ -514,8 +553,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     const ref = `${t.prefix}-${A}-${attempt}`
     pendingRef = ref
     legB = null
-    dials.push({ to: target, attempt, ref, at: clock.now() - t0, code: null })
-    if (attempt === 1) {
+    dials.push({ to: target, attempt, ref, at: clock.now() - t0, code: null, ...(aiRound ? { ai: aiRound } : {}) })
+    if (stageAt == null) { // перший набір сторони (і перший набір менеджера на запит ШІ)
       stageAt = clock.now()
       markT('dial')
       later('stageCap', stageCapMs(), () => onRingTimeout('cap'))
@@ -900,6 +939,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       say(`${W().noAnswer} (${why}) — сообщаю менеджеру и кладу трубку${cb?.dropped ? `; попыток ${cb.attempts} — перезвон снят` : ''}`)
       return notice('cbNoAnswer', 'callback_no_answer')
     }
+    if (target === 'manager' && aiRound > 0) return aiTransferFailed(why) // ШІ передав клієнта, а менеджер не взяв
+    if (target === 'manager' && noAnswerMode === 'ai') return aiOn() ? startAi(why) : busyCallback(why)
     if (target === 'manager' && noAnswerMode === 'busy') return busyCallback(why)
     if (target === 'manager' && noAnswerMode === 'fallback' && targets.fallback.uri) {
       if (fallbackMode === 'blind') return blindFallback(why)
@@ -910,17 +951,17 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
 
   // Типово: клієнта не тримаємо — «лінія зайнята, менеджер передзвонить», відбій; передзвін — у callbacks.json
   function busyCallback(why) {
-    savePending()
+    if (!pendingCb?.stored) savePending() // після ШІ передзвін уже збережено
     say(`${W().noAnswer} (${why}) — клиенту «линия занята, менеджер перезвонит»${pendingCb.stored ? ', перезвон сохранён' : ''}, кладу трубку`)
     notice('busy', 'busy_callback')
   }
 
-  function savePending({ missed = false } = {}) {
+  function savePending({ missed = false, note = null } = {}) {
     pendingCb = { managerKey: mgrKey, stored: false, id: null, ...(missed ? { missed: true } : {}) }
     if (!phone) { pendingCb.why = 'no_number'; return } // внутрішній / без номера — передзвонювати нікуди
     if (!callbacks) { pendingCb.why = 'no_store'; return }
     try {
-      const e = callbacks.addPending({ managerKey: mgrKey, clientNumber: phone, gcid, serviceRequestId, card: cardText, missed, ts: clock.now() })
+      const e = callbacks.addPending({ managerKey: mgrKey, clientNumber: phone, gcid, serviceRequestId, card: cardText, missed, note, ts: clock.now() })
       pendingCb.stored = true
       pendingCb.id = e?.id ?? null
       mark('callbackStored')
@@ -1004,6 +1045,227 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       say('запасная линия: АТС не ответила на перевод — кладу трубку')
     }
     if (!legA.down) hangup(A)
+    finish()
+  }
+
+  // ---------- ШІ-співрозмовник ----------
+
+  // Менеджер не взяв (там, де в busy звучить «лінія зайнята») або неробочий час: відповідає ШІ. Передзвін — одразу,
+  // як у busy: менеджер пропустив дзвінок (ШІ потім допише в нього питання клієнта).
+  function startAi(why) {
+    phase = 'ai'
+    const kind = why === 'after_hours' ? 'after_hours' : 'busy'
+    aiInfo = { kind, why, state: 'wait', sessionKind: kind, note: null, transfers: 0, sessions: [], endReason: null, failed: false, error: null, transferReason: null }
+    if (kind === 'after_hours') reason = 'after_hours'
+    mark('ai')
+    if (!pendingCb?.stored) savePending()
+    say(`${kind === 'after_hours' ? 'нерабочее время' : `${W().noAnswer} (${why})`} — отвечает ИИ${pendingCb?.stored ? ', перезвон сохранён' : ''}`)
+    if (!infoDone) {
+      later('aiInfo', AI_INFO_WAIT_MS, maybeAi)
+      infoP.then(() => maybeAi())
+    }
+    maybeAi()
+  }
+
+  // Утримання на час, поки ШІ під'єднується (зупиняє onSpeaking — перший звук моделі)
+  function aiHold() {
+    if (holdOn || legA.down || !config.holdFile) return
+    holdOn = true
+    send({ cmd: 'play', call: A, file: config.holdFile, loop: true, tag: 'hold' })
+    mark('hold')
+  }
+
+  const aiTransferAllowed = () => aiInfo?.sessionKind === 'busy' && aiInfo.transfers < Math.max(0, Number(config.aiTransferMax ?? 1) || 0) &&
+    !!config.managerUri && !aiAfterHours()
+
+  // Сесія ШІ: привітання, якщо ще грає, догрує; пошук клієнта — не довше AI_INFO_WAIT_MS
+  function maybeAi() {
+    if (phase !== 'ai' || !aiInfo || aiInfo.state !== 'wait' || legA.down) return
+    if (greeting === 'playing') {
+      if (tm.aiGreeting == null) later('aiGreeting', PROMPT_MAX_MS, () => { greeting = 'done'; maybeAi() })
+      return
+    }
+    if (!infoDone && tm.aiInfo != null) return // ще чекаємо пошук клієнта
+    cancel('aiGreeting')
+    cancel('aiInfo')
+    aiHold()
+    aiInfo.state = 'live'
+    const kind = aiInfo.sessionKind
+    let sess = null
+    try {
+      sess = ai({
+        call: A,
+        kind,
+        category,
+        transferAllowed: aiTransferAllowed(),
+        note: aiInfo.note,
+        onTool: aiTool,
+        onSpeaking: () => {
+          if (holdOn && phase === 'ai' && aiS === sess) {
+            holdOn = false
+            send({ cmd: 'stop', call: A })
+          }
+        },
+        onEnd: (info) => onAiEnd(sess, info),
+      })
+    } catch (e) {
+      err('ai', e?.message)
+    }
+    const cmd = sess?.start ? sess.start() : null
+    if (!sess || !cmd) return aiFailed('ai_start')
+    aiS = sess
+    aiInfo.sessions.push({ kind, at: clock.now() - t0, s: sess, end: null })
+    send(cmd)
+    mark(aiInfo.sessions.length === 1 ? 'aiStart' : 'aiRestart')
+    say(kind === 'transfer_failed' ? 'ИИ снова на линии' : 'ИИ на линии')
+  }
+
+  // Інструменти моделі. Результат — лише те, що можна сказати по телефону (правила — aiprompt.mjs).
+  async function aiTool(name, args) {
+    if (done || phase !== 'ai') return { ok: false, error: 'call_over' }
+    switch (name) {
+      case 'get_request_status':
+        mark('aiStatus')
+        if (!infoDone) await Promise.race([infoP, new Promise((r) => clock.setTimeout(r, AI_INFO_WAIT_MS))])
+        return requestStatusFor(lookupRes, {
+          lookupState: lookupState === 'pending' ? 'error' : lookupState,
+          detail: config.aiStatusDetail === 'stage' ? 'stage' : 'minimal',
+          nowMs: clock.now(),
+        })
+      case 'save_question_for_manager':
+        return aiSaveQuestion(args)
+      case 'transfer_to_manager':
+        if (!aiTransferAllowed()) {
+          return { ok: false, reason: aiInfo.sessionKind === 'after_hours' ? 'after_hours' : 'not_available', note: "З'єднати з менеджером зараз не можна. Запропонуй записати питання — менеджер передзвонить." }
+        }
+        aiInfo.transferReason = String(args?.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 200) || null
+        return { ok: true }
+      case 'end_call':
+        return { ok: true }
+      default:
+        return { ok: false, error: 'unknown_tool' }
+    }
+  }
+
+  const NOTE_TOPICS = ['repair', 'purchase', 'warranty', 'delivery', 'complaint', 'safety', 'other']
+  function aiSaveQuestion(args) {
+    const question = String(args?.question ?? '').replace(/\s+/g, ' ').trim().slice(0, AI_NOTE_MAX)
+    if (!question) return { ok: false, error: 'empty_question', note: "Спершу з'ясуй суть питання." }
+    const note = { question, topic: NOTE_TOPICS.includes(args?.topic) ? args.topic : 'other', urgent: args?.urgent === true, callback: args?.callback !== false }
+    aiInfo.note = note
+    mark('aiNote')
+    if (!phone) return { ok: true, saved: false, note: 'Номер не визначився, передзвонити не вийде. Скажи, що питання записано і менеджер його побачить.' }
+    const stored = { question: note.question, topic: note.topic, urgent: note.urgent }
+    try {
+      if (!note.callback) {
+        if (pendingCb?.stored && pendingCb.id && callbacks?.removePending) {
+          callbacks.removePending(pendingCb.id)
+          pendingCb.stored = false
+          pendingCb.removed = true
+        }
+        return { ok: true, saved: true, callback: false, note: 'Записано, передзвонювати не будемо.' }
+      }
+      if (pendingCb?.stored && pendingCb.id) callbacks.updatePending(pendingCb.id, { note: stored })
+      else savePending({ note: stored })
+    } catch (e) {
+      err('callbacks', e?.message)
+    }
+    if (!pendingCb?.stored) return { ok: true, saved: false, note: 'Записати передзвін не вдалося. Скажи, що менеджер побачить пропущений дзвінок.' }
+    return { ok: true, saved: true, callback: true, note: aiInfo.kind === 'after_hours' ? 'Записано. Менеджер передзвонить у робочий час.' : 'Записано. Менеджер передзвонить.' }
+  }
+
+  function onAiEnd(sess, info) {
+    const rec = aiInfo?.sessions.find((x) => x.s === sess)
+    if (rec) rec.end = info || null
+    if (sess !== aiS || done) return
+    aiInfo.endReason = info?.action || info?.reason || null
+    if (phase !== 'ai') return
+    if (info?.action === 'transfer') return aiTransfer()
+    if (info?.action === 'end' || info?.reason === 'idle' || info?.reason === 'max_duration') return aiDone()
+    if (legA.down) return // клієнт поклав — це обробляє onADown
+    aiFailed(info?.reason || 'ai_error')
+  }
+
+  // ШІ попрощався (або тиша / межа часу): кладемо трубку
+  function aiDone() {
+    aiInfo.state = 'done'
+    aiS = null
+    outcome = aiInfo.note ? 'ai_noted' : 'ai_answered'
+    say(`ИИ завершил разговор${aiInfo.note ? ' — вопрос записан' : ''}`)
+    if (!legA.down) hangup(A)
+    finish()
+  }
+
+  // ШІ не вдався (провайдер, рушій): далі як busy — «лінія зайнята», передзвін уже збережено
+  function aiFailed(why) {
+    aiInfo.failed = true
+    aiInfo.state = 'done'
+    aiInfo.error = why
+    err('ai', why)
+    const sess = aiS
+    aiS = null
+    if (sess && !sess.ended) sess.stop('failed')
+    say(`ИИ недоступен (${why})`)
+    busyCallback(why)
+  }
+
+  // Модель попросила з'єднати з менеджером і фразу «з'єдную» дограно (сесію закрито): той самий шлях, що вперше —
+  // набір із повторами, утримання, картка з питанням клієнта, «1», REFER/Replaces. Не вийшло — aiTransferFailed.
+  function aiTransfer() {
+    if (legA.down) return clientGone()
+    aiInfo.transfers++
+    aiInfo.state = 'done'
+    if (confirms.manager) aiInfo.firstConfirm = { plays: confirms.manager.plays, digit: confirms.manager.digit }
+    delete confirms.manager
+    aiS = null
+    aiRound++
+    target = 'manager'
+    phase = 'dialing'
+    stageAt = null
+    legB = null
+    cardStarted = false
+    cardPlaying = false
+    xferAccepted = false
+    xferWaits = 0
+    confirm = null
+    mark('aiTransfer')
+    say('ИИ: клиент просит менеджера — звоню менеджеру')
+    cardP = prepareAiCard()
+    startHold()
+    dial()
+  }
+
+  // Картка менеджеру на запит ШІ: звична картка + питання клієнта (номери телефонів прибрано)
+  function prepareAiCard() {
+    const q = aiInfo?.note?.question
+    const extra = q ? `Питання клієнта: ${q}` : aiInfo?.transferReason ? `Клієнт просить менеджера: ${aiInfo.transferReason}` : "Клієнт просить з'єднати з менеджером."
+    const text = hidePhones(`${cardText || 'Дзвонить клієнт.'} ${extra}`).slice(0, 300)
+    if (!tts) return Promise.resolve(null)
+    return Promise.resolve().then(() => tts(text)).then((r) => (r && r.file ? r : null), (e) => {
+      err('tts', e?.message)
+      return null
+    })
+  }
+
+  // Менеджер на запит ШІ не взяв: знову ШІ (нова сесія: менеджер не відповів, з'єднати вже не пропонує)
+  function aiTransferFailed(why) {
+    if (!aiOn()) return busyCallback(why)
+    phase = 'ai'
+    aiInfo.sessionKind = 'transfer_failed'
+    aiInfo.state = 'wait'
+    mark('aiBack')
+    say(`${W().noAnswer} (${why}) — снова ИИ`)
+    maybeAi()
+  }
+
+  // Клієнт поклав під час розмови з ШІ
+  function aiClientGone() {
+    const sess = aiS
+    aiS = null
+    if (sess && !sess.ended) sess.stop('client_hangup')
+    aiInfo.state = 'done'
+    outcome = aiInfo.note ? 'ai_noted' : 'ai_client_hangup'
+    say(`клиент положил трубку во время разговора с ИИ${aiInfo.note ? ' — вопрос записан' : ''}`)
     finish()
   }
 
@@ -1216,6 +1478,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       case 'notice':
         // поклав під час останньої фрази — підсумок уже є (busy_callback, callback_no_answer…)
         return finish()
+      case 'ai':
+        return aiClientGone()
       case 'voicemail':
         // Поклав під час запису — запис зберігаємо: рушій сам закриває файл і шле record_done
         if (vm?.state === 'rec') {
@@ -1289,6 +1553,10 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         return
       case 'xfer':
         if (phase === 'fallback') onXfer({ code: 0, final: true, reason: 'engine error' })
+        return
+      case 'audio_start':
+        // рушій не пустив звук до мозку — сесія ШІ без звуку марна: далі як busy
+        if (ev.call === A && phase === 'ai' && aiS) aiS.stop('engine_error')
         return
       case 'bridge':
         if (phase === 'bridged') {
@@ -1382,6 +1650,9 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   function abort(why) {
     if (done) return
     abortReason = why
+    const sess = aiS
+    aiS = null
+    if (sess && !sess.ended) sess.stop(why)
     if (vm?.file && (vm.state === 'rec' || vm.state === 'stopping')) {
       // Запис уже йшов: файл є (при зупинці шлюзу рушій його закриває, після падіння заголовок лагодить gateway.mjs) —
       // це повідомлення клієнта, а не просто обірваний дзвінок
@@ -1397,7 +1668,13 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     phase = 'done'
     for (const h of timers) clock.clearTimeout(h)
     timers.clear()
+    if (aiS && !aiS.ended) {
+      const sess = aiS
+      aiS = null
+      sess.stop('call_end')
+    }
     mark('end')
+    const aiRes = (aiInfo?.sessions || []).map((x) => ({ kind: x.kind, at: x.at, r: x.s.result() }))
     const conf = Object.fromEntries(Object.entries(confirms).map(([k, v]) => [k, { plays: v.plays, digit: v.digit }]))
     const entry = {
       v: 3,
@@ -1429,7 +1706,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       pendingRemoved, // клієнта з'єднано — стільки його відкладених передзвонів знято
       pin: pin ? pin.result || 'unfinished' : null, // зовнішній менеджер: ok | wrong | timeout (цифр немає)
       lastClientFor,
-      dials: dials.map(({ to, attempt, at, code }) => ({ to, attempt, at, code })),
+      dials: dials.map(({ to, attempt, at, code, ai: round }) => ({ to, attempt, at, code, ...(round ? { ai: round } : {}) })), // ai — набір на запит ШІ
       retries: retries.manager,
       fallbackRetries: retries.fallback,
       xferCode: xferFinalCode ?? xferCode,
@@ -1438,6 +1715,28 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       fallbackCode: bCodes.fallback,
       ...(callback ? { calleeCode: bCodes.client } : {}),
       voicemail: vm && (vm.file || vm.stop) ? { file: vm.file, sec: vm.sec, stop: vm.stop, ...(vm.empty ? { empty: true } : {}) } : null,
+      // ШІ: без тексту питання й розшифровки (особисті дані — лише в aiTranscript, gateway.mjs зберігає окремо)
+      ai: aiInfo
+        ? {
+            kind: aiInfo.kind,
+            why: aiInfo.why,
+            transfers: aiInfo.transfers,
+            error: aiInfo.error,
+            endReason: aiInfo.endReason,
+            firstConfirm: aiInfo.firstConfirm ?? null,
+            note: aiInfo.note ? { topic: aiInfo.note.topic, urgent: aiInfo.note.urgent, callback: aiInfo.note.callback, chars: aiInfo.note.question.length } : null,
+            sessions: aiRes.map(({ kind, at, r }) => ({ kind, at, provider: r.provider, model: r.model, durationMs: r.durationMs, end: r.end, toolCalls: r.toolCalls, usage: r.usage, costUsd: r.costUsd, turns: r.turns.length, errors: r.errors })),
+          }
+        : null,
+      aiTranscript: aiRes.length
+        ? {
+            kind: aiInfo.kind,
+            note: aiInfo.note,
+            turns: aiRes.flatMap(({ at, r }) => r.turns.map((x) => ({ ...x, start: Math.round((at / 1000 + x.start) * 100) / 100, end: Math.round((at / 1000 + x.end) * 100) / 100 }))),
+            providers: [...new Set(aiRes.map(({ r }) => `${r.provider}/${r.model}`))],
+            costUsd: aiRes.reduce((a, { r }) => a + (Number(r.costUsd) || 0), 0),
+          }
+        : null,
       t: { ...marks },
       errors,
     }
@@ -1465,7 +1764,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
 // ---------- диспетчер: події рушія → потрібний сценарій ----------
 // Вхідний створює сценарій; 'dialing' прив'язує ногу B за ref; решта — за номером виклику (error без call — за ref).
 // Подію для ще невідомого виклику тримаємо недовго: рушій міг повідомити стан B раніше за 'dialing'.
-export function createDispatcher({ config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, callbacks = null, log = () => {}, onDone = () => {} }) {
+export function createDispatcher({ config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, callbacks = null, ai = null, log = () => {}, onDone = () => {} }) {
   const byCall = new Map()
   const byRef = new Map()
   const active = new Set()
@@ -1516,6 +1815,7 @@ export function createDispatcher({ config, send, clock, lookup = null, buildCard
       tts,
       voicemailPath,
       callbacks,
+      ai,
       partyBusy: (n) => partyBusy(n, flow),
       log,
       rejectReason: active.size >= config.maxCalls ? 'busy' : null,

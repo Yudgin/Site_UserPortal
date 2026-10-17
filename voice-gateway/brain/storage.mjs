@@ -78,10 +78,11 @@ export function pruneOld({ dir, re, days, now = Date.now }) {
   return n
 }
 
-// Голосові повідомлення: <dataDir>/voicemail/YYYY-MM-DD/*.wav — файли старші за days діб, потім порожні денні теки.
-function pruneVoicemail({ dataDir, days, now }) {
+// Голосові повідомлення <dataDir>/voicemail/YYYY-MM-DD/*.wav і розшифровки ШІ <dataDir>/ai/YYYY-MM-DD/*.json — файли
+// старші за days діб, потім порожні денні теки.
+function pruneVoicemail({ dataDir, days, now, sub = 'voicemail', re = /\.wav$/ }) {
   if (!(days > 0)) return 0
-  const root = path.join(dataDir, 'voicemail')
+  const root = path.join(dataDir, sub)
   let dirs
   try {
     dirs = fs.readdirSync(root).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
@@ -91,7 +92,7 @@ function pruneVoicemail({ dataDir, days, now }) {
   let n = 0
   for (const d of dirs) {
     const dir = path.join(root, d)
-    n += pruneOld({ dir, re: /\.wav$/, days, now })
+    n += pruneOld({ dir, re, days, now })
     try {
       if (!fs.readdirSync(dir).length) fs.rmdirSync(dir)
     } catch { /* не тека або вже немає */ }
@@ -99,14 +100,15 @@ function pruneVoicemail({ dataDir, days, now }) {
   return n
 }
 
-// Прибирання всіх даних шлюзу за налаштуваннями retentionDays {logs, cache, journal, voicemail}.
+// Прибирання всіх даних шлюзу за налаштуваннями retentionDays {logs, cache, journal, voicemail, ai}.
 export function pruneGatewayData({ dataDir, cacheDir, retentionDays, now = Date.now }) {
   const logs = path.join(dataDir, 'logs')
   return (
     pruneOld({ dir: logs, re: /^(engine|brain)-\d{4}-\d{2}-\d{2}\.log$/, days: retentionDays.logs, now }) +
     pruneOld({ dir: cacheDir, re: /^card-[0-9a-f]{40}\.wav$|\.tmp$/, days: retentionDays.cache, now }) +
     pruneOld({ dir: dataDir, re: /^calls-\d{4}-\d{2}-\d{2}\.jsonl$/, days: retentionDays.journal, now }) +
-    pruneVoicemail({ dataDir, days: retentionDays.voicemail, now })
+    pruneVoicemail({ dataDir, days: retentionDays.voicemail, now }) +
+    pruneVoicemail({ dataDir, days: retentionDays.ai ?? retentionDays.voicemail, now, sub: 'ai', re: /\.json$/ })
   )
 }
 
@@ -132,6 +134,22 @@ export function makeVoicemailPath({ dataDir, gcid = null, number = null, timeZon
   const base = `${g || hms(now, timeZone)}-${digits ? digits.slice(-4) : 'anon'}`
   let file = path.join(dir, `${base}.wav`)
   for (let i = 2; fs.existsSync(file); i++) file = path.join(dir, `${base}-${i}.wav`)
+  return file
+}
+
+// Розшифровка розмови з ШІ (слова клієнта й ШІ, питання для менеджера) — особисті дані, окремо від журналу:
+// <dataDir>/ai/<YYYY-MM-DD>/<gcid або ГГХХСС>-<останні 4 цифри>.json, тека 0700, файл 0600. Повертає шлях.
+export function saveAiTranscript({ dataDir, gcid = null, number = null, record, timeZone = 'Europe/Kyiv', now = new Date() }) {
+  const root = path.join(path.resolve(dataDir), 'ai')
+  const dir = path.join(root, ymd(now, timeZone))
+  ensurePrivateDir(root)
+  ensurePrivateDir(dir)
+  const digits = String(number ?? '').replace(/\D/g, '')
+  const g = String(gcid ?? '').replace(/[^0-9A-Za-z_-]/g, '').slice(0, 40)
+  const base = `${g || hms(now, timeZone)}-${digits ? digits.slice(-4) : 'anon'}`
+  let file = path.join(dir, `${base}.json`)
+  for (let i = 2; fs.existsSync(file); i++) file = path.join(dir, `${base}-${i}.json`)
+  fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`, { mode: FILE_MODE, flag: 'wx' })
   return file
 }
 

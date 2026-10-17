@@ -235,7 +235,7 @@ export function createAgent({ call, server, provider, connectOpts, onTool, onSpe
       if (pendingAction) placeActionMark()
     })
     p.on('tool_call', (tc) => { onToolCall(tc) })
-    p.on('transcript', ({ role, text, itemId }) => {
+    p.on('transcript', ({ role, text, itemId, correction = false }) => {
       const t = String(text || '').trim()
       if (!t) return
       if (role === 'user') {
@@ -246,6 +246,10 @@ export function createAgent({ call, server, provider, connectOpts, onTool, onSpe
           open.end = now()
           delete open.pending
         } else turns.push({ speaker: 'client', start: now(), end: now(), text: t })
+      } else if (correction) {
+        // перебили: провайдер повідомив, що з відповіді справді прозвучало
+        const last = [...turns].reverse().find((x) => x.speaker === 'ai')
+        if (last) last.text = t
       } else {
         const it = itemId ? items.get(itemId) : null
         turns.push({ speaker: 'ai', start: it?.t ?? now(), end: now(), text: t })

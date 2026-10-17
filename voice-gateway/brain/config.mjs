@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveManagers } from './callbacks.mjs'
+import { parseHours } from './hours.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 export const GATEWAY_DIR = path.resolve(HERE, '..') // voice-gateway/
@@ -36,7 +37,7 @@ export const PROMPT_ENV = {
   cbNoAnswer: 'VG_CB_NO_ANSWER_WAV',
   pin: 'VG_PIN_WAV',
 }
-export const NO_ANSWER_MODES = ['busy', 'fallback', 'voicemail']
+export const NO_ANSWER_MODES = ['busy', 'fallback', 'voicemail', 'ai']
 // PIN менеджера для передзвону із зовнішнього номера: 4–8 цифр; інше — PIN не задано (зовнішні номери отримують 486)
 export const validPin = (v) => /^\d{4,8}$/.test(String(v ?? '').trim())
 
@@ -57,6 +58,15 @@ export const extUri = (v, server) => {
   if (!s) return ''
   if (/^sips?:/i.test(s)) return s
   return `sip:${s}@${server};transport=udp`
+}
+
+// Робочий час (для ШІ): помилку розбору не кидаємо — gateway.mjs покаже її й не стартує в режимі ai
+function hoursOf(spec) {
+  try {
+    return { workHours: parseHours(spec), workHoursError: null }
+  } catch (e) {
+    return { workHours: [], workHoursError: e.message }
+  }
 }
 
 export function loadConfig(env = process.env) {
@@ -89,6 +99,8 @@ export function loadConfig(env = process.env) {
     //   busy (типово) — клієнту «лінія зайнята, менеджер передзвонить», відбій і відкладений передзвін у callbacks.json;
     //   fallback — старий шлях: запасна лінія (набір, картка, підтвердження, REFER/Replaces), далі голосова пошта;
     //   voicemail — одразу голосова пошта.
+    //   ai — ШІ-співрозмовник (ElevenLabs Agents): стан заявки, питання для менеджера, з'єднати, завершити; у неробочий
+    //        час (VG_WORK_HOURS) — одразу ШІ, без набору менеджера (VG_AI_AFTER_HOURS=0 — ні). Типово вимкнено.
     noAnswerMode: NO_ANSWER_MODES.includes(noAnswer) ? noAnswer : 'busy',
     // Підтвердження після картки: «1» — переводимо (REFER/Replaces), «2» — не може говорити. Немає цифри
     // confirmTimeoutSec після кінця фрази — фраза ще раз (confirmRepeats), знову нічого — як не відповів (так і
@@ -172,6 +184,26 @@ export function loadConfig(env = process.env) {
     // Запис коротший (або файла немає) — повідомлення немає: підсумок voicemail_empty, порожній файл видаляється
     voicemailMinSec: num(env.VG_VOICEMAIL_MIN_SEC, 1),
     beepFile: env.VG_BEEP_WAV || null, // немає — gateway.mjs один раз генерує cache/beep-1000hz-400ms.wav
+    // ШІ-співрозмовник (noAnswerMode 'ai'). Перші фрази й інструкції — aiprompt.mjs (ТЕСТОВІ тексти до погодження).
+    aiProvider: String(env.VG_AI_PROVIDER || 'elevenlabs').trim().toLowerCase(),
+    workHoursSpec: env.VG_WORK_HOURS ?? 'mon-fri 09:00-18:00', // Київ; порожньо — завжди робочий
+    ...hoursOf(env.VG_WORK_HOURS ?? 'mon-fri 09:00-18:00'),
+    aiAfterHours: bool(env.VG_AI_AFTER_HOURS, true), // неробочий час — одразу ШІ, менеджеру не дзвонимо
+    aiMaxSec: num(env.VG_AI_MAX_SEC, 300), // розмова з ШІ — не довше (за 30 с до кінця — «час спливає»)
+    aiIdleSec: num(env.VG_AI_IDLE_SEC, 20), // тиша: ElevenLabs перепитує сам, через 2 такі проміжки — відбій
+    aiWrapSec: num(env.VG_AI_WRAP_SEC, 30),
+    aiTransferMax: num(env.VG_AI_TRANSFER_MAX, 1), // скільки разів ШІ може передати клієнта менеджеру за дзвінок
+    // Що ШІ каже про заявку: minimal — є/немає, скільки, номер; stage — ще й етап (рішення власника)
+    aiStatusDetail: String(env.VG_AI_STATUS_DETAIL || '').trim().toLowerCase() === 'stage' ? 'stage' : 'minimal',
+    // Куди зберігати розшифровку й підсумок: local — <data>/ai/<дата>/*.json (0600); firestore — ще й
+    // serviceRequests/{id}/calls/ai-<gcid> (kind 'ai'), якщо заявку знайдено (формат погоджується з конвеєром дзвінків)
+    aiSave: String(env.VG_AI_SAVE || '').trim().toLowerCase() === 'firestore' ? 'firestore' : 'local',
+    aiElAgent: env.VG_AI_EL_AGENT || null, // agent_id ElevenLabs; немає — з <data>/ai-elevenlabs.json (ai-setup-elevenlabs.mjs)
+    aiElApi: env.VG_AI_EL_API || 'https://api.elevenlabs.io',
+    aiElUrl: env.VG_AI_EL_URL || null, // готова адреса WebSocket (локальна перевірка з fake-ai-server.mjs)
+    aiElLlm: env.VG_AI_EL_LLM || 'claude-sonnet-5-5', // LLM агента (ai-setup-elevenlabs.mjs; у журнал)
+    aiVoiceId: env.VG_AI_VOICE || env.VG_TTS_VOICE || 'zDLnIEu0UzYpFE8fq9aq', // той самий голос, що й фрази шлюзу
+    aiPricePerMin: num(env.VG_AI_PRICE_PER_MIN, 0.08), // оцінка вартості в журнал, $/хв без LLM
     recordSupported: null, // чи вміє рушій record: gateway.mjs ставить за подією ready (false — пошти немає)
     xferClearMs: 4000, // після вдалого переведення АТС сама гасить обидві ноги; жива нога після цього — кладемо
     bridgeMaxMin: num(env.VG_BRIDGE_MAX_MIN, 60), // розмова через локальний міст — не довше (BYE міг загубитися)
@@ -204,6 +236,7 @@ export function loadConfig(env = process.env) {
       cache: num(env.VG_CACHE_DAYS, 30),
       journal: num(env.VG_JOURNAL_DAYS, 90),
       voicemail: num(env.VG_VOICEMAIL_DAYS, 90),
+      ai: num(env.VG_AI_DAYS, 90), // розшифровки розмов із ШІ
     },
   }
 }
