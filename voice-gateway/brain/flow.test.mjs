@@ -2179,3 +2179,10 @@ test('сховище: тимчасові файли, що лишились пі�
   s.listPending()
   assert.equal(JSON.parse(fs.readFileSync(path.join(data, CALLBACKS_FILE), 'utf8')).dials, undefined)
 })
+
+test('VG_MANAGERS_EXTERNAL=nopin: передзвін із мобільного менеджера без PIN — одразу набір клієнта', async () => {
+  const { externalCallbackOn } = await import('./flow.mjs')
+  assert.equal(externalCallbackOn({ managersExternal: true, managersExternalNoPin: true, managerPin: null }), true)
+  assert.equal(externalCallbackOn({ managersExternal: true, managersExternalNoPin: false, managerPin: null }), false)
+  assert.equal(externalCallbackOn({ managersExternal: false, managersExternalNoPin: false, managerPin: null }), false)
+})

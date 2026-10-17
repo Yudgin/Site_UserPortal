@@ -110,6 +110,8 @@ export function loadConfig(env = process.env) {
     // Зовнішній номер можна підробити (caller ID spoofing): з нього — лише з VG_MANAGERS_EXTERNAL=1 І VG_MANAGER_PIN
     // (4–8 цифр, менеджер набирає після відповіді); інакше такий дзвінок отримує 486 (не клієнт і не передзвін).
     managersExternal: bool(env.VG_MANAGERS_EXTERNAL, false),
+    // VG_MANAGERS_EXTERNAL=nopin — рішення власника 2026-10-17: передзвін із мобільного менеджера без PIN (ризик підробки номера прийнято)
+    managersExternalNoPin: String(env.VG_MANAGERS_EXTERNAL ?? '').trim().toLowerCase() === 'nopin',
     managerPin: validPin(env.VG_MANAGER_PIN) ? String(env.VG_MANAGER_PIN).trim() : null,
     managerPinInvalid: env.VG_MANAGER_PIN != null && env.VG_MANAGER_PIN !== '' && !validPin(env.VG_MANAGER_PIN),
     pinTimeoutSec: num(env.VG_PIN_TIMEOUT_SEC, 10), // скільки чекаємо PIN після фрази «Введіть пін-код.»

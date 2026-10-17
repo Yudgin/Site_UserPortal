@@ -99,7 +99,8 @@ export function managerCaller(incoming, config) {
 }
 export const isManagerCaller = (incoming, config) => !!managerCaller(incoming, config)
 // Передзвін із зовнішнього номера менеджера (його можна підробити) — лише з явним прапорцем і PIN
-export const externalCallbackOn = (config) => config.managersExternal === true && validPin(config.managerPin)
+export const externalCallbackOn = (config) =>
+  config.managersExternal === true && (validPin(config.managerPin) || config.managersExternalNoPin === true)
 // Порівняння PIN без раннього виходу (час не підказує, скільки цифр уже правильні)
 const pinEqual = (a, b) => {
   const x = String(a ?? '')
@@ -150,7 +151,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // Зовнішній номер менеджера без VG_MANAGERS_EXTERNAL=1 і PIN — 486: не передзвін (номер міг бути підроблений) і не
   // клієнт (інакше шлюз набрав би менеджера йому ж самому)
   const externalDenied = !!mc?.external && !externalCallbackOn(config)
-  const pinRequired = !!mc?.external && !externalDenied
+  const pinRequired = !!mc?.external && !externalDenied && validPin(config.managerPin) // nopin — без PIN
   const allowed = callback ? !externalDenied : callerAllowed(incoming, config) // менеджери — завжди (зовнішні — з PIN)
   const phone = internal ? null : strictPhone(number)
   // Чужий номер (його відхиляємо) у статус і журнал — лише маскою

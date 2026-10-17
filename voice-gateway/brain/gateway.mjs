@@ -394,7 +394,8 @@ async function main() {
   const internalNums = config.managers.flat().filter((k) => isInternalKey(k))
   if (config.managerPinInvalid) warn('VG_MANAGER_PIN должен быть 4–8 цифр — PIN не задан')
   if (externalNums.length && !externalCallbackOn(config)) warn(`звонки на шлюз с внешних номеров менеджеров (${externalNums.join(', ')}) получат «занято» (486): номер можно подделать. Перезвон с них — только VG_MANAGERS_EXTERNAL=1 и VG_MANAGER_PIN (4–8 цифр)`)
-  if (config.managersExternal && !config.managerPin) warn('VG_MANAGERS_EXTERNAL=1 без VG_MANAGER_PIN — внешние номера менеджеров всё равно получат 486')
+  if (config.managersExternal && !config.managerPin && !config.managersExternalNoPin) warn('VG_MANAGERS_EXTERNAL=1 без VG_MANAGER_PIN — внешние номера менеджеров всё равно получат 486')
+  if (config.managersExternalNoPin && !config.managerPin) warn('перезвон с внешних номеров менеджеров БЕЗ PIN (VG_MANAGERS_EXTERNAL=nopin): номер звонящего можно подделать')
   const mgrK = partyKey(config.managerUri)
   if (mgrK && !isInternalKey(mgrK) && !internalNums.length) warn(`менеджер — внешний номер (${mgrK}), а внутренних линий менеджеров нет: звонок с 907 шлюз примет за клиента и наберёт менеджеру. Для перезвона с внутренней линии: VG_MANAGERS=907=${mgrK.replace('+380', '0')}`)
   const prune = () => {
