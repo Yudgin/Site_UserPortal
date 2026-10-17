@@ -729,6 +729,14 @@ class GwAudio : public AudioMediaPort {
     std::lock_guard<std::mutex> g(mu_);
     return broken_;
   }
+  // Головний потік: зняти порт із моста конференції одразу (видалення з моста асинхронне — об'єкт видаляємо пізніше,
+  // коли міст його вже точно не викликає; деструктор AudioMediaPort повторне зняття пропускає)
+  void detach() {
+    try {
+      unregisterMediaPort();
+    } catch (Error &) {
+    }
+  }
   // Більше не грати й не слати: колбеки моста, що ще прийдуть, нічого не роблять; сокет закриваємо одразу
   void shut(unsigned long long &played, unsigned long long &queued, unsigned long long &droppedOut) {
     std::lock_guard<std::mutex> g(mu_);
@@ -962,6 +970,7 @@ static void dropAudio(CallRec &r, const char *why) {
   }
   unsigned long long played = 0, queued = 0, droppedOut = 0;
   r.audio->shut(played, queued, droppedOut);
+  r.audio->detach();
   logf("call %d: audio stream closed (%s, played %.1f s, dropped frames %llu)", r.eid, why,
        (double)played / (double)r.audio->rate(), droppedOut);
   g_deadAudios.push_back({r.audio, Clock::now()});
@@ -1849,6 +1858,8 @@ static void shutdownAll() {
     kv.second.call = nullptr;
   }
   g_calls.clear();
+  // Порти звуку до мозку вже зняті з моста (detach), але міст прибирає їх асинхронно — дати йому кілька тактів
+  if (!g_deadAudios.empty()) pump(200, [] { return false; });
   reap(true);
   delete g_acc;
   g_acc = nullptr;
