@@ -1,17 +1,18 @@
-// Відмітка «клієнт отримав кораблик» за зворотною ТТН Нової Пошти (рішення власника 2026-10-17: заявка завершена,
-// коли клієнт отримав кораблик і минуло 2 тижні; до того — «відкрита»; записка
+// «Клієнт отримав кораблик» за ПРЯМИМ опитуванням Нової Пошти по зворотній ТТН заявки (рішення власника 2026-10-17:
+// заявка завершена, коли клієнт отримав кораблик і минуло 2 тижні; записка
 // runferry-briefs/telephony/resend-link-and-client-received-2026-10-18.md).
-// Поля заявки (serviceRequests/{id}):
-//   clientReceivedAt     — ISO-час отримання клієнтом (RecipientDateTime НП; немає — час, коли ми це побачили, і
-//                          clientReceivedApprox: true);
-//   clientReceivedTtn    — за якою ТТН (returnTtn на той момент); clientReceivedSource: 'np';
-//   returnTracking       — {ttn, code, status, firstCheckedAt, changedAt, final?} — останній відомий статус зворотної ТТН;
-//                          final: 'received' | 'refused' | 'deleted' | 'not_found' | 'stale' — далі не опитуємо.
-// НЕ плутати з етапом stage 'received' — це «кораблик у нас» (onecSync inferStage). Статус заявки (status) тут не
-// змінюється: він системний (рішення 2026-10-16).
-// Хто ставить: POST /api/np/return-tracking/reconcile (Cloud Scheduler, x-admin-token, або адмін Firebase; ?dryRun=1 —
-// лише показати). Пише в заявку лише при зміні коду НП або фіналі — без зайвих записів (застосунок слухає заявки наживо).
+// Правило «відкрита» (isOpen у binotelWebhook.js, задеплоєне 00076-rxw) уже бере отримання з історії зворотної ТТН у 1С
+// (returnDelivery, onecSync) і з етапу «Видано клієнту». Цей модуль — третє джерело для того, чого 1С не бачить:
+// накладні, створені порталом/застосунком (у 1С номер зворотної ТТН майже завжди 0), і роботу після вимкнення 1С.
+// Окреме поле, щоб не сперечатися з нічною синхронізацією 1С за returnDelivery:
+//   serviceRequests/{id}.npDelivery = {ttn, code, status, firstCheckedAt, changedAt, deliveredAt?, approx?, final?}
+//     deliveredAt — RecipientDateTime НП (ISO); немає — час, коли ми це побачили, і approx: true;
+//     final: 'received' | 'refused' | 'deleted' | 'not_found' | 'stale' — далі цю ТТН не опитуємо.
+// Читач — npDeliveredMs() у binotelWebhook.js. Статус заявки (status) і етап (stage) тут не змінюються.
+// Хто запускає: POST /api/np/return-tracking/reconcile (Cloud Scheduler, x-admin-token, або адмін Firebase; ?dryRun=1 —
+// лише показати). Пише в заявку лише при зміні коду НП або фіналі (застосунок слухає заявки наживо).
 import { verifyFirebaseAdmin } from './adminAuth.js'
+import { currentDelivery, handedOverMs } from './binotelWebhook.js'
 
 const DAY_MS = 24 * 3600 * 1000
 // Коди getStatusDocuments НП: 9 «Відправлення отримано», 10 і 11 «отримано» з грошовим переказом, 106 «Одержано і
@@ -52,14 +53,16 @@ export const parseNpDate = (s) => {
   return new Date(guess - kyivOffsetMin(new Date(guess)) * 60000).toISOString()
 }
 
-// Чи треба опитувати НП для цієї заявки зараз.
+// Чи треба опитувати НП для цієї заявки зараз: є зворотна ТТН кораблика (не запчастин/купівлі), заявка не скасована,
+// отримання ще невідоме ні з 1С, ні з «Видано клієнту», і ця ТТН ще не має фіналу.
 export function needsTracking(sr) {
   if (!sr || sr.status === 'cancelled') return false
+  if (['parts', 'purchase'].includes(sr.npScenario)) return false
   const ttn = normTtn(sr.returnTtn)
   if (!ttn) return false
-  if (sr.clientReceivedAt && sr.clientReceivedTtn === ttn) return false
-  const tr = sr.returnTracking
-  return !(tr && tr.ttn === ttn && tr.final)
+  if (msOf(currentDelivery(sr)?.deliveredAt) || handedOverMs(sr)) return false
+  const nd = sr.npDelivery
+  return !(nd && nd.ttn === ttn && nd.final)
 }
 
 // Зміни в заявці за відповіддю НП (npDoc — елемент data[] getStatusDocuments або null, якщо НП його не повернула).
@@ -67,7 +70,7 @@ export function needsTracking(sr) {
 export function trackingPatch(sr, npDoc, nowMs = Date.now()) {
   const ttn = normTtn(sr?.returnTtn)
   if (!ttn) return null
-  const prev = sr.returnTracking && sr.returnTracking.ttn === ttn ? sr.returnTracking : null
+  const prev = sr.npDelivery && sr.npDelivery.ttn === ttn ? sr.npDelivery : null
   const now = new Date(nowMs).toISOString()
   const firstCheckedAt = prev?.firstCheckedAt || now
   const ageDays = (nowMs - (msOf(firstCheckedAt) ?? nowMs)) / DAY_MS
@@ -83,19 +86,16 @@ export function trackingPatch(sr, npDoc, nowMs = Date.now()) {
 
   const changed = !prev || prev.code !== code || !!final
   if (!changed) return null
-  const tracking = { ttn, code, status, firstCheckedAt, changedAt: prev && prev.code === code ? (prev.changedAt || now) : now, ...(final ? { final } : {}) }
-  const patch = { returnTracking: tracking }
+  const nd = { ttn, code, status, firstCheckedAt, changedAt: prev && prev.code === code ? (prev.changedAt || now) : now, ...(final ? { final } : {}) }
   if (final === 'received') {
     const at = parseNpDate(npDoc?.RecipientDateTime)
     const atMs = msOf(at)
     // Час із майбутнього (розбіжність годинників) — беремо «зараз».
     const ok = atMs != null && atMs <= nowMs + 5 * 60000
-    patch.clientReceivedAt = ok ? at : now
-    patch.clientReceivedApprox = !ok
-    patch.clientReceivedTtn = ttn
-    patch.clientReceivedSource = 'np'
+    nd.deliveredAt = ok ? at : now
+    nd.approx = !ok
   }
-  return patch
+  return { npDelivery: nd }
 }
 
 // Телефон для getStatusDocuments (з ним НП віддає повні дані, зокрема дату отримання): 380XXXXXXXXX або нічого.
@@ -124,7 +124,7 @@ export function registerReturnTracking(app, deps) {
     const started = now()
     // Усі заявки зі зворотною ТТН (рядок > '' — порожні й відсутні поля не потрапляють); фільтр — у пам'яті.
     const snap = await adminDb.collection('serviceRequests').where('returnTtn', '>', '')
-      .select('returnTtn', 'status', 'clientPhone', 'clientReceivedAt', 'clientReceivedTtn', 'returnTracking').get()
+      .select('returnTtn', 'status', 'clientPhone', 'npScenario', 'npDelivery', 'returnDelivery', 'stageHistory', 'diagnostics.at', 'statusChangedAt').get()
     const todo = snap.docs.map((d) => ({ id: d.id, ref: d.ref, sr: d.data() })).filter((x) => needsTracking(x.sr))
     const stats = { withReturnTtn: snap.size, tracked: todo.length, checked: 0, received: 0, final: 0, written: 0, unchanged: 0, deferred: 0, errors: [] }
     const changes = []
@@ -151,9 +151,10 @@ export function registerReturnTracking(app, deps) {
         if (doc) stats.checked++
         const patch = trackingPatch(sr, doc, now())
         if (!patch) { stats.unchanged++; continue }
-        if (patch.returnTracking.final) stats.final++
-        if (patch.clientReceivedAt) stats.received++
-        changes.push({ id, code: patch.returnTracking.code, final: patch.returnTracking.final || null, clientReceivedAt: patch.clientReceivedAt || null, approx: patch.clientReceivedApprox ?? null })
+        const nd = patch.npDelivery
+        if (nd.final) stats.final++
+        if (nd.deliveredAt) stats.received++
+        changes.push({ id, code: nd.code, final: nd.final || null, deliveredAt: nd.deliveredAt || null, approx: nd.approx ?? null })
         if (dryRun) continue
         try {
           await ref.update(patch)

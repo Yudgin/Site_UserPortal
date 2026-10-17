@@ -1262,7 +1262,7 @@ if (process.env.BINOTEL_KEY && process.env.BINOTEL_SECRET) {
 registerBinotelWebhook(app, { adminDb, siteUrl: SITE_URL })
 // Синхронизация картотеки ремонтов из 1С (admin/scheduler): upsert в serviceRequests.
 registerOnecSync(app, { adminDb })
-// «Клієнт отримав кораблик» (clientReceivedAt) за статусом зворотної ТТН НП: POST /api/np/return-tracking/reconcile
+// «Клієнт отримав кораблик» прямим опитуванням НП (npDelivery — для isOpen): POST /api/np/return-tracking/reconcile
 // (Cloud Scheduler, x-admin-token = PAYMENTS_ADMIN_TOKEN; ?dryRun=1 — без запису).
 registerReturnTracking(app, { adminDb, np: npRequest })
 // Голосова надиктовка з застосунку сервісу: POST /api/ai/transcribe (staff, аудіо → текст; рушій у stt.js,

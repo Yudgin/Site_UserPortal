@@ -1,10 +1,10 @@
-// node --test: відмітка «клієнт отримав кораблик» за зворотною ТТН НП (returnTracking.js) і правило «відкрита»
-// приймача Binotel / голосового шлюзу (binotelWebhook.js isOpen) — без Firebase і мережі.
+// node --test: «клієнт отримав кораблик» за прямим опитуванням НП (returnTracking.js → npDelivery) і його місце в
+// задеплоєному правилі «відкрита» (binotelWebhook.js isOpen / npDeliveredMs) — без Firebase і мережі.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import express from 'express'
 import { needsTracking, parseNpDate, registerReturnTracking, trackingPatch } from './returnTracking.js'
-import { isOpen } from './binotelWebhook.js'
+import { isOpen, npDeliveredMs } from './binotelWebhook.js'
 
 const NOW = Date.parse('2026-10-18T10:00:00.000Z')
 const DAY = 86400000
@@ -22,96 +22,107 @@ test('parseNpDate: Kyiv local time → UTC (summer +3, winter +2), both NP forma
   assert.equal(parseNpDate('завтра'), null)
 })
 
-test('needsTracking: return TTN present, not cancelled, not yet received/final for this TTN', () => {
-  assert.equal(needsTracking({ returnTtn: '20450000000001' }), true)
+test('needsTracking: boat return TTN, not cancelled, delivery unknown from 1C / handover, no final for this TTN', () => {
+  const T1 = '20450000000001'
+  assert.equal(needsTracking({ returnTtn: T1 }), true)
   assert.equal(needsTracking({ returnTtn: '' }), false)
   assert.equal(needsTracking({ returnTtn: '0' }), false)
-  assert.equal(needsTracking({ returnTtn: '20450000000001', status: 'cancelled' }), false)
-  assert.equal(needsTracking({ returnTtn: '20450000000001', clientReceivedAt: daysAgo(1), clientReceivedTtn: '20450000000001' }), false)
-  // нова зворотна ТТН після отримання старої — опитуємо знову
-  assert.equal(needsTracking({ returnTtn: '20450000000002', clientReceivedAt: daysAgo(30), clientReceivedTtn: '20450000000001' }), true)
-  assert.equal(needsTracking({ returnTtn: '20450000000001', returnTracking: { ttn: '20450000000001', code: '102', final: 'refused' } }), false)
-  assert.equal(needsTracking({ returnTtn: '20450000000002', returnTracking: { ttn: '20450000000001', final: 'refused' } }), true)
+  assert.equal(needsTracking({ returnTtn: T1, status: 'cancelled' }), false)
+  assert.equal(needsTracking({ returnTtn: T1, npScenario: 'parts' }), false, 'parts parcel is not the boat')
+  // отримання вже відоме з 1С (returnDelivery) або людина відмітила «Видано клієнту»
+  assert.equal(needsTracking({ returnTtn: T1, returnDelivery: { ttn: null, shippedAt: daysAgo(5), deliveredAt: daysAgo(3) } }), false)
+  assert.equal(needsTracking({ returnTtn: T1, stage: 'handed_over', stageHistory: [{ stage: 'handed_over', at: daysAgo(1), by: 'm@x' }] }), false)
+  // 1С бачить лише відправку — опитуємо
+  assert.equal(needsTracking({ returnTtn: T1, returnDelivery: { ttn: null, shippedAt: daysAgo(5), deliveredAt: null } }), true)
+  assert.equal(needsTracking({ returnTtn: T1, npDelivery: { ttn: T1, code: '9', final: 'received', deliveredAt: daysAgo(1) } }), false)
+  // нова зворотна ТТН після фіналу старої — опитуємо знову
+  assert.equal(needsTracking({ returnTtn: '20450000000002', npDelivery: { ttn: T1, code: '102', final: 'refused' } }), true)
 })
 
-test('trackingPatch: received (9/10/11/106) → clientReceivedAt from RecipientDateTime', () => {
+test('trackingPatch: received (9/10/11/106) → deliveredAt from RecipientDateTime', () => {
   for (const code of ['9', '10', '11', '106']) {
     const p = trackingPatch({ returnTtn: '20450000000001' }, { Number: '20450000000001', StatusCode: code, Status: 'Відправлення отримано', RecipientDateTime: '17.10.2026 13:22:15' }, NOW)
-    assert.equal(p.clientReceivedAt, '2026-10-17T10:22:15.000Z', code)
-    assert.equal(p.clientReceivedApprox, false)
-    assert.equal(p.clientReceivedTtn, '20450000000001')
-    assert.equal(p.clientReceivedSource, 'np')
-    assert.equal(p.returnTracking.final, 'received')
+    assert.equal(p.npDelivery.deliveredAt, '2026-10-17T10:22:15.000Z', code)
+    assert.equal(p.npDelivery.approx, false)
+    assert.equal(p.npDelivery.ttn, '20450000000001')
+    assert.equal(p.npDelivery.final, 'received')
   }
 })
 
 test('trackingPatch: received without (or with future) date → now, approx', () => {
   const p = trackingPatch({ returnTtn: '20450000000001' }, { StatusCode: 9, Status: 'Відправлення отримано' }, NOW)
-  assert.equal(p.clientReceivedAt, iso(NOW))
-  assert.equal(p.clientReceivedApprox, true)
+  assert.equal(p.npDelivery.deliveredAt, iso(NOW))
+  assert.equal(p.npDelivery.approx, true)
   const f = trackingPatch({ returnTtn: '20450000000001' }, { StatusCode: '9', RecipientDateTime: '20.10.2026 10:00:00' }, NOW)
-  assert.equal(f.clientReceivedAt, iso(NOW))
-  assert.equal(f.clientReceivedApprox, true)
+  assert.equal(f.npDelivery.deliveredAt, iso(NOW))
+  assert.equal(f.npDelivery.approx, true)
 })
 
 test('trackingPatch: in transit — write only when the code changes', () => {
   const first = trackingPatch({ returnTtn: '20450000000001' }, { StatusCode: '5', Status: 'Прямує до міста' }, NOW)
-  assert.deepEqual(first, { returnTracking: { ttn: '20450000000001', code: '5', status: 'Прямує до міста', firstCheckedAt: iso(NOW), changedAt: iso(NOW) } })
-  const sr = { returnTtn: '20450000000001', returnTracking: first.returnTracking }
+  assert.deepEqual(first, { npDelivery: { ttn: '20450000000001', code: '5', status: 'Прямує до міста', firstCheckedAt: iso(NOW), changedAt: iso(NOW) } })
+  const sr = { returnTtn: '20450000000001', npDelivery: first.npDelivery }
   assert.equal(trackingPatch(sr, { StatusCode: '5', Status: 'Прямує до міста' }, NOW + 3600000), null)
   const moved = trackingPatch(sr, { StatusCode: '7', Status: 'Прибув на відділення' }, NOW + 7200000)
-  assert.equal(moved.returnTracking.code, '7')
-  assert.equal(moved.returnTracking.firstCheckedAt, iso(NOW), 'first check kept')
-  assert.equal(moved.returnTracking.changedAt, iso(NOW + 7200000))
-  assert.equal(moved.clientReceivedAt, undefined)
+  assert.equal(moved.npDelivery.code, '7')
+  assert.equal(moved.npDelivery.firstCheckedAt, iso(NOW), 'first check kept')
+  assert.equal(moved.npDelivery.changedAt, iso(NOW + 7200000))
+  assert.equal(moved.npDelivery.deliveredAt, undefined)
 })
 
 test('trackingPatch: refusal / deleted final at once; not found only after 3 days; stale after 45 days', () => {
-  assert.equal(trackingPatch({ returnTtn: '1' + '0'.repeat(13) }, { StatusCode: '103' }, NOW).returnTracking.final, 'refused')
-  assert.equal(trackingPatch({ returnTtn: '1' + '0'.repeat(13) }, { StatusCode: '2' }, NOW).returnTracking.final, 'deleted')
+  assert.equal(trackingPatch({ returnTtn: '1' + '0'.repeat(13) }, { StatusCode: '103' }, NOW).npDelivery.final, 'refused')
+  assert.equal(trackingPatch({ returnTtn: '1' + '0'.repeat(13) }, { StatusCode: '2' }, NOW).npDelivery.final, 'deleted')
   const nf = trackingPatch({ returnTtn: '20450000000001' }, { StatusCode: '3' }, NOW)
-  assert.equal(nf.returnTracking.final, undefined)
-  const nfLater = trackingPatch({ returnTtn: '20450000000001', returnTracking: nf.returnTracking }, { StatusCode: '3' }, NOW + 3 * DAY)
-  assert.equal(nfLater.returnTracking.final, 'not_found')
-  const old = { returnTtn: '20450000000001', returnTracking: { ttn: '20450000000001', code: '7', firstCheckedAt: daysAgo(45), changedAt: daysAgo(40) } }
-  assert.equal(trackingPatch(old, { StatusCode: '7' }, NOW).returnTracking.final, 'stale')
+  assert.equal(nf.npDelivery.final, undefined)
+  const nfLater = trackingPatch({ returnTtn: '20450000000001', npDelivery: nf.npDelivery }, { StatusCode: '3' }, NOW + 3 * DAY)
+  assert.equal(nfLater.npDelivery.final, 'not_found')
+  const old = { returnTtn: '20450000000001', npDelivery: { ttn: '20450000000001', code: '7', firstCheckedAt: daysAgo(45), changedAt: daysAgo(40) } }
+  assert.equal(trackingPatch(old, { StatusCode: '7' }, NOW).npDelivery.final, 'stale')
   // NP не повернула документ — без змін, поки не мине горизонт
-  assert.equal(trackingPatch({ ...old, returnTracking: { ...old.returnTracking, firstCheckedAt: daysAgo(2) } }, null, NOW), null)
+  assert.equal(trackingPatch({ ...old, npDelivery: { ...old.npDelivery, firstCheckedAt: daysAgo(2) } }, null, NOW), null)
 })
 
 test('trackingPatch: new return TTN restarts tracking (old state ignored)', () => {
-  const sr = { returnTtn: '20450000000002', returnTracking: { ttn: '20450000000001', code: '9', final: 'received', firstCheckedAt: daysAgo(60) } }
+  const sr = { returnTtn: '20450000000002', npDelivery: { ttn: '20450000000001', code: '9', final: 'received', deliveredAt: daysAgo(55), firstCheckedAt: daysAgo(60) } }
   const p = trackingPatch(sr, { StatusCode: '1' }, NOW)
-  assert.equal(p.returnTracking.ttn, '20450000000002')
-  assert.equal(p.returnTracking.firstCheckedAt, iso(NOW))
-  assert.equal(p.returnTracking.final, undefined)
+  assert.equal(p.npDelivery.ttn, '20450000000002')
+  assert.equal(p.npDelivery.firstCheckedAt, iso(NOW))
+  assert.equal(p.npDelivery.final, undefined)
 })
 
-// ---------- «відкрита» (isOpen) ----------
-const SR = (o) => ({ status: 'done', createdAt: daysAgo(60), ...o })
-test('isOpen: received → open 14 days after receipt, then closed (owner 2026-10-17)', () => {
-  assert.equal(isOpen(SR({ doneAt: daysAgo(30), clientReceivedAt: daysAgo(13) }), NOW), true)
-  assert.equal(isOpen(SR({ doneAt: daysAgo(30), clientReceivedAt: daysAgo(15) }), NOW), false)
-  // in_work (статус не встиг змінитись), але отримав 20 днів тому — завершена
-  assert.equal(isOpen(SR({ status: 'in_work', createdAt: daysAgo(40), clientReceivedAt: daysAgo(20) }), NOW), false)
-  // скасована — ніколи
-  assert.equal(isOpen(SR({ status: 'cancelled', clientReceivedAt: daysAgo(1) }), NOW), false)
+// ---------- «відкрита» (задеплоєне isOpen + npDelivery) ----------
+const T = '20450000000001'
+const shippedNp = (n) => ({ stage: 'shipped', at: daysAgo(n), by: 'np-ttn', note: `ТТН ${T}` })
+const SR = (o) => ({ status: 'done', createdAt: daysAgo(60), doneAt: daysAgo(25), returnTtn: T, stage: 'shipped', stageHistory: [shippedNp(25)], ...o })
+test('isOpen: portal TTN delivered by NP → open 14 days after delivery, then closed', () => {
+  assert.equal(isOpen(SR({ npDelivery: { ttn: T, code: '9', final: 'received', deliveredAt: daysAgo(13) } }), NOW), true)
+  assert.equal(isOpen(SR({ npDelivery: { ttn: T, code: '9', final: 'received', deliveredAt: daysAgo(15) } }), NOW), false)
+  // без npDelivery: відправлено 25 днів тому, отримання невідоме → transitMaxDays 21 → закрита
+  assert.equal(isOpen(SR({}), NOW), false)
+  // відправлено 10 днів тому, клієнт отримав 9 днів тому — відкрита (транзит теж дав би true; різниця — на 15-й день)
+  const fresh = SR({ doneAt: daysAgo(10), stageHistory: [shippedNp(10)], npDelivery: { ttn: T, code: '9', final: 'received', deliveredAt: daysAgo(9) } })
+  assert.equal(isOpen(fresh, NOW), true)
+  assert.equal(isOpen(fresh, NOW + 6 * DAY), false, 'delivered 15 days ago, though shipped only 16 days ago (transit rule would keep it open)')
+  assert.equal(isOpen(SR({ status: 'cancelled', npDelivery: { ttn: T, deliveredAt: daysAgo(1) } }), NOW), false)
 })
 
-test('isOpen: done long ago but the return parcel is still on its way / at the branch → open', () => {
-  const ttn = '20450000000001'
-  const sr = SR({ doneAt: daysAgo(20), returnTtn: ttn, stage: 'shipped', returnTracking: { ttn, code: '7', firstCheckedAt: daysAgo(19) } })
-  assert.equal(isOpen(sr, NOW), true)
-  // відмова/повернення (final) — далі колишнє правило: виконана 20 днів тому → закрита
-  assert.equal(isOpen({ ...sr, returnTracking: { ...sr.returnTracking, code: '103', final: 'refused' } }, NOW), false)
-  // стан стосується іншої (старої) ТТН — не рахується
-  assert.equal(isOpen({ ...sr, returnTtn: '20450000000009' }, NOW), false)
+test('npDeliveredMs: only for the current returnTtn and not superseded by a later shipment or work', () => {
+  const nd = { ttn: T, code: '9', final: 'received', deliveredAt: daysAgo(5) }
+  assert.equal(npDeliveredMs(SR({ npDelivery: nd })), NOW - 5 * DAY)
+  assert.equal(npDeliveredMs(SR({ npDelivery: nd, returnTtn: '20450000000009' })), 0, 'other TTN')
+  assert.equal(npDeliveredMs(SR({ npDelivery: { ...nd, deliveredAt: null } })), 0)
+  // гарантія: після отримання кораблик знову в роботі
+  assert.equal(npDeliveredMs(SR({ npDelivery: nd, stageHistory: [shippedNp(25), { stage: 'received', at: daysAgo(2), by: 'm@x' }] })), 0)
+  // нова відправка порталом після отримання
+  assert.equal(npDeliveredMs(SR({ npDelivery: nd, stageHistory: [shippedNp(25), shippedNp(1)] })), 0)
 })
 
-test('isOpen: without the new fields the old rule stays (doneGraceDays from last activity)', () => {
-  assert.equal(isOpen(SR({ doneAt: daysAgo(10) }), NOW), true)
-  assert.equal(isOpen(SR({ doneAt: daysAgo(16) }), NOW), false)
-  assert.equal(isOpen({ status: 'in_work', createdAt: daysAgo(100) }, NOW), true)
+test('isOpen: 1C delivery and handover still win when later than NP', () => {
+  const nd = { ttn: T, code: '9', final: 'received', deliveredAt: daysAgo(20) }
+  assert.equal(isOpen(SR({ npDelivery: nd }), NOW), false)
+  assert.equal(isOpen(SR({ npDelivery: nd, stageHistory: [shippedNp(25), { stage: 'handed_over', at: daysAgo(3), by: 'm@x' }] }), NOW), true)
+  assert.equal(isOpen(SR({ npDelivery: nd, returnDelivery: { ttn: null, shippedAt: daysAgo(24), deliveredAt: daysAgo(4) } }), NOW), true)
 })
 
 // ---------- маршрут reconcile ----------
@@ -167,7 +178,7 @@ const startApp = async ({ docs, np, token = 'adm-token' }) => {
 const DOCS = {
   'sr-got': { status: 'done', returnTtn: '20450000000001', clientPhone: '+380671234567' },
   'sr-way': { status: 'done', returnTtn: '20450000000002', clientPhone: '0501112233' },
-  'sr-done-before': { status: 'done', returnTtn: '20450000000003', clientReceivedAt: daysAgo(30), clientReceivedTtn: '20450000000003' },
+  'sr-1c-delivered': { status: 'done', returnTtn: '20450000000003', returnDelivery: { ttn: null, shippedAt: daysAgo(10), deliveredAt: daysAgo(8) } },
   'sr-cancel': { status: 'cancelled', returnTtn: '20450000000004' },
   'sr-none': { status: 'in_work', returnTtn: '' },
 }
@@ -191,10 +202,11 @@ test('reconcile: polls only what needs it, writes receipt and transit state, pas
     { DocumentNumber: '20450000000001', Phone: '380671234567' },
     { DocumentNumber: '20450000000002', Phone: '380501112233' },
   ])
-  assert.equal(a.db.data.serviceRequests['sr-got'].clientReceivedAt, '2026-10-17T10:22:15.000Z')
-  assert.equal(a.db.data.serviceRequests['sr-got'].returnTracking.final, 'received')
-  assert.equal(a.db.data.serviceRequests['sr-way'].returnTracking.code, '7')
-  assert.equal(a.db.data.serviceRequests['sr-way'].clientReceivedAt, undefined)
+  assert.equal(a.db.data.serviceRequests['sr-got'].npDelivery.deliveredAt, '2026-10-17T10:22:15.000Z')
+  assert.equal(a.db.data.serviceRequests['sr-got'].npDelivery.final, 'received')
+  assert.equal(a.db.data.serviceRequests['sr-way'].npDelivery.code, '7')
+  assert.equal(a.db.data.serviceRequests['sr-way'].npDelivery.deliveredAt, undefined)
+  assert.deepEqual(Object.keys(a.db.updates[0].v), ['npDelivery'], 'only npDelivery is written')
   assert.equal(a.db.data.system.returnTracking.runningSince, null)
   // другий прогін: отримана більше не опитується, у дорозі без зміни коду — без запису
   const before = a.db.updates.length
@@ -210,7 +222,7 @@ test('reconcile: dryRun shows changes without writing; bad token → 403; NP fai
   const dry = await a.run('?dryRun=1')
   assert.equal(dry.json.dryRun, true)
   assert.equal(dry.json.written, 0)
-  assert.deepEqual(dry.json.changes.find((c) => c.id === 'sr-got'), { id: 'sr-got', code: '9', final: 'received', clientReceivedAt: '2026-10-17T10:22:15.000Z', approx: false })
+  assert.deepEqual(dry.json.changes.find((c) => c.id === 'sr-got'), { id: 'sr-got', code: '9', final: 'received', deliveredAt: '2026-10-17T10:22:15.000Z', approx: false })
   assert.ok(!JSON.stringify(dry.json).includes('380671234567'), 'no phones in the answer')
   assert.equal(a.db.updates.length, 0)
   assert.equal((await a.run('', { 'x-admin-token': 'wrong' })).status, 403)

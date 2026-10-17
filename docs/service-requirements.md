@@ -1122,20 +1122,26 @@ SMS), запись в журнал `notifications` с `meta.source` (`voice-gate
 Телефона и текста в ответах нет. `/api/notify` событие `link` по-прежнему не принимает. Текст SMS — черновик на
 согласование: «Сторінка вашої заявки RunFerry: <посилання>» (2 сегмента).
 
-**«Клиент получил» (`server/returnTracking.js`).** Поля заявки: `clientReceivedAt` (ISO; `RecipientDateTime` НП, нет —
-время обнаружения и `clientReceivedApprox: true`), `clientReceivedTtn`, `clientReceivedSource: 'np'`, `returnTracking
-{ttn, code, status, firstCheckedAt, changedAt, final?}`. Не путать с этапом `stage: 'received'` («кораблик у нас»);
-`status` не меняется (он системный). `POST /api/np/return-tracking/reconcile` (Cloud Scheduler, `x-admin-token` =
-`PAYMENTS_ADMIN_TOKEN`; `?dryRun=1` — без записи) опрашивает `TrackingDocument.getStatusDocuments` по 100 ТТН с телефоном
-получателя: коды 9/10/11/106 → получено; 102/103/108 → отказ, 2 → удалена, 3 → не найдена (через 3 дня), 45 дней без
-получения → `stale` — дальше не опрашиваем. Пишет в заявку только при смене кода или финале.
+**«Клиент получил» — третий источник (`server/returnTracking.js`).** Правило «відкрита до получения + 14 дней» уже
+работает (§28.1, `isOpen()` в `server/binotelWebhook.js`, ревизия 00076-rxw): получение берётся из истории обратной ТТН
+в 1С (`returnDelivery.deliveredAt`, `onecSync`) и из этапа «Видано клієнту» (`handed_over`). 1С не видит накладных,
+созданных порталом и приложением (номер обратной ТТН в 1С почти всегда 0), и пропадёт после отключения 1С. Поэтому —
+прямой опрос Новой почты по `returnTtn` заявки: `POST /api/np/return-tracking/reconcile` (Cloud Scheduler,
+`x-admin-token` = `PAYMENTS_ADMIN_TOKEN`; `?dryRun=1` — без записи), `TrackingDocument.getStatusDocuments` по 100 ТТН с
+телефоном получателя. Опрашиваются только заявки, где получение ещё неизвестно (нет `currentDelivery().deliveredAt` и
+`handed_over`), не отменённые и не посылки запчастей/покупки. Отдельное поле (чтобы не спорить с ночной синхронизацией
+1С за `returnDelivery`): `npDelivery {ttn, code, status, firstCheckedAt, changedAt, deliveredAt?, approx?, final?}`;
+коды 9/10/11/106 → `deliveredAt` (`RecipientDateTime` НП, нет — время обнаружения и `approx: true`); 102/103/108 →
+отказ, 2 → удалена, 3 → не найдена (через 3 дня), 45 дней без получения → `stale` — дальше эту ТТН не опрашиваем.
+Пишет только при смене кода или финале. `status` и `stage` не меняет. Не путать с этапом `stage: 'received'` («кораблик
+у нас»).
 
-**«Відкрита» (`server/binotelWebhook.js isOpen`, общий для приёмника Binotel и шлюза).** Зворотная ТТН ещё в дороге или
-на отделении (`returnTracking` той же ТТН без `final`) → открыта, как невыполненная; есть `clientReceivedAt` → открыта
-`doneGraceDays` (14) от получения или более позднего настоящего действия; без этих полей — прежнее правило.
-`clientReceivedAt` входит в `lastActivityMs`.
+**«Відкрита».** В `isOpen()` добавлен источник `npDeliveredMs()` (экспорт): `npDelivery.deliveredAt` для текущей
+`returnTtn`, если после него не было новой отправки или возврата в работу (как у `currentDelivery`). Получение =
+наиболее позднее из 1С, НП и «Видано клієнту». То же — в описании карточки Binotel («Клієнт отримав dd.mm»). Остальное
+правило не менялось.
 
-**Статус.** Код и тесты (`server/requestLink.test.js` 11, `server/returnTracking.test.js` 12; всего 111/111) — ветка
-`claude/resend-link-received` от `origin/feat/calc`, НЕ задеплоено. До деплоя (только с «да» владельца): секрет
+**Статус.** Код и тесты (`server/requestLink.test.js` 11, `server/returnTracking.test.js` 12; всего по серверу 126/126) —
+ветка `claude/resend-link-received`, в неё слита задеплоенная `origin/deploy/backend-2026-10-17` (00077-77n), НЕ задеплоено. До деплоя (только с «да» владельца): секрет
 `voice-gateway-token` в Secret Manager → env `VOICE_GATEWAY_TOKEN`; задание Cloud Scheduler на reconcile; согласовать
 текст SMS. Живых отправок и вызовов НП не было.

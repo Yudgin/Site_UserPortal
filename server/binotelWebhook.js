@@ -320,12 +320,23 @@ export function currentDelivery(sr) {
   if (shippedEventMs(sr, true) > anchor || reopenEventMs(sr) > anchor) return null
   return rd
 }
+// Третє джерело отримання — пряме опитування НП (returnTracking.js → npDelivery): для зворотних ТТН, яких 1С не знає
+// (створені порталом чи застосунком; у 1С номер майже завжди 0) і після вимкнення 1С. Лише для поточної returnTtn і
+// якщо після отримання не було нової відправки чи повернення в роботу — як у currentDelivery.
+export function npDeliveredMs(sr) {
+  const nd = sr?.npDelivery
+  const at = msOf(nd?.deliveredAt)
+  const ttn = normTtnDigits(nd?.ttn)
+  if (!at || !ttn || ttn !== normTtnDigits(sr.returnTtn)) return 0
+  if (shippedEventMs(sr, true) > at || reopenEventMs(sr) > at) return 0
+  return at
+}
 export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   if (!sr || sr.status === 'cancelled') return false
   const days = (t) => (nowMs - t) / DAY_MS
   const rd = currentDelivery(sr)
-  // Отримання: перше «отримано» останньої посилки з 1С або відмітка «Видано клієнту» — що пізніше.
-  const deliveredMs = Math.max(msOf(rd?.deliveredAt), handedOverMs(sr))
+  // Отримання: перше «отримано» останньої посилки з 1С, пряме опитування НП або відмітка «Видано клієнту» — що пізніше.
+  const deliveredMs = Math.max(msOf(rd?.deliveredAt), npDeliveredMs(sr), handedOverMs(sr))
   if (deliveredMs) return days(deliveredMs) <= cfg.doneGraceDays
   const reopenMs = reopenEventMs(sr)
   // Дата відправки — і з перекритої доставки: вона відома, просто старша за подальшу роботу (четверте коло ревʼю).
@@ -394,7 +405,7 @@ export function buildCustomerData({ phone, requests, orders, profile, siteUrl, a
     // Закритий ремонт показуємо статусом («Виконано»/«Скасовано»), а не етапом: синхронізація 1С поставила
     // 'received' сотням виконаних ремонтів, і «Отримано» читалося б як «кораблик у нас». Виняток — «Відправлено».
     const alive = main.status !== 'cancelled'
-    const deliveredMs = alive ? msOf(currentDelivery(main)?.deliveredAt) : 0
+    const deliveredMs = alive ? Math.max(msOf(currentDelivery(main)?.deliveredAt), npDeliveredMs(main)) : 0
     const handedMs = alive ? handedOverMs(main) : 0
     const state = handedMs && handedMs >= deliveredMs
       ? `Видано клієнту ${kyivDayMonth(new Date(handedMs).toISOString(), nowMs)}`
