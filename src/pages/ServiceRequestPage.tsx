@@ -332,6 +332,13 @@ export default function ServiceRequestPage() {
               Наступний етап: {REPAIR_STAGE_LABELS[nextRepairStage(req.stage)!]}
             </Button>
           )}
+          {/* Самовивіз: кораблик віддали в руки без ТТН. Від «Видано клієнту» рахуються 14 днів відкритої заявки
+              (правило власника 2026-10-17). Після «Відправлено» ту саму відмітку дає «Наступний етап». */}
+          {(req.stage === 'repaired' || req.stage === 'packed') && (
+            <Button variant="outlined" disabled={saving} onClick={() => applyStage('handed_over', 'самовивіз')}>
+              {REPAIR_STAGE_LABELS.handed_over} (самовивіз)
+            </Button>
+          )}
           <TextField select size="small" label="Інший етап" value={stagePick} sx={{ minWidth: 200 }} disabled={saving}
             onChange={(e) => {
               const s = e.target.value as RepairStage
