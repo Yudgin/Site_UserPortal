@@ -12,7 +12,7 @@ import { isOpen, clientCategory, normalizeRouting } from '../binotelWebhook.js'
 
 const WRITE = process.argv.includes('--write')
 const db = getFirestore(initializeApp({ credential: applicationDefault(), projectId: process.env.FIREBASE_PROJECT_ID || 'droidmaps-runferry' }))
-const same = (a, b) => !!a && !!b && a.ttn === b.ttn && (a.shippedAt || null) === (b.shippedAt || null) && (a.deliveredAt || null) === (b.deliveredAt || null)
+const same = (a, b) => !!a && !!b && (a.ttn || null) === (b.ttn || null) && (a.shippedAt || null) === (b.shippedAt || null) && (a.deliveredAt || null) === (b.deliveredAt || null)
 
 const docs = (await db.collection('serviceRequests').get()).docs
 const routingSnap = await db.collection('system').doc('binotelRouting').get()

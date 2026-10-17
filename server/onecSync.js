@@ -99,8 +99,14 @@ const inferStatus = (raw) => {
 
 // Доставка зворотної ТТН клієнту за історією НП з 1С (raw.returnTtnHistory: [{status, timestamp}], timestamp —
 // «2025-10-09T10:07:04» за Києвом без зони). Для правила «заявка відкрита, доки клієнт не отримав кораблик, і ще
-// 14 днів після» (власник 2026-10-17; читач — isOpen у binotelWebhook.js). shippedAt — найраніша подія історії,
-// deliveredAt — перше «отримано/вручено», але НЕ «отримано відправником» (повернення нам) і не відмова.
+// 14 днів після» (власник 2026-10-17; читач — isOpen у binotelWebhook.js). Особливості даних 1С (ревʼю 2026-10-17):
+//   - номер зворотної ТТН у 1С майже завжди 0 (95 з 109 історій), тож історію беремо й без номера;
+//   - історія накопичує кілька посилок: новий рядок зі status '' (або «Створена») — введено нову ТТН; беремо ОСТАННІЙ
+//     цикл: shippedAt — його початок, deliveredAt — ПЕРШЕ «отримано/вручено» в ньому (1С дописує «отримано» на кожному
+//     опитуванні, тож пізніші — не подія); мітки часу — час опитування в 1С, тобто оцінка «не раніше»;
+//   - «отримано відправником» (повернення нам) і відмова — не отримання клієнтом;
+//   - буває побайтна копія вхідної історії — таку відкидаємо; події до приїзду кораблика до нас (перше «отримано» у
+//     вхідній історії) не беремо.
 const kyivLocalToIso = (s) => {
   const str = String(s || '').trim()
   if (!str) return null
@@ -109,21 +115,33 @@ const kyivLocalToIso = (s) => {
   if (!m) return null
   const guess = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0))
   if (Number.isNaN(guess)) return null
-  return new Date(guess - kyivOffsetMin(new Date(guess)) * 60000).toISOString()
+  // Два проходи: зсув беремо в справжній момент, інакше в ночі переходу на літній/зимовий час помилка на годину.
+  const off1 = kyivOffsetMin(new Date(guess))
+  const off2 = kyivOffsetMin(new Date(guess - off1 * 60000))
+  return new Date(guess - off2 * 60000).toISOString()
 }
 const DELIVERED_RE = /отримано|вручен/i
 const NOT_TO_CLIENT_RE = /відправник|відмов|поверн/i
+const CYCLE_START_RE = /^\s*$|створен/i
+const isDelivered = (status) => DELIVERED_RE.test(status) && !NOT_TO_CLIENT_RE.test(status)
+const events = (hist) => (Array.isArray(hist) ? hist : [])
+  .map((e) => ({ s: String(e?.status ?? ''), t: kyivLocalToIso(e?.timestamp) }))
+  .filter((e) => e.t)
+  .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0))
 export const returnDeliveryOf = (raw) => {
-  const ttn = normTtn(raw?.returnTtn)
-  if (!ttn) return null
+  const ttn = normTtn(raw?.returnTtn) || null
   const hist = Array.isArray(raw?.returnTtnHistory) ? raw.returnTtnHistory : []
-  const times = hist.map((e) => kyivLocalToIso(e?.timestamp)).filter(Boolean).sort()
-  const delivered = hist
-    .filter((e) => DELIVERED_RE.test(String(e?.status || '')) && !NOT_TO_CLIENT_RE.test(String(e?.status || '')))
-    .map((e) => kyivLocalToIso(e?.timestamp)).filter(Boolean).sort()[0] || null
-  return { ttn, shippedAt: times[0] || null, deliveredAt: delivered }
+  const incoming = Array.isArray(raw?.shipment?.statusHistory) ? raw.shipment.statusHistory : []
+  const copyOfIncoming = hist.length > 0 && incoming.length > 0 && JSON.stringify(hist) === JSON.stringify(incoming)
+  const arrivedAt = events(incoming).find((e) => DELIVERED_RE.test(e.s))?.t || null
+  const ev = (copyOfIncoming ? [] : events(hist)).filter((e) => !arrivedAt || e.t >= arrivedAt)
+  if (!ev.length) return ttn ? { ttn, shippedAt: null, deliveredAt: null } : null
+  let start = 0
+  ev.forEach((e, i) => { if (CYCLE_START_RE.test(e.s)) start = i })
+  const cycle = ev.slice(start)
+  return { ttn, shippedAt: cycle[0].t, deliveredAt: cycle.find((e) => isDelivered(e.s))?.t || null }
 }
-const sameDelivery = (a, b) => !!a && !!b && a.ttn === b.ttn && (a.shippedAt || null) === (b.shippedAt || null)
+const sameDelivery = (a, b) => !!a && !!b && (a.ttn || null) === (b.ttn || null) && (a.shippedAt || null) === (b.shippedAt || null)
   && (a.deliveredAt || null) === (b.deliveredAt || null)
 
 // Фізичний етап ремонту (serviceRequests.stage) за даними 1С — лише те, що видно по ТТН:

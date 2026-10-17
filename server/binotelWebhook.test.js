@@ -120,8 +120,10 @@ test('isOpen: вік за createdAt/справжніми діями, не за u
   assert.equal(isOpen(SR({ createdAt: daysAgo(180) }), NOW), true)
   assert.equal(isOpen(SR({ createdAt: daysAgo(181) }), NOW), false)
   // правило власника 2026-10-17: відкрита, доки клієнт не отримав кораблик, і ще 14 днів після
-  assert.equal(isOpen(SR({ status: 'done', doneAt: daysAgo(15), createdAt: daysAgo(40) }), NOW), true) // оплачено, ще не відправлено — у нас
-  assert.equal(isOpen(SR({ status: 'done', paidAt: daysAgo(100), createdAt: daysAgo(120) }), NOW), true)
+  // виконана без даних про відправку (оплата/хаб без ТТН, самовивіз): ≤ 21 день від завершення (бриф власника)
+  assert.equal(isOpen(SR({ status: 'done', doneAt: daysAgo(15), createdAt: daysAgo(40) }), NOW), true)
+  assert.equal(isOpen(SR({ status: 'done', paidAt: daysAgo(21), createdAt: daysAgo(120) }), NOW), true)
+  assert.equal(isOpen(SR({ status: 'done', paidAt: daysAgo(22), createdAt: daysAgo(120) }), NOW), false)
   // статус 'done' від старого імпорту 1С без ТТН і без часу — давно завершений: вікно 21 день від останньої дії
   assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(21) }), NOW), true)
   assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(22) }), NOW), false)
@@ -149,7 +151,7 @@ test('clientCategory: S2 відкрита / S1 справжня історія (
   assert.equal(clientCategory(null, NOW), null)
   assert.equal(clientCategory({ requests: [SR()] }, NOW), 'openRequest')
   assert.equal(clientCategory({ requests: [SR({ status: 'done', returnTtn: '2045', createdAt: daysAgo(30) })] }, NOW), 'knownClient')
-  assert.equal(clientCategory({ requests: [SR({ status: 'done', doneAt: daysAgo(30), createdAt: daysAgo(50) })] }, NOW), 'openRequest') // оплачено, кораблик у нас
+  assert.equal(clientCategory({ requests: [SR({ status: 'done', doneAt: daysAgo(10), createdAt: daysAgo(50) })] }, NOW), 'openRequest')
   assert.equal(clientCategory({ requests: [SR({ status: 'done', createdAt: daysAgo(30) })] }, NOW), 'knownClient') // старий імпорт
   assert.equal(clientCategory({ requests: [SR({ status: 'new', createdAt: daysAgo(400) })] }, NOW), 'knownClient')
   assert.equal(clientCategory({ requests: [SR({ status: 'cancelled', waybillNumber: '2045' })] }, NOW), 'knownClient')
@@ -558,4 +560,38 @@ test('правило власника: отримання клієнтом з re
   // скасована з датою доставки — все одно закрита і без «отримав»
   const c = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'cancelled', returnDelivery: { ttn: '1', deliveredAt: daysAgo(1) }, createdAt: daysAgo(5) })] })
   assert.ok(c.description.startsWith('Останній ремонт №1234 · Скасовано'), c.description)
+})
+
+test('ревʼю правила: returnDelivery перекривається новішою подією, іншим номером ТТН; посилка запчастин — не повернення', () => {
+  const delivered40 = { ttn: '2045', shippedAt: daysAgo(43), deliveredAt: daysAgo(40) }
+  // гарантійне повторне відкриття: майстер поставив 'received' 2 дні тому → кораблик у нас → відкрита
+  const reopened = SR({ status: 'in_work', stage: 'received', returnTtn: '2045', returnDelivery: delivered40, createdAt: daysAgo(60),
+    statusChangedAt: daysAgo(2), stageHistory: [{ stage: 'received', at: daysAgo(2), by: 'master@x' }] })
+  assert.equal(isOpen(reopened, NOW), true)
+  // нова відправка з порталу (np-ttn 1 день тому, інший номер) при старій доставці з 1С → у дорозі → відкрита
+  const reshipped = SR({ status: 'done', stage: 'shipped', returnTtn: '9999', returnDelivery: delivered40, createdAt: daysAgo(60),
+    stageHistory: [{ stage: 'shipped', at: daysAgo(1), by: 'np-ttn', note: 'ТТН 9999' }] })
+  assert.equal(isOpen(reshipped, NOW), true)
+  // без новіших подій стара доставка закриває
+  assert.equal(isOpen(SR({ status: 'done', returnTtn: '2045', returnDelivery: delivered40, createdAt: daysAgo(60) }), NOW), false)
+  // номер у 1С = 0 (null у returnDelivery) — не порівнюємо, доставку беремо
+  assert.equal(isOpen(SR({ status: 'new', stage: 'received', returnDelivery: { ttn: null, shippedAt: daysAgo(8), deliveredAt: daysAgo(7) }, createdAt: daysAgo(25),
+    stageHistory: [{ stage: 'received', at: daysAgo(20), by: '1c-sync' }] }), NOW), true)
+  assert.equal(isOpen(SR({ status: 'new', stage: 'received', returnDelivery: { ttn: null, shippedAt: daysAgo(17), deliveredAt: daysAgo(15) }, createdAt: daysAgo(25),
+    stageHistory: [{ stage: 'received', at: daysAgo(20), by: '1c-sync' }] }), NOW), false)
+  // посилка в дорозі за історією 1С (без отримання) → 21 день від відправки
+  assert.equal(isOpen(SR({ status: 'new', returnDelivery: { ttn: null, shippedAt: daysAgo(5), deliveredAt: null }, createdAt: daysAgo(300) }), NOW), true)
+  // запчастини (npScenario parts) — етап 'shipped' не закриває ремонт у роботі
+  assert.equal(isOpen(SR({ status: 'in_work', stage: 'shipped', npScenario: 'parts', returnTtn: '7', createdAt: daysAgo(40),
+    stageHistory: [{ stage: 'shipped', at: daysAgo(30), by: 'np-ttn' }] }), NOW), true)
+})
+
+test('ревʼю правила: «Клієнт отримав» — дата за Києвом, рік якщо не поточний; перекрита доставка — без підпису', () => {
+  const night = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'done', returnDelivery: { ttn: null, shippedAt: '2026-10-08T09:00:00Z', deliveredAt: '2026-10-10T21:30:00Z' }, createdAt: daysAgo(20) })] })
+  assert.ok(night.description.includes('Клієнт отримав 11.10'), night.description) // 00:30 11.10 за Києвом
+  const old = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'done', returnDelivery: { ttn: null, shippedAt: '2025-07-20T09:00:00Z', deliveredAt: '2025-07-22T09:00:00Z' }, createdAt: daysAgo(400) })] })
+  assert.ok(old.description.includes('Клієнт отримав 22.07.2025'), old.description)
+  const reopened = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'in_work', stage: 'received', returnDelivery: { ttn: null, deliveredAt: daysAgo(40) },
+    createdAt: daysAgo(60), stageHistory: [{ stage: 'received', at: daysAgo(2), by: 'master@x' }] })] })
+  assert.ok(!reopened.description.includes('отримав'), reopened.description)
 })
