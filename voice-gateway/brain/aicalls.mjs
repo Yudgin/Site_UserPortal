@@ -1,11 +1,16 @@
 // Розмова з ШІ — у конвеєр дзвінків порталу: serviceRequests/{srId}/calls/ai-<generalCallID> (kind 'ai'), поруч із
-// дзвінками originate (server/binotelCalls.js, контракт runferry-briefs/telephony/call-bridge-contract-2026-10-15.md).
-// Пишемо лише коли заявку знайдено за номером і VG_AI_SAVE=firestore (формат погоджується з сесією «Соединение
-// клиента с сотрудником, транскрипция, резюме»). Розшифровка й підсумок уже готові (зі шлюзу) — status 'summarized',
-// nextCheckAt null: конвеєр їх не обробляє. firebase-admin — із server/node_modules, креди ADC (як lookup.mjs).
+// дзвінками originate (server/binotelCalls.js, контракт runferry-briefs/telephony/call-bridge-contract-2026-10-15.md),
+// і картка callEvents/ai-<gcid> для операторської дошки. Формат погоджено з сесією «Соединение клиента с сотрудником,
+// транскрипция, резюме» 2026-10-17: розшифровка й підсумок уже готові (зі шлюзу); є generalCallID — status 'finished',
+// recordingOnly: true, nextCheckAt = зараз: конвеєр лише забирає запис Binotel (кнопка «Прослухати») і закриває документ
+// як summarized, не чіпаючи transcript/summary; немає GCID — одразу 'summarized'. Поля блокування (lockUntil, lockToken,
+// attempts) пише лише конвеєр. Репліки: speaker 'client' | 'ai'. Документ дзвінка — лише коли заявку знайдено; дзвінків
+// без заявки поки не пишемо (окрема колекція задач на перезвон — домовленість із сесією «Анализ: свои SIP-клиенты…»).
+// Лише з VG_AI_SAVE=firestore. firebase-admin — із server/node_modules, креди ADC (як lookup.mjs).
 import crypto from 'node:crypto'
 import { createRequire } from 'node:module'
 import { summaryText } from './aiprompt.mjs'
+import { strictPhone } from './callbacks.mjs'
 
 function openFirestore(projectId) {
   const req = createRequire(new URL('../../server/package.json', import.meta.url))
@@ -15,7 +20,11 @@ function openFirestore(projectId) {
   return getFirestore(app)
 }
 
-const SPEAKER_UK = { client: 'Клієнт', ai: 'ШІ-помічник' }
+const AI_NAME = 'ШІ-помічник' // українською «ШІ» (штучний інтелект), не «ІІ»
+const SPEAKER_UK = { client: 'Клієнт', ai: AI_NAME }
+const EVENT_SUMMARY_MAX = 300
+// Розмова з ШІ справді була (а не клієнт поклав у перші секунди): так вирішуємо, чи потрібна картка на дошці
+export const aiTalked = (entry) => (entry.ai?.sessions || []).some((x) => (x.durationMs || 0) >= 8000 || (x.toolCalls || []).length > 0)
 const OUTCOME_AI = { ai_noted: 'noted', ai_answered: 'ended', ai_client_hangup: 'client_hangup', connected: 'transferred', busy_callback: 'failed' }
 
 // Документ дзвінка з журнального запису шлюзу (entry) і розшифровки (entry.aiTranscript). Чиста функція — для тестів.
@@ -40,7 +49,9 @@ export function buildAiCallDoc({ entry, transcript, sr = null, now = new Date() 
       serviceCenterId: sr?.serviceCenterId || null,
       clientPhone: sr?.clientPhone || null,
       clientName: sr?.clientName || null,
-      status: 'summarized',
+      // є GCID — конвеєр забере запис Binotel і сам закриє документ як summarized; немає — запису не буде
+      status: entry.gcid ? 'finished' : 'summarized',
+      recordingOnly: !!entry.gcid,
       statusAt: nowIso,
       createdAt: startedAt,
       startedAt,
@@ -73,11 +84,30 @@ export function buildAiCallDoc({ entry, transcript, sr = null, now = new Date() 
       recordingStatus: '',
       recording: null,
       error: null,
-      nextCheckAt: null,
-      lockUntil: null,
-      attempts: 0,
+      nextCheckAt: entry.gcid ? nowIso : null,
       updatedAt: nowIso,
     },
+  }
+}
+
+// Картка для операторської дошки (callEvents/ai-<gcid>) — у тій самій формі, що дзеркало originate
+export function buildAiCallEvent({ entry, transcript, callId, sr = null, now = new Date() }) {
+  const nowIso = now.toISOString()
+  const summary = summaryText({ note: transcript?.note || null, transferred: entry.outcome === 'connected', callbackStored: !!entry.callback?.stored }).replace(/\n/g, ' ')
+  return {
+    callId,
+    sourceCallId: entry.gcid || null,
+    source: 'voice-gateway',
+    kind: 'ai',
+    phone: strictPhone(entry.number) || sr?.clientPhone || null,
+    clientName: sr?.clientName || null,
+    employee: AI_NAME,
+    serviceRequestId: entry.serviceRequestId || null,
+    direction: 'inbound',
+    at: entry.startedAt,
+    lastType: 'call.ai',
+    updatedAt: nowIso,
+    summary: summary.length > EVENT_SUMMARY_MAX ? `${summary.slice(0, EVENT_SUMMARY_MAX - 1)}…` : summary,
   }
 }
 
@@ -85,19 +115,30 @@ export function makeAiCallStore({ projectId = 'droidmaps-runferry', db = null, l
   let adminDb = db
   const fs = () => (adminDb = adminDb || openFirestore(projectId))
   return {
-    // → {path} | {skipped}
+    // → {path?, event?, skipped?}: документ дзвінка — якщо заявку знайдено; картка дошки — якщо розмова з ШІ була
     async save(entry) {
       const transcript = entry.aiTranscript
       if (!transcript) return { skipped: 'no_transcript' }
-      if (!entry.serviceRequestId) return { skipped: 'no_request' }
       const d = fs()
-      const srRef = d.collection('serviceRequests').doc(entry.serviceRequestId)
-      const snap = await srRef.get()
-      if (!snap.exists) return { skipped: 'request_missing' }
-      const { callId, doc } = buildAiCallDoc({ entry, transcript, sr: snap.data() })
-      await srRef.collection('calls').doc(callId).set(doc, { merge: true })
-      log(`ИИ: разговор записан в заявку (serviceRequests/${entry.serviceRequestId}/calls/${callId})`)
-      return { path: `serviceRequests/${entry.serviceRequestId}/calls/${callId}` }
+      let sr = null
+      let srRef = null
+      if (entry.serviceRequestId) {
+        srRef = d.collection('serviceRequests').doc(entry.serviceRequestId)
+        const snap = await srRef.get()
+        sr = snap.exists ? snap.data() : null
+      }
+      const { callId, doc } = buildAiCallDoc({ entry, transcript, sr })
+      const out = {}
+      if (sr) {
+        await srRef.collection('calls').doc(callId).set(doc, { merge: true })
+        out.path = `serviceRequests/${entry.serviceRequestId}/calls/${callId}`
+        log(`ИИ: разговор записан в заявку (${out.path})`)
+      } else out.skipped = entry.serviceRequestId ? 'request_missing' : 'no_request'
+      if (aiTalked(entry)) {
+        await d.collection('callEvents').doc(callId).set(buildAiCallEvent({ entry, transcript, callId, sr }), { merge: true })
+        out.event = `callEvents/${callId}`
+      }
+      return out
     },
   }
 }

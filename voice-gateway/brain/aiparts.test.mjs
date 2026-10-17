@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { parseHours, inHours, hoursText } from './hours.mjs'
 import { buildInstructions, FIRST_MESSAGES, TOOL_DEFS, requestStatusFor, summaryText } from './aiprompt.mjs'
-import { buildAiCallDoc } from './aicalls.mjs'
+import { buildAiCallDoc, buildAiCallEvent, aiTalked, makeAiCallStore } from './aicalls.mjs'
 import { saveAiTranscript, pruneGatewayData } from './storage.mjs'
 import { toolConfig, agentBody } from './ai-setup-elevenlabs.mjs'
 
@@ -71,12 +71,25 @@ const ENTRY = {
 }
 const TRANSCRIPT = { kind: 'busy', note: { question: 'Де кораблик?', topic: 'repair', urgent: false, callback: true }, turns: [{ speaker: 'ai', start: 26.1, end: 30, text: 'Вітаю!' }, { speaker: 'client', start: 31, end: 33, text: 'Де мій кораблик?' }], providers: ['elevenlabs/elevenlabs-agents/claude-sonnet-5-5'], costUsd: 0.08 }
 
-test('документ дзвінка kind ai: callId з GCID, summarized без черги конвеєра, розшифровка з підписами, підсумок, без запису', () => {
+test('документ дзвінка kind ai (формат конвеєра 17.10): є GCID — finished + recordingOnly + nextCheckAt зараз, без полів блокування; розшифровка з підписами, підсумок', () => {
   const { callId, doc } = buildAiCallDoc({ entry: ENTRY, transcript: TRANSCRIPT, sr: { clientPhone: '+380500000001', clientName: 'Іван', serviceCenterId: 'c1' }, now: new Date('2026-10-16T10:01:31Z') })
   assert.equal(callId, 'ai-6929148313')
+  assert.equal(doc.id, callId)
   assert.equal(doc.kind, 'ai')
-  assert.equal(doc.status, 'summarized')
-  assert.equal(doc.nextCheckAt, null)
+  assert.equal(doc.provider, 'voice-gateway')
+  assert.equal(doc.status, 'finished')
+  assert.equal(doc.recordingOnly, true)
+  assert.equal(doc.nextCheckAt, '2026-10-16T10:01:31.000Z')
+  assert.equal(doc.generalCallID, '6929148313')
+  assert.equal(doc.finishedAt, '2026-10-16T10:01:30.000Z')
+  for (const k of ['lockUntil', 'lockToken', 'attempts']) assert.ok(!(k in doc), `поле ${k} пише лише конвеєр`)
+  assert.deepEqual([...new Set(doc.transcript.turns.map((t) => t.speaker))].sort(), ['ai', 'client'])
+  // без GCID запису не буде — одразу summarized
+  const noGcid = buildAiCallDoc({ entry: { ...ENTRY, gcid: null }, transcript: TRANSCRIPT, now: new Date('2026-10-16T10:01:31Z') })
+  assert.match(noGcid.callId, /^ai-[0-9a-z]+-[0-9a-f]{4}$/)
+  assert.equal(noGcid.doc.status, 'summarized')
+  assert.equal(noGcid.doc.recordingOnly, false)
+  assert.equal(noGcid.doc.nextCheckAt, null)
   assert.equal(doc.direction, 'inbound')
   assert.equal(doc.answeredAt, '2026-10-16T10:00:26.050Z')
   assert.equal(doc.durationSec, 90)
@@ -88,6 +101,38 @@ test('документ дзвінка kind ai: callId з GCID, summarized без
   assert.equal(doc.cost.aiUsd, 0.08)
   assert.equal(doc.recording, null)
   assert.equal(doc.serviceCenterId, 'c1')
+})
+
+test('картка дошки callEvents/ai-<gcid>: форма дзеркала originate, ШІ-помічник, підсумок ≤ 300; лише коли розмова з ШІ була; save() пише документ і картку', async () => {
+  const ev = buildAiCallEvent({ entry: { ...ENTRY, number: '+380500000001' }, transcript: TRANSCRIPT, callId: 'ai-6929148313', sr: { clientName: 'Іван' }, now: new Date('2026-10-16T10:01:31Z') })
+  assert.deepEqual(Object.keys(ev).sort(), ['at', 'callId', 'clientName', 'direction', 'employee', 'kind', 'lastType', 'phone', 'serviceRequestId', 'source', 'sourceCallId', 'summary', 'updatedAt'])
+  assert.equal(ev.employee, 'ШІ-помічник')
+  assert.equal(ev.lastType, 'call.ai')
+  assert.equal(ev.phone, '+380500000001')
+  assert.ok(ev.summary.length <= 300 && /^Суть: Де кораблик\?/.test(ev.summary))
+  const long = buildAiCallEvent({ entry: ENTRY, transcript: { note: { question: 'а'.repeat(500), callback: true } }, callId: 'x' })
+  assert.equal(long.summary.length, 300)
+  assert.equal(aiTalked(ENTRY), true)
+  assert.equal(aiTalked({ ai: { sessions: [{ durationMs: 3000, toolCalls: [] }] } }), false, 'поклав у перші секунди — картки немає')
+  // підроблений Firestore: заявка є → документ і картка; заявки немає → лише картка
+  const writes = []
+  const fakeDb = {
+    collection: (c) => ({
+      doc: (id) => ({
+        get: async () => ({ exists: id === 'sr1', data: () => ({ clientPhone: '+380500000001', clientName: 'Іван', serviceCenterId: 'c1' }) }),
+        set: async (d, o) => { writes.push([`${c}/${id}`, d.kind, o]) },
+        collection: (sub) => ({ doc: (sid) => ({ set: async (d, o) => { writes.push([`${c}/${id}/${sub}/${sid}`, d.kind, o]) } }) }),
+      }),
+    }),
+  }
+  const store = makeAiCallStore({ db: fakeDb })
+  const r1 = await store.save({ ...ENTRY, number: '+380500000001', aiTranscript: TRANSCRIPT })
+  assert.deepEqual(r1, { path: 'serviceRequests/sr1/calls/ai-6929148313', event: 'callEvents/ai-6929148313' })
+  const r2 = await store.save({ ...ENTRY, serviceRequestId: null, aiTranscript: TRANSCRIPT })
+  assert.deepEqual(r2, { skipped: 'no_request', event: 'callEvents/ai-6929148313' })
+  assert.deepEqual(writes.map((w) => w[0]), ['serviceRequests/sr1/calls/ai-6929148313', 'callEvents/ai-6929148313', 'callEvents/ai-6929148313'])
+  assert.ok(writes.every((w) => w[2]?.merge === true))
+  assert.deepEqual(await store.save({ ...ENTRY }), { skipped: 'no_transcript' })
 })
 
 test('файл розшифровки: <data>/ai/<дата>/<gcid>-<4 цифри>.json, 0600 у теці 0700, не перезаписує; старі прибираються', () => {
