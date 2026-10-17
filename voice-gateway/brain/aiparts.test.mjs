@@ -35,7 +35,7 @@ test('інструкції: українська, заборони приват�
     assert.match(FIRST_MESSAGES[k], /штучний інтелект/)
     assert.match(FIRST_MESSAGES[k], /записується/)
   }
-  assert.match(FIRST_MESSAGES.transfer_failed, /менеджер передзвонить/)
+  assert.match(FIRST_MESSAGES.transfer_failed, /менеджер (вам )?передзвонить/)
   const a = buildInstructions({ kind: 'busy', transferAllowed: true, category: 'openRequest' })
   assert.match(a, /завжди відповідай українською/)
   assert.match(a, /transfer_to_manager/)
