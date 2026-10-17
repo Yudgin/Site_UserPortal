@@ -282,12 +282,17 @@ const shippedEventMs = (sr, skip1c = false) => Math.max(0, ...stageEvents(sr)
 // Робота з корабликом (він у нас): справжній етап, крім 'shipped', діагностика, зміна статусу не на 'done'.
 const reopenEventMs = (sr) => Math.max(0, ...stageEvents(sr).filter((h) => h.stage !== 'shipped').map((h) => msOf(h.at)),
   msOf(sr?.diagnostics?.at), sr?.status !== 'done' ? msOf(sr?.statusChangedAt) : 0)
-// Останній справжній етап (не 'shipped') — щоб відрізнити повторний ПРИЙОМ кораблика ('received', гарантія) від кроків
-// уперед ('repaired', 'packed'…), коли дата відправки невідома.
-const lastWorkStage = (sr) => {
-  let best = null
-  for (const h of stageEvents(sr)) if (h.stage !== 'shipped' && (!best || msOf(h.at) >= msOf(best.at))) best = h
-  return best?.stage || null
+// Кораблик повернули до нас (гарантія тощо): останній справжній 'received' новіший за завершення (doneAt/paidAt), за
+// будь-який запис 'shipped' в історії (навіть 1c-sync/backfill — верхня межа відправки старого імпорту) або за
+// справжній робочий етап перед ним. Перший 'received' звичайного ремонту (до нього нічого) — не повернення.
+const boatReceivedBack = (sr) => {
+  const evs = stageEvents(sr)
+  const rAt = Math.max(0, ...evs.filter((h) => h.stage === 'received').map((h) => msOf(h.at)))
+  if (!rAt) return false
+  const anyShipped = (Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).some((h) => h && h.stage === 'shipped' && msOf(h.at) && msOf(h.at) < rAt)
+  const workBefore = evs.some((h) => h.stage !== 'shipped' && h.stage !== 'received' && msOf(h.at) < rAt)
+  const doneMs = Math.max(msOf(sr?.doneAt), msOf(sr?.paidAt))
+  return (doneMs > 0 && rAt > doneMs) || anyShipped || workBefore
 }
 const normTtnDigits = (v) => { const d = String(v ?? '').replace(/\D/g, ''); return d && d !== '0' ? d : '' }
 // Посилки запчастин/купівлі (npScenario parts/purchase) — не повернення кораблика.
@@ -307,14 +312,15 @@ export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   const deliveredMs = msOf(rd?.deliveredAt)
   if (deliveredMs) return days(deliveredMs) <= cfg.doneGraceDays
   const reopenMs = reopenEventMs(sr)
-  const shipMs = Math.max(msOf(rd?.shippedAt), shippedEventMs(sr))
+  // Дата відправки — і з перекритої доставки: вона відома, просто старша за подальшу роботу (четверте коло ревʼю).
+  const shipMs = Math.max(msOf(sr.returnDelivery?.shippedAt), msOf(rd?.shippedAt), shippedEventMs(sr))
   const shipped = !!rd || boatShipStage(sr) || (!!normTtnDigits(sr.returnTtn) && sr.status === 'done')
   if (shipped) {
     // Дата відправки відома і новіша за роботу з корабликом → у дорозі.
     if (shipMs > 0 && shipMs >= reopenMs) return days(shipMs) <= cfg.transitMaxDays
-    // Дата невідома (returnTtn без запису 'shipped'): у дорозі від останньої дії, якщо тільки останній етап — не
-    // повторний прийом кораблика (тоді він знову в нас; ревʼю 2026-10-17, третє коло).
-    if (shipMs === 0 && lastWorkStage(sr) !== 'received') return days(lastActivityMs(sr)) <= cfg.transitMaxDays
+    // Дата невідома (returnTtn без запису 'shipped'): у дорозі від останньої дії, якщо тільки кораблик не повернули
+    // до нас (тоді він знову в нас; ревʼю 2026-10-17, третє й четверте коло).
+    if (shipMs === 0 && !boatReceivedBack(sr)) return days(lastActivityMs(sr)) <= cfg.transitMaxDays
   }
   if (sr.status === 'done') {
     const doneMs = Math.max(msOf(sr.doneAt), msOf(sr.paidAt), msOf(sr.statusChangedAt))

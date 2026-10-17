@@ -635,3 +635,29 @@ test('третє коло: відправка з returnTtn без запису s
   // гарантійний повторний прийом після такої відправки → кораблик у нас → відкрита
   assert.equal(isOpen(SR({ ...paid, stage: 'received', stageHistory: [{ stage: 'packed', at: daysAgo(29), by: 'm@x' }, { stage: 'received', at: daysAgo(25), by: 'm@x' }] }), NOW), true)
 })
+
+test('четверте коло: перекрита доставка 1С зберігає дату відправки; повернення кораблика — не лише «останній етап received»', () => {
+  const base = { status: 'done', returnTtn: '20451234567890', stage: 'shipped', createdAt: daysAgo(330),
+    returnDelivery: { ttn: '20451234567890', shippedAt: daysAgo(102), deliveredAt: daysAgo(100) } }
+  const firstShip = [{ stage: 'shipped', at: daysAgo(327), by: '1c-sync' }]
+  // A) діагностика після доставки (гарантія)
+  assert.equal(isOpen(SR({ ...base, stageHistory: firstShip, diagnostics: { text: 'x', at: daysAgo(25), by: 'm' } }), NOW), true)
+  // B) статус done → in_work після доставки
+  assert.equal(isOpen(SR({ ...base, status: 'in_work', statusChangedAt: daysAgo(25), stageHistory: firstShip }), NOW), true)
+  // C) етапи після доставки, без повторної відправки
+  assert.equal(isOpen(SR({ ...base, stage: 'packed', stageHistory: [...firstShip, { stage: 'received', at: daysAgo(60), by: 'm' }, { stage: 'repaired', at: daysAgo(40), by: 'm' }, { stage: 'packed', at: daysAgo(30), by: 'm' }] }), NOW), true)
+  // D) старий імпорт без дат: гарантійний received 30 днів тому, diagnosed 22 → у нас
+  const old = { status: 'done', returnTtn: '20451234567890', stage: 'diagnosed', createdAt: daysAgo(330), returnDelivery: { ttn: '20451234567890', shippedAt: null, deliveredAt: null } }
+  assert.equal(isOpen(SR({ ...old, stageHistory: [...firstShip, { stage: 'received', at: daysAgo(30), by: 'm' }, { stage: 'diagnosed', at: daysAgo(22), by: 'm' }] }), NOW), true)
+  // D2) лише received
+  assert.equal(isOpen(SR({ ...old, stage: 'received', stageHistory: [...firstShip, { stage: 'received', at: daysAgo(30), by: 'm' }] }), NOW), true)
+  // третє коло, продовження: оплачено 30, packed 29, гарантійний received 25, далі diagnosed 22 / waiting_parts 22 → у нас
+  const paid = { status: 'done', paymentId: 'o', paidAt: daysAgo(30), doneAt: daysAgo(30), statusChangedAt: daysAgo(30), createdAt: daysAgo(50), returnTtn: '20450000000001' }
+  const hist = [{ stage: 'packed', at: daysAgo(29), by: 'm@x' }, { stage: 'received', at: daysAgo(25), by: 'm@x' }]
+  assert.equal(isOpen(SR({ ...paid, stage: 'diagnosed', diagnostics: { text: 'x', at: daysAgo(22), by: 'm' }, stageHistory: [...hist, { stage: 'diagnosed', at: daysAgo(22), by: 'm@x' }] }), NOW), true)
+  assert.equal(isOpen(SR({ ...paid, stage: 'waiting_parts', stageHistory: [...hist, { stage: 'waiting_parts', at: daysAgo(22), by: 'm@x' }] }), NOW), true)
+  // ціль третього кола лишається: packed після оплати + ТТН без дати, без повторного прийому → закрита
+  assert.equal(isOpen(SR({ ...paid, stage: 'packed', stageHistory: [{ stage: 'packed', at: daysAgo(29), by: 'm@x' }] }), NOW), false)
+  // звичайний перший прийом (до нього нічого) — не повернення
+  assert.equal(isOpen(SR({ ...paid, stage: 'packed', stageHistory: [{ stage: 'received', at: daysAgo(45), by: 'm@x' }, { stage: 'packed', at: daysAgo(29), by: 'm@x' }] }), NOW), false)
+})
