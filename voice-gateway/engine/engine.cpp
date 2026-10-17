@@ -630,7 +630,12 @@ static uint32_t getU32(const char *p) {
 
 class GwAudio : public AudioMediaPort {
  public:
-  GwAudio(int eid, int fd, unsigned rate) : eid_(eid), fd_(fd), rate_(rate), spf_(rate / 50) {}
+  // hello — перший рядок для мозку: кладемо його у вихідний буфер ще тут, до createPort. Щойно порт у мосту,
+  // медіапотік щотакту викликає onFrameReceived (і без під'єднання — «серцебиття» з порожнім кадром), а той дописує
+  // кадр 'A' і одразу шле буфер; привітання, додане після createPort, могло б піти вже за кадром — мозок рве такий
+  // потік. Тепер будь-який кадр стає лише за привітанням.
+  GwAudio(int eid, int fd, unsigned rate, const std::string &hello)
+      : eid_(eid), fd_(fd), rate_(rate), spf_(rate / 50), out_(hello) {}
   ~GwAudio() override {
     std::lock_guard<std::mutex> g(mu_);
     closeFdLocked();
@@ -684,13 +689,6 @@ class GwAudio : public AudioMediaPort {
     putU32(out_, (uint32_t)n);
     if (f.buf.empty() || f.type != PJMEDIA_FRAME_TYPE_AUDIO) out_.append(n, '\0');
     else out_.append((const char *)f.buf.data(), n);
-    flushLocked();
-  }
-
-  // Головний потік: перший рядок для мозку (до будь-якого кадру)
-  void hello(const std::string &line) {
-    std::lock_guard<std::mutex> g(mu_);
-    out_.insert(0, line);
     flushLocked();
   }
 
@@ -1022,18 +1020,23 @@ void GwCall::onCallState(OnCallStateParam &) {
   } catch (Error &) {
     return;
   }
-  if (ci.state == PJSIP_INV_STATE_DISCONNECTED) {
+  const bool down = ci.state == PJSIP_INV_STATE_DISCONNECTED;
+  if (down) {
     // медіа вже знищене: лише забуваємо зв'язки, без stopTransmit
     r->mediaActive = false;
     r->ended = true;
     unlinkBridge(*r);
     dropPlayer(*r);
-    dropRecorder(*r, "hangup");
-    dropAudio(*r, "hangup");
+    dropRecorder(*r, "hangup");  // record_done — пізніше, з головного циклу (processRecs), тобто вже після state
+  }
+  // Подія стану — раніше, ніж закриється сокет звуку до мозку: мозок має дізнатися про відбій до розриву потоку,
+  // інакше відбій клієнта виглядає для нього як збій ШІ. audio closed (hangup) іде вже за state.
+  if (!r->silent)
+    Ev("state").call(eid_).str("state", stateName(ci.state)).num("code", (int)ci.lastStatusCode).str("reason", ci.lastReason).emit();
+  if (down) {
+    dropAudio(*r, "hangup");  // від'єднати від мосту (detach) і закрити сокет — для silent теж, лише без події
     g_deadCalls.push_back(eid_);  // видалимо об'єкт у головному циклі
   }
-  if (r->silent) return;
-  Ev("state").call(eid_).str("state", stateName(ci.state)).num("code", (int)ci.lastStatusCode).str("reason", ci.lastReason).emit();
 }
 
 void GwCall::onCallMediaState(OnCallMediaStateParam &) {
@@ -1512,16 +1515,19 @@ static void cmdAudioStart(const JObj &o) {
     return emitError("audio_start", eid, "", "connect: " + why);
   }
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
-  GwAudio *a = new GwAudio(eid, fd, (unsigned)rate);  // сокет тепер належить порту
+  // Сокет тепер належить порту; привітання вже у вихідному буфері — раніше, ніж міст почне смикати колбеки порту
+  GwAudio *a = new GwAudio(eid, fd, (unsigned)rate,
+                           "{\"token\":" + jsonQuote(token) + ",\"call\":" + std::to_string(eid) + ",\"rate\":" +
+                               std::to_string(rate) + "}\n");
   try {
     MediaFormatAudio fmt;
     fmt.init(PJMEDIA_FORMAT_PCM, (unsigned)rate, 1, 20000, 16);
     a->createPort("ai" + std::to_string(eid), fmt);
   } catch (Error &e) {
-    delete a;
+    delete a;  // привітання ще не відправлене: мозок бачить з'єднання без нього й одразу розрив, як і раніше
     return emitError("audio_start", eid, "", e.reason.empty() ? e.info() : e.reason);
   }
-  a->hello("{\"token\":" + jsonQuote(token) + ",\"call\":" + std::to_string(eid) + ",\"rate\":" + std::to_string(rate) + "}\n");
+  a->flush();  // привітання — мозку зараз, не чекаючи першого кадру з мосту
   r->audio = a;
   r->audioOn = false;
   startAudio(*r);  // якщо медіа ще немає — під'єднаємо в onCallMediaState

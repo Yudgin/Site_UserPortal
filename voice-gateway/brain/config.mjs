@@ -27,6 +27,8 @@ export const PROMPT_TEXTS = {
   cbGreeting: "Вітаємо! З вами з'єднується менеджер Runferry.", // клієнту, якому передзвонюють
   cbNoAnswer: 'Клієнт не відповідає.', // менеджеру
   pin: 'Введіть пін-код.', // менеджеру, що передзвонює із зовнішнього номера (VG_MANAGERS_EXTERNAL=1)
+  // менеджеру, що передзвонює, поки клієнт говорить із ШІ (лише режим ai; синтезується лише в ньому)
+  cbClientBusy: 'Клієнт зараз розмовляє з віртуальним помічником. Передзвоніть за хвилину.',
 }
 export const PROMPT_ENV = {
   confirm: 'VG_CONFIRM_WAV',
@@ -36,6 +38,7 @@ export const PROMPT_ENV = {
   cbGreeting: 'VG_CB_GREETING_WAV',
   cbNoAnswer: 'VG_CB_NO_ANSWER_WAV',
   pin: 'VG_PIN_WAV',
+  cbClientBusy: 'VG_CB_CLIENT_BUSY_WAV',
 }
 export const NO_ANSWER_MODES = ['busy', 'fallback', 'voicemail', 'ai']
 // PIN менеджера для передзвону із зовнішнього номера: 4–8 цифр; інше — PIN не задано (зовнішні номери отримують 486)
@@ -192,7 +195,8 @@ export function loadConfig(env = process.env) {
     aiMaxSec: num(env.VG_AI_MAX_SEC, 300), // розмова з ШІ — не довше (за 30 с до кінця — «час спливає»)
     aiIdleSec: num(env.VG_AI_IDLE_SEC, 20), // тиша: ElevenLabs перепитує сам, через 2 такі проміжки — відбій
     aiWrapSec: num(env.VG_AI_WRAP_SEC, 30),
-    aiTransferMax: num(env.VG_AI_TRANSFER_MAX, 1), // скільки разів ШІ може передати клієнта менеджеру за дзвінок
+    // скільки разів ШІ може передати клієнта менеджеру за дзвінок (> 1 — і з повторної сесії після невдалого з'єднання)
+    aiTransferMax: num(env.VG_AI_TRANSFER_MAX, 1),
     // Що ШІ каже про заявку: minimal — є/немає, скільки, номер; stage — ще й етап (рішення власника)
     aiStatusDetail: String(env.VG_AI_STATUS_DETAIL || '').trim().toLowerCase() === 'stage' ? 'stage' : 'minimal',
     // Куди зберігати розшифровку й підсумок: local — <data>/ai/<дата>/*.json (0600); firestore — ще й

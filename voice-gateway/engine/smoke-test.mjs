@@ -22,6 +22,8 @@ const TEST_PW = 'SECRET-TEST-PW-123' // тестовий пароль лише �
 fs.mkdirSync(WORK, { recursive: true })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const t0 = Date.now()
+// Спільна нумерація того, що бачить тест-«мозок»: події рушія зі stdout (__seq) і закриття сокетів звуку (endedSeq)
+let obsSeq = 0
 const ts = () => `${((Date.now() - t0) / 1000).toFixed(2).padStart(6)}s`
 const say = (s) => console.log(`${ts()} ${s}`)
 const redact = (c) => ('password' in c ? { ...c, password: '<redacted>' } : c)
@@ -39,6 +41,7 @@ function startEngine(name) {
     raw.push(line)
     let ev
     try { ev = JSON.parse(line) } catch { garbage.push(line); say(`  !! не JSON у stdout: ${line}`); return }
+    ev.__seq = ++obsSeq
     events.push(ev)
     say(`  <- ${line}`)
     for (const w of [...waiters]) w()
@@ -516,20 +519,29 @@ await step('5c. DTMF від pjsua: RFC 2833 (консоль «#») і SIP INFO (
   assert(/dtmf via rfc2833/.test(log) && /dtmf via info/.test(log), 'у лозі рушія — метод DTMF')
 })
 
-// Мозок на Unix-сокеті: приймає з'єднання рушія, розбирає рядок привітання і кадри (тип + u32 LE довжина + дані)
+// Мозок на Unix-сокеті: приймає з'єднання рушія, розбирає рядок привітання і кадри (тип + u32 LE довжина + дані).
+// Як справжній мозок (brain/audiosock.mjs): перші байти з'єднання — рядок JSON привітання; кадр раніше за нього або
+// не-JSON — розрив (badHello). firstByte — найперший байт з'єднання, endedSeq — коли мозок побачив закриття сокета.
 function audioBrain(sockPath) {
   const conns = []
   const waiters = new Set()
   const notify = () => { for (const w of [...waiters]) w() }
   const server = net.createServer((s) => {
-    const c = { s, hello: null, frames: [], buf: Buffer.alloc(0), ended: false }
+    const c = { s, hello: null, badHello: false, firstByte: null, frames: [], buf: Buffer.alloc(0), ended: false, endedSeq: 0 }
     conns.push(c)
+    const reject = () => { c.badHello = true; s.destroy(); notify() }
     s.on('data', (d) => {
+      if (c.badHello) return
+      if (c.firstByte === null && d.length) c.firstByte = d[0]
       c.buf = Buffer.concat([c.buf, d])
       if (!c.hello) {
+        if (c.buf[0] !== 0x7b) return reject() // не «{»: першим прийшов кадр, а не привітання
         const nl = c.buf.indexOf(10)
         if (nl < 0) return
-        c.hello = JSON.parse(c.buf.subarray(0, nl).toString('utf8'))
+        let h = null
+        try { h = JSON.parse(c.buf.subarray(0, nl).toString('utf8')) } catch { /* нижче — розрив */ }
+        if (!h || typeof h.token !== 'string') return reject()
+        c.hello = h
         c.buf = c.buf.subarray(nl + 1)
       }
       while (c.buf.length >= 5) {
@@ -540,7 +552,7 @@ function audioBrain(sockPath) {
       }
       notify()
     })
-    s.on('close', () => { c.ended = true; notify() })
+    s.on('close', () => { c.ended = true; c.endedSeq = ++obsSeq; notify() })
     s.on('error', () => {})
     notify()
   })
@@ -615,7 +627,7 @@ function toneShare(file, hz) {
   return best
 }
 
-await step('5d. потік звуку до мозку audio_start/audio_stop: голос P1 → сокет, тон від мозку → P1, мітка, скидання черги', async () => {
+await step('5d. потік звуку до мозку audio_start/audio_stop: голос P1 → сокет, тон від мозку → P1, мітка, скидання черги; привітання першим, відбій раніше за розрив', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-smoke-'))
   const sock = path.join(dir, 'a.sock')
   const brain = audioBrain(sock)
@@ -682,6 +694,18 @@ await step('5d. потік звуку до мозку audio_start/audio_stop: г
     await brain.until(() => c.ended, 2000, 'рушій закрив сокет')
     eng.send({ cmd: 'audio_stop', call: d.call })
     await eng.wait((e) => e.ev === 'error' && e.cmd === 'audio_stop' && /no audio/.test(e.msg), 2000, 'error: потоку немає')
+    // кілька коротких потоків поспіль: кожне з'єднання починається з привітання (кадри «серцебиття» мосту йдуть
+    // щойно порт у мосту — жоден не має випередити рядок привітання)
+    for (let i = 0; i < 5; i++) {
+      const tk = `cyc${i}`
+      eng.send({ cmd: 'audio_start', call: d.call, sock, token: tk, rate: 16000 })
+      await eng.wait((e) => e.ev === 'audio' && e.call === d.call && e.state === 'started', 2000, `audio started (цикл ${i})`)
+      const cc = await brain.until(() => brain.conns.find((x) => x.badHello || (x.hello?.token === tk && x.frames.some((f) => f.type === 'A'))), 2000, `привітання й кадр (цикл ${i})`)
+      assert(!cc.badHello, `цикл ${i}: з'єднання почалося не з привітання (перший байт ${cc.firstByte})`)
+      eng.send({ cmd: 'audio_stop', call: d.call })
+      await eng.wait((e) => e.ev === 'audio' && e.call === d.call && e.state === 'closed' && e.reason === 'stop', 2000, `audio closed (цикл ${i})`)
+      await brain.until(() => cc.ended, 2000, `сокет закрито (цикл ${i})`)
+    }
     // другий потік того ж виклику (8 кГц), P1 кладе трубку — рушій закриває потік сам (reason hangup)
     eng.send({ cmd: 'audio_start', call: d.call, sock, token: 'second' })
     await eng.wait((e) => e.ev === 'audio' && e.call === d.call && e.state === 'started', 2000, 'audio started (2)')
@@ -695,6 +719,19 @@ await step('5d. потік звуку до мозку audio_start/audio_stop: г
     const cl2 = await eng.wait((e) => e.ev === 'audio' && e.call === d.call && e.state === 'closed', 2000, 'audio closed після відбою')
     assert(cl2.reason === 'hangup', `audio closed ${JSON.stringify(cl2)}`)
     await brain.until(() => c2.ended, 2000, 'сокет закрито після відбою')
+    // відбій клієнта мозок має побачити раніше за розрив потоку: інакше прийме його за збій ШІ
+    const down = eng.events.find((e) => e.ev === 'state' && e.call === d.call && e.state === 'DISCONNECTED')
+    const iDown = eng.events.indexOf(down)
+    const iClosed = eng.events.indexOf(cl2)
+    say(`  відбій: state DISCONNECTED #${iDown}, audio closed #${iClosed}; мозок: state ${down?.__seq}, розрив сокета ${c2.endedSeq}`)
+    assert(iDown >= 0 && iDown < iClosed, `state DISCONNECTED (#${iDown}) має йти раніше за audio closed hangup (#${iClosed})`)
+    assert(down.__seq < c2.endedSeq, `мозок побачив розрив сокета (${c2.endedSeq}) раніше за state DISCONNECTED (${down.__seq})`)
+    // кожне з'єднання почалося з рядка привітання; жодне не розірване мозком через кадр замість привітання
+    const noHello = brain.conns.filter((x) => x.badHello || !x.hello)
+    assert(noHello.length === 0, `з'єднань без привітання першим рядком: ${noHello.length} (перші байти ${noHello.map((x) => x.firstByte).join(',')})`)
+    assert(brain.conns.every((x) => x.firstByte === 0x7b), 'перший байт з\'єднання — не «{» привітання')
+    assert(brain.conns.length === 7, `з'єднань із мозком: ${brain.conns.length} (очікувалось 7)`)
+    say(`  з'єднань із мозком: ${brain.conns.length}, усі почались із привітання`)
     await p1.quit()
     peers = peers.filter((p) => p !== p1)
     // P1 чув тон: у його записі є 1 кГц (16 кГц → міст 8 кГц → RTP пройшли без спотворень)

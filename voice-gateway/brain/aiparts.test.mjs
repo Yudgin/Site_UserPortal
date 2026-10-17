@@ -173,3 +173,25 @@ test('ElevenLabs: інструменти — client, з відповіддю л�
   assert.equal(a.platform_settings.privacy.record_voice, false)
   assert.equal(a.platform_settings.overrides.conversation_config_override.agent.prompt.prompt, true)
 })
+
+test('ElevenLabs: дії після фрази — post_tool_speech, помилки інструментів — passthrough; агент без черги, ліміт = VG_MAX_CALLS, tool_ids переозначаються, проміжне розпізнавання', () => {
+  const tools = TOOL_DEFS.map(toolConfig)
+  // ToolExecutionMode: transfer / end_call — коли агент договорив фразу; інформаційні — одразу
+  assert.deepEqual(tools.map((t) => [t.tool_config.name, t.tool_config.execution_mode]), [['get_request_status', 'immediate'], ['save_question_for_manager', 'immediate'], ['transfer_to_manager', 'post_tool_speech'], ['end_call', 'post_tool_speech']])
+  for (const t of tools) {
+    assert.equal(t.tool_config.tool_error_handling_mode, 'passthrough', t.tool_config.name)
+    // post_tool_speech — лише для інструментів без відповіді (afterSpeech)
+    assert.equal(t.tool_config.execution_mode === 'post_tool_speech', t.tool_config.expects_response === false, t.tool_config.name)
+  }
+  const a = agentBody({ llm: 'claude-sonnet-5-5', voiceId: 'v', toolIds: ['t1'], retentionDays: 30 })
+  const ps = a.platform_settings
+  assert.deepEqual(ps.queueing_config, { enabled: false })
+  assert.deepEqual(ps.call_limits, { bursting_enabled: false, agent_concurrency_limit: 2 })
+  assert.equal(agentBody({ llm: 'x', voiceId: 'v', toolIds: [], retentionDays: 30, concurrencyLimit: 3 }).platform_settings.call_limits.agent_concurrency_limit, 3)
+  assert.deepEqual(ps.overrides.conversation_config_override.agent.prompt, { prompt: true, tool_ids: true })
+  const ce = a.conversation_config.conversation.client_events
+  assert.ok(ce.includes('tentative_user_transcript'))
+  assert.ok(!ce.includes('queue_status'), 'queue_status шлють завжди — у ClientEvent його немає')
+  assert.equal(new Set(ce).size, ce.length)
+  assert.deepEqual(a.conversation_config.agent.prompt.tool_ids, ['t1'])
+})

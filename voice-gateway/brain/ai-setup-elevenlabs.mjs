@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // Агент ElevenLabs для ШІ-співрозмовника шлюзу: клієнтські інструменти (aiprompt.mjs TOOL_DEFS), LLM, голос, розпізнавання
 // й синтез у pcm_8000 (рушію нічого не перетворювати), українська, приватний (лише за підписаною адресою), дозвіл
-// переозначати інструкції / першу фразу / мову / голос / тривалість на кожен дзвінок, приватність (без запису голосу,
-// зберігання розмов — retention_days). Ключ — Secret Manager elevenlabs-api-key (як і синтез фраз шлюзу).
+// переозначати інструкції / першу фразу / мову / голос / тривалість / набір інструментів на кожен дзвінок, приватність
+// (без запису голосу, зберігання розмов — retention_days), ліміт одночасних розмов = VG_MAX_CALLS без черги очікування.
+// Ключ — Secret Manager elevenlabs-api-key (як і синтез фраз шлюзу). Після зміни цього файлу — знову --apply: шлюз
+// переозначає tool_ids лише для агента з дозволом (toolIdsOverride у ai-elevenlabs.json).
 //   node voice-gateway/brain/ai-setup-elevenlabs.mjs            — лише показати, що буде створено (нічого не змінює)
 //   node voice-gateway/brain/ai-setup-elevenlabs.mjs --apply    — створити (або оновити) інструменти й агента;
 //                                                                 agent_id і id інструментів — у <data>/ai-elevenlabs.json
@@ -25,7 +27,7 @@ const arg = (name, def = null) => {
 }
 const has = (name) => process.argv.includes(name)
 
-// Інструмент ElevenLabs із нейтральної схеми aiprompt.mjs
+// Інструмент ElevenLabs із нейтральної схеми aiprompt.mjs (OpenAPI ClientToolConfig-Input)
 export function toolConfig(t) {
   const props = {}
   for (const [k, v] of Object.entries(t.parameters?.properties || {})) {
@@ -36,17 +38,24 @@ export function toolConfig(t) {
       type: 'client',
       name: t.name,
       description: t.description,
-      // transfer / end_call: модель уже сказала фразу — сервер не чекає відповіді, дію робить шлюз після відтворення
+      // transfer / end_call: модель уже сказала фразу — сервер не чекає відповіді, дію робить шлюз після відтворення.
+      // Відмову шлюзу (не робочий час, ліміт) адаптер повертає моделі contextual_update (realtime-elevenlabs.mjs toolResult)
       expects_response: !t.afterSpeech,
       response_timeout_secs: 10,
       pre_tool_speech: 'auto',
-      execution_mode: 'immediate',
+      // ToolExecutionMode: 'post_tool_speech' — виклик приходить, коли агент договорив фразу (інакше client_tool_call може
+      // випередити звук «З'єдную…» / прощання й шлюз діятиме до неї); інформаційні — одразу ('immediate')
+      execution_mode: t.afterSpeech ? 'post_tool_speech' : 'immediate',
+      // ToolErrorHandlingMode: типове 'auto' для клієнтських інструментів = 'hide' — результат з is_error модель не бачить;
+      // 'passthrough' — віддає як є (тексти помилок шлюзу вже придатні для моделі: note / say)
+      tool_error_handling_mode: 'passthrough',
       parameters: { type: 'object', description: '', properties: props, required: t.parameters?.required || [] },
     },
   }
 }
 
-export function agentBody({ llm, voiceId, toolIds, retentionDays }) {
+// concurrencyLimit — як VG_MAX_CALLS (config.maxCalls, 2): кожен дзвінок тримає не більше однієї розмови ШІ
+export function agentBody({ llm, voiceId, toolIds, retentionDays, concurrencyLimit = 2 }) {
   return {
     name: NAME,
     conversation_config: {
@@ -67,20 +76,29 @@ export function agentBody({ llm, voiceId, toolIds, retentionDays }) {
       turn: { turn_timeout: 7, turn_eagerness: 'normal', silence_end_call_timeout: -1 },
       conversation: {
         max_duration_seconds: 360,
-        client_events: ['conversation_initiation_metadata', 'ping', 'audio', 'interruption', 'user_transcript', 'agent_response', 'agent_response_correction', 'client_tool_call', 'agent_response_complete'],
+        // ClientEvent; tentative_user_transcript — проміжне розпізнавання: довга репліка клієнта = активність (user_activity),
+        // тайм-аут тиші шлюзу не спрацює посеред неї. queue_status вмикати не треба — його шлють завжди
+        client_events: ['conversation_initiation_metadata', 'ping', 'audio', 'interruption', 'user_transcript', 'tentative_user_transcript', 'agent_response', 'agent_response_correction', 'client_tool_call', 'agent_response_complete'],
       },
     },
     platform_settings: {
       auth: { enable_auth: true },
       overrides: {
+        // ConversationConfigClientOverrideConfig-Input → AgentConfigOverrideConfig → PromptAgentAPIModelOverrideConfig:
+        // tool_ids — набір інструментів на кожен дзвінок (без transfer_to_manager, коли з'єднувати не можна); без цього
+        // дозволу ElevenLabs відхиляє розмову з переозначенням tool_ids
         conversation_config_override: {
-          agent: { first_message: true, language: true, prompt: { prompt: true } },
+          agent: { first_message: true, language: true, prompt: { prompt: true, tool_ids: true } },
           tts: { voice_id: true },
           conversation: { max_duration_seconds: true },
         },
       },
       privacy: { record_voice: false, retention_days: retentionDays },
-      call_limits: { bursting_enabled: false, agent_concurrency_limit: 2 },
+      // AgentCallLimits: понад ліміт — відмова (без подвійного тарифу bursting)
+      call_limits: { bursting_enabled: false, agent_concurrency_limit: concurrencyLimit },
+      // AgentQueueingConfig: нові агенти створюються з чергою (до 180 с тону утримання, який адаптер сприйняв би як мову
+      // агента) — вимикаємо явно: понад ліміт розмову відхилено одразу, шлюз грає «лінія зайнята»
+      queueing_config: { enabled: false },
     },
   }
 }
@@ -90,6 +108,7 @@ async function main() {
   const llm = arg('--llm', config.aiElLlm)
   const voiceId = arg('--voice', config.aiVoiceId)
   const retentionDays = Number(arg('--retention-days', '30'))
+  const concurrencyLimit = Number(config.maxCalls) > 0 ? Number(config.maxCalls) : 2
   const file = path.join(config.dataDir, 'ai-elevenlabs.json')
   let saved = null
   try { saved = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { /* ще не створено */ }
@@ -97,9 +116,9 @@ async function main() {
 
   if (!has('--apply') && !has('--show')) {
     process.stdout.write(`План (нічого не змінюю; створити — з --apply):\n`)
-    process.stdout.write(`  ${saved?.agentId ? `оновити агента ${saved.agentId}` : 'створити агента'} «${NAME}», LLM ${llm}, голос ${voiceId}, ${FORMAT}, uk, retention_days ${retentionDays}\n`)
-    process.stdout.write(`  інструменти: ${tools.map((t) => `${t.tool_config.name}${t.tool_config.expects_response ? '' : ' (без відповіді)'}`).join(', ')}\n`)
-    process.stdout.write(`  файл: ${file}\n\n${JSON.stringify(agentBody({ llm, voiceId, toolIds: ['<id…>'], retentionDays }), null, 2)}\n`)
+    process.stdout.write(`  ${saved?.agentId ? `оновити агента ${saved.agentId}` : 'створити агента'} «${NAME}», LLM ${llm}, голос ${voiceId}, ${FORMAT}, uk, retention_days ${retentionDays}, одночасно ${concurrencyLimit}, без черги\n`)
+    process.stdout.write(`  інструменти: ${tools.map((t) => `${t.tool_config.name}${t.tool_config.expects_response ? '' : ' (без відповіді, після фрази)'}`).join(', ')}\n`)
+    process.stdout.write(`  файл: ${file}\n\n${JSON.stringify(agentBody({ llm, voiceId, toolIds: ['<id…>'], retentionDays, concurrencyLimit }), null, 2)}\n`)
     return
   }
 
@@ -120,6 +139,8 @@ async function main() {
       agent_id: a.agent_id, name: a.name, llm: c.agent?.prompt?.llm, language: c.agent?.language, tool_ids: c.agent?.prompt?.tool_ids,
       asr: c.asr?.user_input_audio_format, tts: { model: c.tts?.model_id, voice: c.tts?.voice_id, format: c.tts?.agent_output_audio_format },
       client_events: c.conversation?.client_events, privacy: a.platform_settings?.privacy, auth: a.platform_settings?.auth?.enable_auth,
+      call_limits: a.platform_settings?.call_limits, queueing: a.platform_settings?.queueing_config?.enabled,
+      overrides: a.platform_settings?.overrides?.conversation_config_override,
     }, null, 2)}\n`)
     return
   }
@@ -132,12 +153,14 @@ async function main() {
     toolIds.push(res.id || old)
     process.stdout.write(`інструмент ${t.tool_config.name}: ${res.id || old}\n`)
   }
-  const body = agentBody({ llm, voiceId, toolIds, retentionDays })
+  const body = agentBody({ llm, voiceId, toolIds, retentionDays, concurrencyLimit })
   let agentId = saved?.agentId || null
   if (agentId) await api('PATCH', `/v1/convai/agents/${agentId}`, body)
   else agentId = (await api('POST', '/v1/convai/agents/create', body)).agent_id
   ensurePrivateDir(config.dataDir)
-  const out = { agentId, llm, voiceId, format: FORMAT, toolIds: Object.fromEntries(tools.map((t, i) => [t.tool_config.name, toolIds[i]])), updatedAt: new Date().toISOString() }
+  // toolIdsOverride: агента оновлено з дозволом переозначати tool_ids — лише тоді шлюз може звужувати набір інструментів
+  // на дзвінок (makeElevenLabsProvider toolIds); файл старого формату без нього — переозначення ElevenLabs відхилить
+  const out = { agentId, llm, voiceId, format: FORMAT, toolIds: Object.fromEntries(tools.map((t, i) => [t.tool_config.name, toolIds[i]])), toolIdsOverride: true, updatedAt: new Date().toISOString() }
   fs.writeFileSync(file, `${JSON.stringify(out, null, 2)}\n`, { mode: FILE_MODE })
   process.stdout.write(`агент ${agentId} готовий; записано ${file}\n`)
 }

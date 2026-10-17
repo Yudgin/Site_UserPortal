@@ -1,7 +1,10 @@
 // Сценарій дзвінка в режимі ШІ (noAnswerMode 'ai') на підробленому рушії, годиннику й підробленій сесії ШІ: менеджер
 // не взяв → ШІ замість «лінія зайнята»; неробочий час → ШІ одразу; інструменти (стан заявки за правилами приватності,
 // питання в передзвін, з'єднати, завершити); перевід через ШІ на менеджера тим самим шляхом («1», REFER); менеджер не
-// взяв — ШІ знову; помилки ШІ — як busy; клієнт поклав; без фабрики ШІ — як busy.
+// взяв — ШІ знову; помилки ШІ — як busy; клієнт поклав; без фабрики ШІ — як busy. Крайові випадки: сокет ШІ закрився
+// раніше за DISCONNECTED клієнта (пауза AI_DOWN_GRACE_MS); відмова від передзвону тримається; передзвін знову після
+// невдалого з'єднання; пропущений у менеджера до ШІ; кілька з'єднань (aiTransferMax); свій ліміт повторів у раунді на
+// запит ШІ; рушій без звуку (ai.available() false) — як busy; менеджер передзвонює, поки клієнт із ШІ.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createDispatcher } from './flow.mjs'
@@ -350,6 +353,10 @@ test('ШІ не вдався: помилка провайдера → «ліні
     const h = harness()
     const s = await toAi(h)
     s.end({ reason: 'ai_error' })
+    // спершу AI_DOWN_GRACE_MS чекаємо DISCONNECTED клієнта (міг просто покласти), нога жива — «лінія зайнята»
+    await h.clock.advance(499)
+    assert.equal(h.sent('play').at(-1).tag, 'hold')
+    await h.clock.advance(1)
     assert.deepEqual(h.sent('play').at(-1), { cmd: 'play', call: 1, file: '/p/busy.wav', loop: false, tag: 'busy' })
     await h.ev({ ev: 'play_done', call: 1, tag: 'busy' })
     await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
@@ -431,5 +438,292 @@ test('режим ai без фабрики ШІ — як busy; привітанн
     assert.equal(s.stopped, 'shutdown')
     assert.equal(h.journal[0].outcome, 'aborted')
     assert.equal(h.journal[0].abortReason, 'shutdown')
+  }
+})
+
+const BUSY_PLAY = { cmd: 'play', call: 1, file: '/p/busy.wav', loop: false, tag: 'busy' }
+const busyPlays = (h) => h.sent('play').filter((c) => c.tag === 'busy').length
+
+test('сокет ШІ закрився раніше за DISCONNECTED клієнта: поклав у межах паузи → ai_client_hangup / ai_noted без «лінія зайнята»; audio closed hangup — команд на A немає; A жива після паузи → busy_callback', async () => {
+  {
+    // engine_closed, DISCONNECTED за 200 мс (рядок audio closed — перед ним, як шле рушій)
+    const h = harness()
+    const s = await toAi(h)
+    s.end({ reason: 'engine_closed' })
+    await h.clock.advance(200)
+    await h.ev({ ev: 'audio', call: 1, state: 'closed', reason: 'hangup', played: 0, queued: 0, dropped_frames: 0 })
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    const e = h.journal[0]
+    assert.equal(e.outcome, 'ai_client_hangup')
+    assert.equal(e.ai.endReason, 'engine_closed')
+    assert.equal(e.ai.error, null, 'це не помилка ШІ — клієнт поклав')
+    assert.equal(e.clientCode, 200)
+    assert.equal(busyPlays(h), 0)
+    assert.equal(h.sent('hangup').filter((c) => c.call === 1).length, 0)
+    assert.equal(h.callbacks.listPending('907').length, 1, 'передзвін (менеджер пропустив дзвінок) лишився')
+  }
+  {
+    // ai_error, питання вже записано, DISCONNECTED за 100 мс → ai_noted
+    const h = harness()
+    const s = await toAi(h)
+    await s.tool('save_question_for_manager', { question: 'Коли буде ремонт?', callback: true })
+    s.end({ reason: 'ai_error' })
+    await h.clock.advance(100)
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    assert.equal(h.journal[0].outcome, 'ai_noted')
+    assert.equal(busyPlays(h), 0)
+  }
+  {
+    // рушій сказав «звук A закрито через розрив», DISCONNECTED так і не дійшов за паузу — клієнт пішов, команд на A немає
+    const h = harness()
+    const s = await toAi(h)
+    await h.ev({ ev: 'audio', call: 1, state: 'closed', reason: 'hangup' })
+    s.end({ reason: 'engine_closed' })
+    const n = h.cmds.length
+    await h.clock.advance(600)
+    assert.equal(h.cmds.length, n, 'на розірвану ногу A команд немає')
+    assert.equal(h.journal[0].outcome, 'ai_client_hangup')
+  }
+  {
+    // A жива й після паузи — ШІ справді не вдався: «лінія зайнята», busy_callback
+    const h = harness()
+    const s = await toAi(h)
+    s.end({ reason: 'engine_closed' })
+    await h.clock.advance(499)
+    assert.equal(busyPlays(h), 0)
+    await h.clock.advance(1)
+    assert.deepEqual(h.sent('play').at(-1), BUSY_PLAY)
+    await h.ev({ ev: 'play_done', call: 1, tag: 'busy' })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 1 })
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    const e = h.journal[0]
+    assert.equal(e.outcome, 'busy_callback')
+    assert.equal(e.ai.error, 'engine_closed')
+    assert.equal(h.callbacks.listPending('907').length, 1)
+  }
+})
+
+test('клієнт відмовився від передзвону (callback:false), потім ШІ не вдався → нового передзвону немає, «лінія зайнята» не звучить, просто відбій (ai_noted, ai.error)', async () => {
+  {
+    const h = harness()
+    const s = await toAi(h)
+    s.speak()
+    await s.tool('save_question_for_manager', { question: 'Дізнався все, дякую', callback: false })
+    assert.equal(h.callbacks.listPending('907').length, 0)
+    s.end({ reason: 'ai_error' })
+    await h.clock.advance(500)
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 1 })
+    assert.equal(busyPlays(h), 0)
+    assert.equal(h.callbacks.listPending('907').length, 0)
+    const e = h.journal[0]
+    assert.equal(e.outcome, 'ai_noted')
+    assert.equal(e.ai.error, 'ai_error')
+    assert.deepEqual([e.callback.stored, e.callback.removed], [false, true])
+  }
+  {
+    // те саме з помилкою audio_start (без паузи — сесія звуку взагалі не почалась)
+    const h = harness()
+    const s = await toAi(h)
+    await s.tool('save_question_for_manager', { question: 'Нічого не треба', callback: false })
+    await h.ev({ ev: 'error', cmd: 'audio_start', call: 1, ref: null, msg: 'connect failed' })
+    assert.equal(s.stopped, 'engine_error')
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 1 })
+    assert.equal(busyPlays(h), 0)
+    assert.equal(h.callbacks.listPending('907').length, 0)
+    assert.equal(h.journal[0].outcome, 'ai_noted')
+  }
+})
+
+test('менеджер на запит ШІ не взяв, а клієнт раніше відмовився від передзвону → передзвін поставлено знову з питанням (перша фраза transfer_failed обіцяє передзвін); помилка ШІ потім — уже «лінія зайнята»', async () => {
+  const h = harness()
+  const s = await toAi(h)
+  await s.tool('save_question_for_manager', { question: 'Хочу поговорити з людиною', topic: 'complaint', urgent: true, callback: false })
+  assert.equal(h.callbacks.listPending('907').length, 0)
+  await s.tool('transfer_to_manager', {})
+  s.end({ reason: 'tool', action: 'transfer' })
+  await h.ev({ ev: 'dialing', ref: 'mgr-1-2', call: 3 })
+  await h.ev({ ev: 'state', call: 3, state: 'DISCONNECTED', code: 486 })
+  const p = h.callbacks.listPending('907')
+  assert.equal(p.length, 1, 'передзвін знову')
+  assert.deepEqual(p[0].note, { question: 'Хочу поговорити з людиною', topic: 'complaint', urgent: true })
+  assert.equal(h.ai.sessions.length, 2)
+  const s2 = h.ai.sessions[1]
+  assert.equal(s2.opts.kind, 'transfer_failed')
+  s2.end({ reason: 'ai_error' })
+  await h.clock.advance(500)
+  assert.deepEqual(h.sent('play').at(-1), BUSY_PLAY, 'передзвін є — обіцянка правдива')
+  await h.ev({ ev: 'play_done', call: 1, tag: 'busy' })
+  const e = h.journal[0]
+  assert.equal(e.outcome, 'busy_callback')
+  assert.deepEqual([e.callback.stored, e.callback.restored, e.callback.removed], [true, true, undefined])
+  assert.equal(h.callbacks.listPending('907').length, 1, 'дубля немає')
+  // підсумок для заявки й дошки — «передзвонить», бо передзвін знову стоїть (а не «клієнт сказав, що не треба»)
+  assert.equal(e.aiTranscript.note.callback, true)
+  assert.equal(e.ai.note.callback, true)
+})
+
+test('режим ai: клієнт поклав, поки менеджеру дзвонили (ШІ ще не відповідав) → передзвін (missed), як у busy; до набору — ні; під час набору на запит ШІ — без дубля', async () => {
+  {
+    const h = harness()
+    await answered(h)
+    await h.ev({ ev: 'play_done', call: 1, tag: 'greeting' })
+    await h.clock.advance(1000)
+    await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+    await h.ev({ ev: 'state', call: 2, state: 'EARLY', code: 180 })
+    await h.clock.advance(5000)
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 2 })
+    const e = h.journal[0]
+    assert.equal(e.outcome, 'client_hangup')
+    assert.deepEqual([e.callback.stored, e.callback.missed, e.callback.managerKey], [true, true, '907'])
+    assert.equal(e.ai, null)
+    assert.equal(h.ai.sessions.length, 0)
+    const p = h.callbacks.listPending('907')
+    assert.deepEqual([p.length, p[0].clientNumber, p[0].missed], [1, '+380500000001', true])
+  }
+  {
+    const h = harness()
+    await h.ev(INCOMING)
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    assert.deepEqual([h.journal[0].outcome, h.journal[0].callback, h.callbacks.listPending().length], ['client_hangup', null, 0])
+  }
+  {
+    const h = harness()
+    const s = await toAi(h)
+    await s.tool('transfer_to_manager', {})
+    s.end({ reason: 'tool', action: 'transfer' })
+    await h.ev({ ev: 'dialing', ref: 'mgr-1-2', call: 3 })
+    await h.ev({ ev: 'state', call: 1, state: 'DISCONNECTED', code: 200 })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 3 })
+    assert.equal(h.journal[0].outcome, 'client_hangup')
+    const p = h.callbacks.listPending('907')
+    assert.equal(p.length, 1)
+    assert.equal(p[0].missed, undefined, 'той самий запис, що поставив ШІ')
+  }
+})
+
+test('VG_AI_TRANSFER_MAX=2: з повторної сесії (transfer_failed) можна з\'єднати ще раз; третя сесія — вже ні', async () => {
+  const h = harness({ config: { aiTransferMax: 2 } })
+  const s = await toAi(h)
+  assert.equal(s.opts.transferAllowed, true)
+  await s.tool('transfer_to_manager', {})
+  s.end({ reason: 'tool', action: 'transfer' })
+  await h.ev({ ev: 'dialing', ref: 'mgr-1-2', call: 3 })
+  await h.ev({ ev: 'state', call: 3, state: 'DISCONNECTED', code: 486 })
+  const s2 = h.ai.sessions[1]
+  assert.equal(s2.opts.kind, 'transfer_failed')
+  assert.equal(s2.opts.transferAllowed, true)
+  assert.deepEqual(await s2.tool('transfer_to_manager', { reason: 'наполягає' }), { ok: true })
+  s2.end({ reason: 'tool', action: 'transfer' })
+  assert.deepEqual(h.sent('dial').at(-1), { cmd: 'dial', ref: 'mgr-1-3', uri: MGR })
+  await h.ev({ ev: 'dialing', ref: 'mgr-1-3', call: 4 })
+  await h.ev({ ev: 'state', call: 4, state: 'DISCONNECTED', code: 486 })
+  const s3 = h.ai.sessions[2]
+  assert.equal(s3.opts.kind, 'transfer_failed')
+  assert.equal(s3.opts.transferAllowed, false)
+  assert.equal((await s3.tool('transfer_to_manager', {})).ok, false)
+  s3.end({ reason: 'tool', action: 'end' })
+  const e = h.journal[0]
+  assert.equal(e.ai.transfers, 2)
+  assert.deepEqual(e.dials.map((x) => [x.attempt, x.ai ?? 0]), [[1, 0], [2, 1], [3, 2]])
+  assert.deepEqual(e.ai.sessions.map((x) => x.kind), ['busy', 'transfer_failed', 'transfer_failed'])
+})
+
+test('раунд набору на запит ШІ — з чистого аркуша: VG_DIAL_RETRIES=1 дає йому свій повтор; journal: retries за весь дзвінок, ai.firstRetries, ai.why — перший раунд', async () => {
+  const h = harness({ config: { dialRetries: 1 } })
+  await answered(h)
+  await h.ev({ ev: 'play_done', call: 1, tag: 'greeting' })
+  await h.clock.advance(1000)
+  await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+  await h.ev({ ev: 'state', call: 2, state: 'DISCONNECTED', code: 503 })
+  await h.clock.advance(2000)
+  assert.deepEqual(h.sent('dial').at(-1), { cmd: 'dial', ref: 'mgr-1-2', uri: MGR })
+  await h.ev({ ev: 'dialing', ref: 'mgr-1-2', call: 3 })
+  await h.ev({ ev: 'state', call: 3, state: 'DISCONNECTED', code: 503 }) // ліміт повторів вичерпано → ШІ
+  assert.equal(h.ai.sessions.length, 1)
+  const s = h.ai.sessions[0]
+  await s.tool('transfer_to_manager', {})
+  s.end({ reason: 'tool', action: 'transfer' })
+  assert.deepEqual(h.sent('dial').at(-1), { cmd: 'dial', ref: 'mgr-1-3', uri: MGR })
+  await h.ev({ ev: 'dialing', ref: 'mgr-1-3', call: 4 })
+  await h.ev({ ev: 'state', call: 4, state: 'DISCONNECTED', code: 503 })
+  assert.equal(h.ai.sessions.length, 1, 'не одразу ШІ — спершу свій повтор')
+  await h.clock.advance(2000)
+  assert.deepEqual(h.sent('dial').at(-1), { cmd: 'dial', ref: 'mgr-1-4', uri: MGR })
+  await h.ev({ ev: 'dialing', ref: 'mgr-1-4', call: 5 })
+  await h.ev({ ev: 'state', call: 5, state: 'DISCONNECTED', code: 486 })
+  assert.equal(h.ai.sessions.length, 2)
+  h.ai.sessions[1].end({ reason: 'tool', action: 'end' })
+  const e = h.journal[0]
+  assert.equal(e.retries, 2)
+  assert.equal(e.ai.firstRetries, 1)
+  assert.equal(e.ai.why, 'manager_503')
+  assert.equal(e.reason, 'manager_486')
+  assert.equal(e.xferCode, null)
+  assert.equal(e.ai.firstXferCode, null)
+  assert.deepEqual(e.dials.map((x) => [x.attempt, x.code, x.ai ?? 0]), [[1, 503, 0], [2, 503, 0], [3, 503, 1], [4, 486, 1]])
+})
+
+test('рушій без звуку до мозку (ai.available() === false): уночі менеджеру дзвонимо, ШІ немає — рівно як busy', async () => {
+  const ai = fakeAi()
+  ai.available = () => false
+  const h = harness({ start: NIGHT, ai })
+  await answered(h)
+  assert.deepEqual(h.sent('play').at(-1), { cmd: 'play', call: 1, file: '/p/greeting.wav', loop: false, tag: 'greeting' })
+  await h.ev({ ev: 'play_done', call: 1, tag: 'greeting' })
+  await h.clock.advance(1000)
+  assert.deepEqual(h.sent('dial'), [{ cmd: 'dial', ref: 'mgr-1-1', uri: MGR }])
+  await h.ev({ ev: 'dialing', ref: 'mgr-1-1', call: 2 })
+  await h.ev({ ev: 'state', call: 2, state: 'DISCONNECTED', code: 486 })
+  assert.deepEqual(h.sent('play').at(-1), BUSY_PLAY)
+  await h.ev({ ev: 'play_done', call: 1, tag: 'busy' })
+  const e = h.journal[0]
+  assert.equal(e.outcome, 'busy_callback')
+  assert.equal(e.reason, 'manager_486')
+  assert.equal(e.ai, null)
+  assert.equal(ai.sessions.length, 0)
+  assert.equal(h.sent('audio_start').length, 0)
+  assert.equal(h.callbacks.listPending('907').length, 1)
+  // available() === true — як і без методу: уночі одразу ШІ
+  const ai2 = fakeAi()
+  ai2.available = () => true
+  const h2 = harness({ start: NIGHT, ai: ai2 })
+  await answered(h2)
+  await h2.clock.advance(2000)
+  assert.equal(h2.sent('dial').length, 0)
+  assert.equal(ai2.sessions.length, 1)
+})
+
+const MGR_IN = { ev: 'incoming', call: 10, from: 'sip:907@sip14.binotel.com', number: '907', name: 'Менеджер', gcid: null, to: 'sip:901@sip14.binotel.com' }
+const CB_PROMPTS = { ...PROMPTS, cbClientBusy: '/p/cb-client-busy.wav', cbNoAnswer: '/p/cb-no-answer.wav', cbConnecting: '/p/cb-connecting.wav', cbNone: '/p/cb-none.wav' }
+
+test('менеджер передзвонює, поки клієнт говорить із ШІ: не чекаємо й не набираємо — «Клієнт зараз розмовляє з віртуальним помічником…» (cbClientBusy), client_with_ai; є інший у черзі — набираємо його', async () => {
+  {
+    const h = harness({ config: { prompts: CB_PROMPTS } })
+    const s = await toAi(h)
+    s.speak()
+    assert.equal(h.callbacks.listPending('907').length, 1)
+    await h.ev(MGR_IN)
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'answer', call: 10, code: 200 })
+    await h.ev({ ev: 'state', call: 10, state: 'CONFIRMED', code: 200 })
+    await h.ev({ ev: 'media', call: 10, active: true })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'play', call: 10, file: '/p/cb-client-busy.wav', loop: false, tag: 'cbClientBusy' })
+    assert.equal(h.sent('play').filter((c) => c.call === 10 && c.tag === 'cbConnecting').length, 0)
+    await h.ev({ ev: 'play_done', call: 10, tag: 'cbClientBusy' })
+    assert.deepEqual(h.cmds.at(-1), { cmd: 'hangup', call: 10 })
+    const e = h.journal.find((x) => x.kind === 'callback')
+    assert.deepEqual([e.outcome, e.reason], ['callback_no_answer', 'client_with_ai'])
+    assert.equal(h.sent('dial').filter((c) => c.ref.startsWith('cb-')).length, 0)
+    assert.equal(h.callbacks.listPending('907')[0].attempts, undefined, 'спроба не рахується')
+    assert.equal(s.ended, false, 'розмова клієнта з ШІ триває')
+    assert.equal(h.journal.length, 1)
+  }
+  {
+    // у черзі ще клієнт, якого ніхто не тримає, — менеджеру набираємо його
+    const h = harness({ config: { prompts: CB_PROMPTS } })
+    h.callbacks.addPending({ managerKey: '907', clientNumber: '0500000002', ts: h.clock.now() - 3600000 })
+    await toAi(h)
+    await h.ev(MGR_IN)
+    assert.deepEqual(h.sent('dial').at(-1), { cmd: 'dial', ref: 'cb-10-1', uri: 'sip:0500000002@sip14.binotel.com;transport=udp' })
   }
 })

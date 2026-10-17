@@ -10,9 +10,13 @@
 // Запуск для e2e: node fake-ai-server.mjs --port 5097 --script steps.json --record out.json
 //   steps.json: {"firstSec":1.2, "steps":[{"say":1.0,"text":"…"},{"tool":{"name":"get_request_status","expect":true},
 //                "then":{"say":0.8}}, {"say":0.6,"tool":{"name":"end_call"}}], "closeAfterMs": null, "refuse": false,
-//                "auto": false, "vad": true}
+//                "auto": false, "vad": true, "queued": false}
 //   auto — кроки за таймером (після першої фрази й після кожного кроку, коли його фразу «дограно», + afterMs кроку), а не
 //   за репліками клієнта; vad:false — без реплік і перебивань (лише лічимо гучні шматки голосу клієнта: loudChunks).
+//   toolFirst у кроці — client_tool_call ДО звуку фрази кроку (як execution_mode 'immediate': виклик випереджає звук);
+//   queued — агент на ліміті з чергою: після metadata queue_status 'waiting' і тон утримання звичайними audio, без
+//   першої фрази (справжній сервер так тримає до 180 с); tentative — tentative_user_transcript на початку репліки
+//   клієнта. Тексти contextual_update — у contextualTexts.
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -57,7 +61,7 @@ function wsFrame(opcode, payload) {
 }
 
 export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {}, recordFile = null, log = () => {} } = {}) {
-  const rec = { connections: 0, inits: [], toolResults: [], userTurns: 0, interruptions: 0, pongs: 0, audioChunks: 0, loudChunks: 0, closes: [], toolCalls: [], t0: null }
+  const rec = { connections: 0, inits: [], toolResults: [], userTurns: 0, interruptions: 0, pongs: 0, audioChunks: 0, loudChunks: 0, closes: [], toolCalls: [], contextualTexts: [], t0: null }
   const save = () => { if (recordFile) fs.writeFileSync(recordFile, JSON.stringify(rec, null, 2)) }
   const sockets = new Set()
 
@@ -128,8 +132,7 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
         closeConn(1011, 'scripted close')
         return
       }
-      if (st.say) say(st.say, st.text || null)
-      if (st.tool) {
+      const callTool = () => {
         const callId = `tc-${stepIdx}`
         const expect = st.tool.expect === true
         rec.toolCalls.push({ name: st.tool.name, expect, at: at() })
@@ -139,6 +142,9 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
           pendingTool = { callId, then: st.then || null }
         }
       }
+      if (st.tool && st.toolFirst) callTool()
+      if (st.say) say(st.say, st.text || null)
+      if (st.tool && !st.toolFirst) callTool()
       if (!busy) {
         send({ type: 'agent_response_complete', agent_response_complete_event: { event_id: eventId } })
         scheduleNext()
@@ -156,6 +162,8 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
         silence = 0
         if (!inTurn && userSpeech >= 200) {
           inTurn = true
+          // проміжне розпізнавання (client_events tentative_user_transcript; SDK TentativeTranscriptionData)
+          if (script.tentative) send({ type: 'tentative_user_transcript', tentative_user_transcription_event: { user_transcript: '…', event_id: eventId + 1 } })
           if (Date.now() < speakingUntil - 150) {
             // клієнт заговорив поверх нашої фрази — перебивання
             rec.interruptions++
@@ -189,6 +197,16 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
           rec.t0 = rec.t0 ?? Date.now()
           save()
           send({ type: 'conversation_initiation_metadata', conversation_initiation_metadata_event: { conversation_id: `conv_fake_${rec.connections}`, agent_output_audio_format: script.format || 'pcm_8000', user_input_audio_format: script.format || 'pcm_8000' } })
+          if (script.queued) {
+            // QueueStatus: 'waiting' — після metadata і до тону утримання; тон — звичайні audio (клієнт має їх не грати)
+            rec.queued = (rec.queued || 0) + 1
+            send({ type: 'queue_status', queue_status_event: { status: 'waiting' } })
+            const hold = toneB64(0.5, 425)
+            for (let i = 0; i < hold.length; i += 1600) send({ type: 'audio', audio_event: { audio_base_64: hold.subarray(i, i + 1600).toString('base64'), event_id: eventId } })
+            pingTimer = setInterval(() => send({ type: 'ping', ping_event: { event_id: ++eventId, ping_ms: 30 } }), 1000)
+            save()
+            return
+          }
           const fm = m.conversation_config_override?.agent?.first_message
           if (fm) {
             say(script.firstSec ?? 1.2, fm)
@@ -216,6 +234,8 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
           return
         case 'contextual_update':
           rec.contextual = (rec.contextual || 0) + 1
+          rec.contextualTexts.push(m.text)
+          save()
           return
         default:
       }

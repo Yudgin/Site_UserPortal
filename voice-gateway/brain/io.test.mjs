@@ -283,7 +283,7 @@ test('config: типово «лінія зайнята» + передзвін, �
   assert.deepEqual(c.promptTexts, PROMPT_TEXTS)
   assert.equal(PROMPT_TEXTS.confirm, "Натисніть один, щоб з'єднатися з клієнтом, або два — якщо не можете говорити.")
   assert.equal(PROMPT_TEXTS.busy, 'На жаль, лінія менеджера зараз зайнята. Менеджер побачить ваш дзвінок і передзвонить вам.')
-  assert.deepEqual(Object.values(c.promptFiles), [null, null, null, null, null, null, null])
+  assert.deepEqual(Object.values(c.promptFiles), [null, null, null, null, null, null, null, null]) // + cbClientBusy (режим ai)
   assert.equal(PROMPT_TEXTS.pin, 'Введіть пін-код.')
   // зовнішні номери менеджерів — лише з прапорцем і PIN; черга, ліміти, очікування лінії, пропущений, REFER
   assert.deepEqual([c.managersExternal, c.managerPin, c.managerPinInvalid, c.pinTimeoutSec], [false, null, false, 10])

@@ -92,7 +92,15 @@
    поле `note`; «не перезванивать» снимает перезвон), `transfer_to_manager` (в рабочее время, не больше
    `VG_AI_TRANSFER_MAX`: сессия ИИ закрывается, шлюз снова звонит менеджеру — карточка с вопросом клиента, «1»,
    REFER/Replaces; не взял — снова ИИ), `end_call` (отбой, когда прощание доиграно). ИИ не вышел на связь —
-   «лінія зайнята» (`busy_callback`, `ai.error`). Итоги: `ai_noted`, `ai_answered`, `ai_client_hangup`, `connected`.
+   «лінія зайнята» (`busy_callback`, `ai.error`); сокет звука закрылся — сначала 0,5 с ждём отбоя клиента (обычно это
+   он положил трубку). Клиент отказался от перезвона — отказ держится (никакого «менеджер передзвонить» и нового
+   перезвона), пока он сам не попросит менеджера. Тишина считается только по клиенту (его реплики и своя VAD по звуку
+   движка; переспросы ИИ её не прерывают): 2 × `VG_AI_IDLE_SEC` — отбой. «З'єднати» и «завершити» выполняются, когда
+   фраза перед ними доиграна целиком (метка в конце очереди движка переносится, если звук фразы ещё приходит).
+   Инструменты на сессию: где соединять нельзя (нерабочее время, лимит), модель `transfer_to_manager` не видит.
+   Менеджер перезванивает, пока клиент говорит с ИИ, — ему «Клієнт зараз розмовляє з віртуальним помічником.
+   Передзвоніть за хвилину.» (`callback_no_answer`, `client_with_ai`, перезвон остаётся). Движок без звука к мозгу —
+   всё как `busy` (и ночью звоним менеджеру). Итоги: `ai_noted`, `ai_answered`, `ai_client_hangup`, `connected`.
    Нужен движок со звуком к мозгу (`engine/sip-engine-ai`) и агент ElevenLabs (`brain/ai-setup-elevenlabs.mjs`).
 
 ```
@@ -293,7 +301,9 @@ VG_ENGINE_PATH=voice-gateway/engine/sip-engine-ai VG_NO_ANSWER_MODE=ai VG_MANAGE
 
 `--apply` пишет `agent_id` в `<данные>/ai-elevenlabs.json` (или задайте `VG_AI_EL_AGENT`). Ключ — тот же
 `elevenlabs-api-key` из Secret Manager. Агент приватный (только подписанный URL), формат `pcm_8000`, язык `uk`, голос
-не записывается, разговоры у ElevenLabs хранятся 30 дней. Без агента или со старым движком режим `ai` работает как
+не записывается, разговоры у ElevenLabs хранятся 30 дней, одновременно — `VG_MAX_CALLS` разговоров без очереди (сверх —
+отказ, шлюз играет «лінія зайнята»), инструменты можно сужать на сессию (`tool_ids`; после обновления скрипта — снова
+`--apply`, иначе шлюз предупреждает и не сужает). Без агента или со старым движком режим `ai` работает как
 `busy` (шлюз пишет об этом при старте). Локально без ElevenLabs: `node voice-gateway/brain/fake-ai-server.mjs --port 5097
 --script <сценарий.json>` и `VG_AI_EL_URL=ws://127.0.0.1:5097/v1/convai/conversation?agent_id=test`.
 
@@ -381,7 +391,7 @@ Firestore не нужны (`--no-tts --no-lookup --card`). Журналы — в
 | | `VG_CALLBACK_DIAL_TIMEOUT_SEC` | 30 — сколько звонить клиенту при перезвоне (от INVITE, без повторов) |
 | | `VG_CALLBACK_TTL_HOURS`, `VG_LAST_CLIENT_DAYS` | 24, 30 — сколько живёт отложенный перезвон и «последний клиент» менеджера (0 — бессрочно) |
 | | `VG_CARD_SPEAK_NUMBER` | 0 — карточка номер клиента не называет; `1` — как раньше, номером группами |
-| | `VG_CONFIRM_WAV`, `VG_BUSY_WAV`, `VG_CB_CONNECTING_WAV`, `VG_CB_NONE_WAV`, `VG_CB_GREETING_WAV`, `VG_CB_NO_ANSWER_WAV`, `VG_PIN_WAV` | не заданы — синтез при старте (кэш `cache/prompt-<sha1>.wav`): вопрос «1 / 2», «лінія зайнята…», «З'єднуємо з клієнтом.», «Зараз немає клієнтів…», «Вітаємо! З вами з'єднується менеджер Runferry.», «Клієнт не відповідає.», «Введіть пін-код.»; нет ни файла, ни синтеза — фраза пропускается |
+| | `VG_CONFIRM_WAV`, `VG_BUSY_WAV`, `VG_CB_CONNECTING_WAV`, `VG_CB_NONE_WAV`, `VG_CB_GREETING_WAV`, `VG_CB_NO_ANSWER_WAV`, `VG_PIN_WAV`, `VG_CB_CLIENT_BUSY_WAV` | не заданы — синтез при старте (кэш `cache/prompt-<sha1>.wav`): вопрос «1 / 2», «лінія зайнята…», «З'єднуємо з клієнтом.», «Зараз немає клієнтів…», «Вітаємо! З вами з'єднується менеджер Runferry.», «Клієнт не відповідає.», «Введіть пін-код.», «Клієнт зараз розмовляє з віртуальним помічником…» (только в режиме `ai`); нет ни файла, ни синтеза — фраза пропускается |
 | `--fallback 906\|URI\|none` | `VG_FALLBACK` | 906 (в `--local` = `--manager`); `none` (или `off`, `-`) — без запасной, сразу голосовая почта (только `VG_NO_ANSWER_MODE=fallback`) |
 | | `VG_FALLBACK_MODE` | `consult` — запасной звоним сами, карточка, вопрос, REFER/Replaces; `blind` — старый слепой REFER (только для опытов) |
 | `--allow +380…,…` | `VG_ALLOWED_CALLERS` | пусто — все внешние звонки (кроме менеджеров) получают «занято» (486) и идут дальше по сценарию Binotel; свой тестовый номер задавайте при запуске (плюс внутренние: 3-значный номер без `X-BINOTEL-GCID`) |
@@ -439,7 +449,8 @@ Firestore не нужны (`--no-tts --no-lookup --card`). Журналы — в
   `noticeDone`, `callbackStored`; PIN — `pin`, `pinPrompt`, `pinOk`; ожидание, пока клиент на линии шлюза, — `cbWait`;
   клиент при перезвоне — `cbDial`, `cbAnswered`, `cbGreeting`…; у почты — `voicemail`,
   `vmPrompt`, `vmBeep`, `vmRecord`, `vmDone`), наборы (`to`: `manager`/`fallback`/`client`, попытка, время, код) и
-  повторы, коды, ответ на вопрос (`confirm`: `{manager: {plays, digit}}`), PIN (`pin`: `ok` / `wrong` / `timeout` /
+  повторы (`retries` — набора менеджера за весь звонок; у звонка через ИИ первый раунд — ещё в `ai.firstRetries`,
+  его код перевода — `ai.firstXferCode`, подтверждение — `ai.firstConfirm`, причина — `ai.why`), коды, ответ на вопрос (`confirm`: `{manager: {plays, digit}}`), PIN (`pin`: `ok` / `wrong` / `timeout` /
   `unfinished`, цифр нет), сколько отложенных перезвонов клиента снято при соединении (`pendingRemoved`), исход
   (`connected`, `connected_unconfirmed`, `bridged`, `busy_callback`, `connected_callback`,
   `connected_callback_unconfirmed`, `bridged_callback`, `callback_no_answer`, `callback_none`, `callback_cancelled`,
@@ -448,7 +459,7 @@ Firestore не нужны (`--no-tts --no-lookup --card`). Журналы — в
   `failed`, `aborted`; в режиме `blind` ещё `fallback`, `fallback_unconfirmed`), причины (`reason` — менеджер (при
   перезвоне — клиент: `client_timeout`, `client_486`…), `fallbackReason` — запасная, например `manager_timeout`,
   `manager_503`, `manager_declined` («2»), `manager_no_confirm` (нет «1»), `manager_xfer_unconfirmed`; при перезвоне
-  `no_target`, `dial_cap`, `client_on_line`, `target_busy`, `pin_wrong`, `pin_timeout`; у отклонённого внешнего номера
+  `no_target`, `dial_cap`, `client_on_line`, `client_with_ai`, `target_busy`, `pin_wrong`, `pin_timeout`; у отклонённого внешнего номера
   менеджера — `manager_external`; `abortReason` — звонок оборван остановкой шлюза `shutdown` или падением движка
   `engine_exit`), кто ответил (`answeredBy`), перезвон (`callback`: у `busy_callback` и у `client_hangup` с
   пропущенным — `{managerKey, stored, id, missed?}` или `why`, если не сохранён; у перезвона — `{managerKey, source:

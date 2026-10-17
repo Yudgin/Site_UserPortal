@@ -53,12 +53,15 @@ class AudioConn extends EventEmitter {
     this.sock.write(frame('C'))
   }
 
-  // Відповідь рушія на скидання: вирівняти лічильник надісланого з лічильником рушія
+  // Відповідь рушія на скидання: вирівняти лічильник надісланого з лічильником рушія. Скидання, що ще чекають своєї 'K',
+  // запам'ятали sentAtClear у координатах до цього вирівнювання — зсуваємо й їх (інакше друга 'K' вирівняє вдруге:
+  // надіслано 1000, скидання при 200, ще +500, скидання при 300 → має стати 300, а не -500).
   onCleared(played, dropped) {
     const c = this.clears.shift()
     if (!c) return
     const delta = played - (c.sentAtClear >>> 0)
     this.sentSamples += delta
+    for (const rest of this.clears) rest.sentAtClear += delta
     try { c.cb?.(played, dropped, delta) } catch { /* колбек мозку */ }
   }
 

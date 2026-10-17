@@ -27,7 +27,7 @@ import { ensurePrivateDir, makeDailyLog, pruneGatewayData, makeVoicemailPath, en
 import { startAudioServer } from './audiosock.mjs'
 import { createAgent } from './agent.mjs'
 import { makeElevenLabsProvider } from './realtime-elevenlabs.mjs'
-import { buildInstructions, FIRST_MESSAGES } from './aiprompt.mjs'
+import { buildInstructions, FIRST_MESSAGES, TOOL_DEFS } from './aiprompt.mjs'
 import { hoursText } from './hours.mjs'
 import { makeAiCallStore } from './aicalls.mjs'
 
@@ -343,14 +343,15 @@ async function main() {
   }
   // Фрази підтвердження й передзвону: свій WAV (VG_*_WAV) або синтез тим самим голосом (кеш cache/prompt-<sha1>.wav).
   // Не вийшло — фразу пропускаємо (дзвінок іде далі); синтез пробуємо знову з наступним дзвінком, не частіше раз на хвилину.
-  const PROMPT_LABELS = { confirm: 'вопрос менеджеру «1 / 2»', busy: '«линия занята» клиенту', cbConnecting: '«соединяем с клиентом» менеджеру', cbNone: '«нет ждущих клиентов» менеджеру', cbGreeting: 'приветствие клиенту при перезвоне', cbNoAnswer: '«клиент не отвечает» менеджеру', pin: '«введите пин-код» менеджеру' }
+  const PROMPT_LABELS = { confirm: 'вопрос менеджеру «1 / 2»', busy: '«линия занята» клиенту', cbConnecting: '«соединяем с клиентом» менеджеру', cbNone: '«нет ждущих клиентов» менеджеру', cbGreeting: 'приветствие клиенту при перезвоне', cbNoAnswer: '«клиент не отвечает» менеджеру', pin: '«введите пин-код» менеджеру', cbClientBusy: '«клиент говорит с ИИ, перезвоните» менеджеру' }
   for (const [name, file] of Object.entries(config.promptFiles)) {
     if (file) config.prompts[name] = checkPrompt(PROMPT_LABELS[name] || name, path.resolve(file), { required: false })
   }
   let promptsAt = 0
   let promptsBusy = false
-  // Фраза PIN потрібна лише з передзвоном із зовнішніх номерів
-  const missingPrompts = () => Object.keys(config.promptTexts).filter((k) => !config.prompts[k] && (k !== 'pin' || externalCallbackOn(config)))
+  // Фраза PIN потрібна лише з передзвоном із зовнішніх номерів; «клієнт говорить із ШІ» — лише в режимі ai
+  const promptNeeded = (k) => (k !== 'pin' || externalCallbackOn(config)) && (k !== 'cbClientBusy' || config.noAnswerMode === 'ai')
+  const missingPrompts = () => Object.keys(config.promptTexts).filter((k) => !config.prompts[k] && promptNeeded(k))
   const synthPrompts = async (first = false) => {
     const missing = missingPrompts()
     if (!tts || !missing.length || promptsBusy || (!first && Date.now() - promptsAt < 60000)) return
@@ -403,8 +404,14 @@ async function main() {
       const provider = makeElevenLabsProvider({
         getApiKey, agentId, apiBase: config.aiElApi, wsUrl: config.aiElUrl, voiceId: config.aiVoiceId, language: 'uk',
         llm: agentFile?.llm || config.aiElLlm, maxDurationSec: config.aiMaxSec + 60, pricePerMin: config.aiPricePerMin, log: warn,
+        // назва інструмента → id інструмента ElevenLabs (ai-setup-elevenlabs.mjs) — лише для агента, оновленого з дозволом
+        // переозначати tool_ids (toolIdsOverride): інакше ElevenLabs відхилить розмову з переозначенням
+        // (і лише для того самого агента: VG_AI_EL_AGENT може вказувати на іншого, без такого дозволу)
+        toolIds: agentFile?.toolIdsOverride === true && (!config.aiElAgent || config.aiElAgent === agentFile.agentId) ? agentFile.toolIds || null : null,
       })
+      if (agentFile?.toolIds && agentFile.toolIdsOverride !== true) warn('ИИ: агент ElevenLabs без разрешения переопределять инструменты — «соединить с менеджером» модель видит всегда (откажет сценарий). Обновите агента: node voice-gateway/brain/ai-setup-elevenlabs.mjs --apply')
       const hours = hoursText(config.workHours)
+      const allTools = TOOL_DEFS.map((t) => t.name)
       aiFactory = (o) => createAgent({
         call: o.call,
         server: audioServer,
@@ -412,6 +419,8 @@ async function main() {
         connectOpts: {
           instructions: buildInstructions({ kind: o.kind, hoursText: hours, category: o.category, transferAllowed: o.transferAllowed, statusDetail: config.aiStatusDetail, note: o.note }),
           firstMessage: FIRST_MESSAGES[o.kind] || FIRST_MESSAGES.busy,
+          // Інструменти цієї сесії: без права з'єднати (неробочий час, ліміт з'єднань) модель transfer_to_manager не бачить
+          tools: o.transferAllowed ? allTools : allTools.filter((n) => n !== 'transfer_to_manager'),
         },
         onTool: o.onTool,
         onSpeaking: o.onSpeaking,
@@ -533,8 +542,11 @@ async function main() {
       tts,
       voicemailPath: (o) => makeVoicemailPath({ dataDir: config.dataDir, timeZone: config.timeZone, ...o }),
       callbacks,
-      // Рушій без звуку до мозку (ready.audio) — сесії ШІ немає: сценарій піде як busy
-      ai: aiFactory ? (o) => (config.audioSupported ? aiFactory(o) : null) : null,
+      // Рушій без звуку до мозку (ready.audio) — сесії ШІ немає: available() === false, і сценарій іде рівно як busy
+      // (у неробочий час теж набирає менеджера, а не каже клієнту «лінія зайнята» без жодного дзвінка)
+      ai: aiFactory
+        ? Object.assign((o) => (config.audioSupported ? aiFactory(o) : null), { available: () => config.audioSupported === true })
+        : null,
       log: status,
       onDone: (entry) => {
         // Розшифровка розмови з ШІ — особисті дані: окремим файлом 0600 (і в заявку, якщо VG_AI_SAVE=firestore), у журнал — ні
