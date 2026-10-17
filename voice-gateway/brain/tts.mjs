@@ -61,8 +61,10 @@ export function readWavInfo(buf) {
 }
 export const isTelephonyWav = (info) => !!info && info.format === 1 && info.channels === 1 && info.rate === RATE && info.bits === 16
 
-// getApiKey — async () => ключ (кешує той, хто передає). Повертає async (text) => {file, cached}; помилка — виняток
-// (сценарій тоді бере genericCardFile або обходиться без картки).
+// getApiKey — async () => ключ (кешує той, хто передає). Повертає async (text, {prefix}) => {file, cached}; помилка —
+// виняток (сценарій тоді бере genericCardFile або обходиться без картки). prefix — початок імені файла в кеші:
+// 'card' (картки з іменем клієнта — прибираються через VG_CACHE_DAYS) або 'prompt' (сталі фрази шлюзу без
+// особистих даних — не прибираються: файл під живим шлюзом не має зникнути).
 export function makeTts({ cacheDir, getApiKey, voiceId, model, timeoutMs = 6000, fetchImpl = globalThis.fetch, now = Date.now }) {
   const inflight = new Map()
 
@@ -98,10 +100,10 @@ export function makeTts({ cacheDir, getApiKey, voiceId, model, timeoutMs = 6000,
     return { file, cached: false }
   }
 
-  return async function tts(text) {
+  return async function tts(text, { prefix = 'card' } = {}) {
     const t = String(text ?? '').trim()
     if (!t) throw new Error('tts: порожній текст')
-    const file = path.join(cacheDir, `card-${sha1(t)}.wav`)
+    const file = path.join(cacheDir, `${prefix === 'prompt' ? 'prompt' : 'card'}-${sha1(t)}.wav`)
     try {
       const st = await fs.stat(file)
       if (st.size > 44) return { file, cached: true }

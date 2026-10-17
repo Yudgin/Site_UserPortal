@@ -221,6 +221,7 @@ await step('0. старт рушія, локальний режим, помил�
   eng = startEngine('engine-local')
   const ready = await eng.wait((e) => e.ev === 'ready', 3000, 'ready')
   assert(ready.record === true, `ready без record: ${JSON.stringify(ready)}`)
+  assert(ready.dtmf === true, `ready без dtmf: ${JSON.stringify(ready)}`)
   eng.send({ cmd: 'local', bind: '127.0.0.1', port: 5092, user: 'gw' })
   const reg = await eng.wait((e) => e.ev === 'reg', 3000, 'reg (local)')
   assert(reg.active === true && reg.code === 200, 'local: reg.active')
@@ -296,8 +297,18 @@ await step('1. P1 дзвонить на шлюз → incoming → answer → п�
 await step('2. рушій дзвонить P1 → CONFIRMED → утримання по колу → заміна привітанням → hangup', async () => {
   const p1 = await startPeer('s2-p1', 5091, 6000)
   peers.push(p1)
-  eng.send({ cmd: 'dial', ref: 'out-1', uri: 'sip:peer@127.0.0.1:5091;transport=udp' })
+  // user-частина — номер телефону (як клієнт на передзвоні): у рядку рушія «dialing» — лише останні 4 цифри
+  eng.send({ cmd: 'dial', ref: 'out-1', uri: 'sip:0501234567@127.0.0.1:5091;transport=udp' })
   const d = await eng.wait((e) => e.ev === 'dialing' && e.ref === 'out-1', 3000, 'dialing')
+  {
+    let log = ''
+    for (let i = 0; i < 10 && !/dialing sip:/.test(log); i++) { await sleep(100); log = fs.readFileSync(eng.errLogPath, 'utf8') }
+    const own = log.split('\n').filter((l) => l.includes('[engine]'))
+    const line = own.find((l) => /call \d+: dialing /.test(l)) || ''
+    say(`  лог рушія: ${line.trim()}`)
+    assert(/dialing sip:…4567@127\.0\.0\.1:5091;transport=udp \(ref out-1\)/.test(line), `рядок dialing: ${line}`)
+    assert(!own.some((l) => l.includes('0501234567')), 'повний номер у рядках [engine]')
+  }
   const firstForCall = eng.events.find((e) => e.call === d.call)
   assert(firstForCall === d, 'першою подією виклику має бути dialing')
   await eng.wait((e) => e.ev === 'state' && e.call === d.call && e.state === 'CONFIRMED', 5000, 'CONFIRMED')
@@ -465,6 +476,42 @@ await step('5b. запис record/record_stop: голос P1 у WAV 0600 і reco
   const a2 = wavActiveSeconds(f2)
   say(`  запис 2: ${a2.total.toFixed(2)} с, звуку ${a2.active.toFixed(2)} с`)
   assert(a2.active >= 0.8, 'у другому записі немає голосу P1')
+})
+
+await step('5c. DTMF від pjsua: RFC 2833 (консоль «#») і SIP INFO («*») → одна подія dtmf на натискання', async () => {
+  const p1 = await startPeer('s5c-p1', 5091, 6000)
+  peers.push(p1)
+  eng.send({ cmd: 'dial', ref: 'dtmf-1', uri: 'sip:mgr@127.0.0.1:5091;transport=udp' })
+  const d = await eng.wait((e) => e.ev === 'dialing' && e.ref === 'dtmf-1', 3000, 'dialing')
+  await eng.wait((e) => e.ev === 'state' && e.call === d.call && e.state === 'CONFIRMED', 5000, 'CONFIRMED')
+  await eng.wait((e) => e.ev === 'media' && e.call === d.call && e.active, 5000, 'media')
+  await sleep(300)
+  // RFC 2833: консоль pjsua «#» питає рядок цифр — менеджер натискає 1
+  p1.cmd('#')
+  p1.cmd('1')
+  const e1 = await eng.wait((e) => e.ev === 'dtmf' && e.call === d.call, 4000, 'dtmf (RFC 2833)')
+  say(`  RFC 2833: ${JSON.stringify(e1)}`)
+  assert(e1.digit === '1' && e1.method === 'rfc2833', `dtmf ${JSON.stringify(e1)}`)
+  await sleep(1200) // кінець події, оновлення тривалості — не нові натискання
+  assert(eng.events.filter((e) => e.ev === 'dtmf' && e.call === d.call).length === 1, 'одне натискання → одна подія dtmf')
+  // SIP INFO (application/dtmf-relay): консоль «*» — менеджер натискає 2
+  p1.cmd('*')
+  p1.cmd('2')
+  const e2 = await eng.wait((e) => e.ev === 'dtmf' && e.call === d.call && e.digit === '2', 4000, 'dtmf (SIP INFO)')
+  say(`  SIP INFO: ${JSON.stringify(e2)}`)
+  assert(e2.method === 'info', `dtmf ${JSON.stringify(e2)}`)
+  await sleep(800)
+  assert(eng.events.filter((e) => e.ev === 'dtmf' && e.call === d.call).length === 2, 'SIP INFO: одна подія на натискання')
+  // два натискання поспіль «11» — дві події
+  p1.cmd('#')
+  p1.cmd('11')
+  await eng.wait((e) => e.ev === 'dtmf' && e.call === d.call && e.digit === '1', 4000, 'перша «1» з двох')
+  await eng.wait((e) => e.ev === 'dtmf' && e.call === d.call && e.digit === '1', 4000, 'друга «1» з двох')
+  eng.send({ cmd: 'hangup', call: d.call })
+  await eng.wait((e) => e.ev === 'state' && e.call === d.call && e.state === 'DISCONNECTED', 5000, 'DISCONNECTED')
+  let log = ''
+  for (let i = 0; i < 10 && !(/dtmf via rfc2833/.test(log) && /dtmf via info/.test(log)); i++) { await sleep(100); log = fs.readFileSync(eng.errLogPath, 'utf8') }
+  assert(/dtmf via rfc2833/.test(log) && /dtmf via info/.test(log), 'у лозі рушія — метод DTMF')
 })
 
 await step('6. quit: рушій виходить з кодом 0, stdout — лише JSON', async () => {

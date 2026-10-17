@@ -48,6 +48,12 @@ make clean
   нет (раньше это было только в логе, и мозг «писал» тишину до предела записи). Пустой или отсутствующий файл —
   `record_done` с `sec` < 1 или `missing:true`: мозг считает это `voicemail_empty`.
 - Повторы набора на 503 делает **мозг** (новый `dial` с новым `ref`), движок не повторяет.
+- **DTMF** (менеджер нажимает «1» / «2»): RFC 2833 (telephone-event в RTP, его движок предлагает в SDP) и SIP INFO
+  (`application/dtmf-relay`). pjsua2 с `on_dtmf_event` отдаёт цифры **только** в `onDtmfEvent` (проверено
+  smoke-тестом: и RFC 2833, и INFO) — старый движок слушал лишь `onDtmfDigit` и цифр не сообщал вовсе. Движок слушает
+  оба колбэка и шлёт одно событие на нажатие: начало события (без `IS_UPDATE`; обновления длительности и конец —
+  не новые нажатия) или `onDtmfDigit`; тот же символ тем же методом из другого колбэка в пределах 300 мс — то же
+  нажатие. В журнал движка пишется только метод (`dtmf via rfc2833`), сама цифра — нет.
 - Пароль SIP не печатается нигде: команда `register` в журнал пишется только именем, буфер строки затирается.
 
 ## Протокол
@@ -64,7 +70,7 @@ make clean
 | `stop` | `call` | остановить проигрывание |
 | `dial` | `ref`, `uri` | исходящий звонок |
 | `xfer` | `call`, `uri` | слепой перевод (REFER) |
-| `xfer_replaces` | `call` (A), `dest` (B) | сопровождаемый перевод: REFER на A с Replaces ноги B (Refer-To `…?Replaces=…` без `Require=replaces` — как консоль pjsua в ручной проверке с Binotel) |
+| `xfer_replaces` | `call` (A), `dest` (B) | сопровождаемый перевод: REFER на A с Replaces ноги B (Refer-To `…?Replaces=…` без `Require=replaces` — как консоль pjsua в ручной проверке с Binotel). Refer-To pjsua2 строит из remote URI ноги B: у исходящей — её To (адрес набора, например номер клиента), у входящей — её From (pjsip пишет From/To без порта) |
 | `bridge` | `a`, `b` | локальный мост звука A↔B в обе стороны (запасной вариант), останавливает проигрыватели |
 | `record` | `call`, `file` (абсолютный путь `.wav`, файла ещё нет) | записывать голос собеседника в WAV; если медиа ещё нет — начнёт, когда появится; одна запись на звонок |
 | `record_stop` | `call` | закончить запись → `record_done` |
@@ -74,7 +80,7 @@ make clean
 
 | Событие | Поля |
 |---|---|
-| `ready` | `record: true` — движок умеет `record`/`record_stop` (у старого движка поля нет); ждёт `register`/`local` |
+| `ready` | `record: true` — движок умеет `record`/`record_stop`; `dtmf: true` — сообщает DTMF (у старых движков полей нет); ждёт `register`/`local` |
 | `reg` | `code`, `reason`, `active`, `expires`; в локальном режиме один раз `{code:200, reason:"local", active:true, local:true}` |
 | `incoming` | `call`, `from` (`sip:0500000001@45.91.130.64`), `number`, `name`, `gcid` (X-BINOTEL-GCID или `null`), `to`, `set_caller_id` (X-BINOTEL-SET-CALLER-ID или `null`), `src` (IP:порт отправителя) |
 | `untrusted` | `src`, `method` — INVITE с недоверенного адреса отклонён 403 (только боевой режим) |
@@ -83,7 +89,7 @@ make clean
 | `media` | `call`, `active` (меняется, напр. при удержании) |
 | `play_done` | `call`, `tag` — только для `loop:false`, в конце файла |
 | `xfer` | `call`, `code`, `reason`, `final` (pjsua сообщает 202 как `100 Accepted`, затем NOTIFY 100, 200) |
-| `dtmf` | `call`, `digit` (RFC 2833) |
+| `dtmf` | `call`, `digit` (`"0"`…`"9"`, `"*"`, `"#"`, `"A"`…`"D"`), `method` (`"rfc2833"` / `"info"`) — одно событие на нажатие, например `{"ev":"dtmf","call":2,"digit":"1","method":"rfc2833"}` |
 | `record_done` | `call`, `file`, `sec` (длина звука, с), `reason` (`stop` / `hangup` / `shutdown`), `final` (заголовок WAV с длиной уже записан), `missing: true` — файла нет (или он нулевого размера) |
 | `error` | `cmd`, `call`, `ref`, `msg`; если `dial` не удалось начать — `{cmd:"dial", ref, call:null}` без `dialing` |
 
@@ -93,7 +99,9 @@ make clean
 ## Журнал
 
 stderr: строки `[engine] ...` и журнал pjsip. Уровень — `SIP_ENGINE_LOG_LEVEL` (0–6, по умолчанию 3;
-4 — с текстами SIP-сообщений). Номер входящего в строках `[engine]` — только последние 4 цифры. На уровне 4
+4 — с текстами SIP-сообщений). Номер входящего в строках `[engine]` — только последние 4 цифры; набираемый номер
+(`dialing`, `blind transfer to`, `incoming REFER to`: user-часть URI из 5+ цифр — клиент на перезвоне, мобильный
+менеджера) — тоже: `dialing sip:…4567@sip14.binotel.com;transport=udp`; внутренние линии (907) и имена — как есть. На уровне 4
 в журнал попадают полные INVITE — **номера и имена клиентов**, заголовки X-BINOTEL-*; значения
 `Authorization`/`Proxy-Authorization` и `nonce`/`opaque` в `WWW-`/`Proxy-Authenticate` заменяются на `<…>`
 (по digest-ответу иначе можно подбирать пароль линии офлайн). Такой журнал не пересылать целиком. Строки `conference.c Remove port N failed: PJ_EINVAL` при остановке
@@ -111,7 +119,7 @@ ENGINE="$PWD/sip-engine-next" ./smoke-test.sh  # проверить новый �
 (`--null-audio --no-tcp --auto-answer 200`, управление через stdin), плюс «сырой» SIP через UDP и
 поддельный регистратор. Проверяет:
 
-0. `ready` (с `record: true`), `local`, ошибки на неизвестные звонки, кривой JSON и неудачный `dial`;
+0. `ready` (с `record: true` и `dtmf: true`), `local`, ошибки на неизвестные звонки, кривой JSON и неудачный `dial`;
 1a. «сырой» INVITE: `gcid` из `X-Binotel-Gcid`, имя, номер, отказ 486 (+ ACK);
 1. pjsua звонит на шлюз → `incoming` → `answer` → приветствие (`play` до появления медиа) → `media`,
    `play_done` через ~4,86 с; запись у pjsua — звук есть; кодек PCMA, хотя pjsua предлагает PCMU раньше;
@@ -125,6 +133,9 @@ ENGINE="$PWD/sip-engine-next" ./smoke-test.sh  # проверить новый �
    идёт, файл уже есть, `record_stop` без записи); 2,5 с записи → `record_stop` → `record_done` (`stop`, `final`),
    WAV 8 кГц моно 16 бит с правами 0600 и голосом pjsua; вторая запись того же звонка, pjsua кладёт трубку →
    `record_done` (`hangup`) после `DISCONNECTED`, файл с голосом;
+5c. DTMF: движок звонит pjsua; консоль pjsua «#» → «1» (RFC 2833) — ровно одно событие `dtmf` `{digit:"1",
+   method:"rfc2833"}`, «*» → «2» (SIP INFO) — `{digit:"2", method:"info"}`, «11» — два события; в журнале движка —
+   только метод;
 6. `quit` → код 0, в stdout только JSON;
 7. `register` на поддельный регистратор 127.0.0.1:5096: 401 → digest (проверяется по паролю) → 200,
    REGISTER на `sip:…;transport=udp`, INVITE с `Route: <sip:…;transport=udp;lr>`, в SDP только 8/0/telephone-event,

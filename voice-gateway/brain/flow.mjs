@@ -1,50 +1,113 @@
 // Сценарій вхідного дзвінка голосового шлюзу — чиста машина станів, без I/O. Усе зовнішнє приходить ззовні:
-// send(cmd) — команда рушію, clock {now, setTimeout, clearTimeout}, lookup(phone), buildCard(lookup, {number, phone}),
-// tts(text) → {file, cached}, voicemailPath({gcid, number}) → шлях WAV голосової пошти (теку створює той, хто передав),
-// onDone(entry) — запис у журнал, log(msg) — рядок статусу для оператора (рос.).
+// send(cmd) — команда рушію, clock {now, setTimeout, clearTimeout}, lookup(phone), buildCard(lookup, {number, phone,
+// speakNumber}), tts(text) → {file, cached}, voicemailPath({gcid, number}) → шлях WAV голосової пошти (теку створює той,
+// хто передав), callbacks — сховище передзвонів (callbacks.mjs: addPending, updatePending, removePending, pickTarget,
+// setLastClient, removePendingFor, markAttempt, canDial, noteDial), partyBusy(number) — чи цей номер зараз на іншому
+// дзвінку шлюзу ('line' — клієнт на лінії, 'dialing' — його набирає інший передзвін; дає диспетчер), onDone(entry) —
+// запис у журнал, log(msg) — рядок статусу для оператора (рос.). Сталі фрази — з config.prompts (готовий WAV або
+// нічого: тоді фразу пропускаємо, дзвінок іде далі).
 //
-// Нога A — клієнт (вхідний на лінію), нога B — той, кому зараз дзвонимо: менеджер (managerUri), а якщо він не взяв —
-// запасна лінія (fallbackUri). Порядок:
+// ДЗВІНОК КЛІЄНТА (kind 'client'). Нога A — клієнт (вхідний на лінію), нога B — той, кому зараз дзвонимо: менеджер
+// (managerUri), а в режимі fallback — потім запасна лінія (fallbackUri). Порядок:
 //   вхідний A → (не з білого списку і не внутрішній → 486) → answer 200 → привітання → утримання (по колу);
-//   паралельно: пошук клієнта → текст картки → синтез; через ~1 с після відповіді — набір менеджера.
+//   паралельно: пошук клієнта → текст картки (без номера телефону) → синтез; через ~1 с після відповіді — набір менеджера.
 //   Набір: 503/408/480 або помилка рушія до відповіді → повтор через dialRetryIntervalMs, поки наступна спроба
 //   починається в межах dialRetryWindowSec від першого набору цієї сторони (Android-софтфон, що спить, кілька секунд
 //   відповідає 503); утримання клієнту весь цей час грає по колу.
 //   Тайм-аут сторони (managerTimeoutSec / fallbackTimeoutSec) — скільки дзвонить спроба: від її першого 180/183
 //   (немає 180 — від її INVITE), тож повтор, що зазвонив на 10-й с, теж дзвонить повний час. Уся сторона разом із
 //   повторами — не довше dialRetryWindowSec + тайм-аут від першого набору.
-//   B відповів → картка на B (синтез чекаємо ≤ ttsWaitMs; не вдався — genericCardFile або без картки) →
-//   кінець картки + afterCardMs (але не пізніше cardMaxSec від її початку) → xfer_replaces(A, B) →
-//   фінальний 2xx — з'єднано (АТС гасить обидві ноги; жива через xferClearMs — кладемо);
+//   B відповів → клієнт стає «останнім клієнтом» цього менеджера (last-clients.json) → картка на B (синтез чекаємо
+//   ≤ ttsWaitMs; не вдався — genericCardFile або без картки) → кінець картки + afterCardMs (але не пізніше cardMaxSec
+//   від її початку) → фраза підтвердження prompts.confirm: DTMF «1» (і під час картки) → xfer_replaces(A, B);
+//   «2» — не може говорити; немає цифри confirmTimeoutSec після кінця фрази — фраза ще раз (confirmRepeats), знову
+//   нічого — як не відповів (так і голосова пошта мобільного оператора менеджера не забере клієнта).
+//   Фінальний 2xx — з'єднано (АТС гасить обидві ноги; жива через xferClearMs — кладемо);
 //   REFER прийнято (202/NOTIFY 100), фінального NOTIFY немає, а АТС поклала обидві ноги — теж успіх Replaces
 //   (…_unconfirmed); поклала лише B, а клієнт і через xferTimeoutMs на нашій нозі — переведення не відбулося
-//   (…_xfer_unconfirmed → наступна сторона або пошта): при вдалому Replaces Binotel кладе A одразу за B;
+//   (…_xfer_unconfirmed → як не відповів): при вдалому Replaces Binotel кладе A одразу за B;
 //   невдача — локальний міст A↔B (bridged, не довше bridgeMaxMin). A поклав — кладемо B (client_hangup).
-//   Менеджер не взяв / зайнятий / поклав до переведення / повтори вичерпано → те саме із запасною лінією
-//   (connected_fallback); не вийшло і з нею або її немає → голосова пошта: привітання, якщо ще грає, догрує →
-//   стоп утримання → voicemailPromptFile → сигнал beepFile → запис голосу клієнта (record) до voicemailMaxSec або
-//   до його відбою → кладемо (voicemail; запис коротший за voicemailMinSec або файла немає — voicemail_empty,
-//   порожній файл видаляє gateway.mjs). Шлюз зупинили під час запису — voicemail з stop 'aborted' і abortReason.
-//   Сліпе переведення (REFER без Replaces) — лише з fallbackMode 'blind' (старий шлях, для дослідів): живий Binotel
-//   2026-10-17 відповідав на нього фінальним NOTIFY 200 за ~2 мс, навіть коли запасна була недоступна, і клієнта
-//   просто роз'єднувало через 4–5 с. У blind: немає жодної відповіді на REFER за xferTimeoutMs — кладемо A;
+//   Без «1» не переводимо ніколи: рушій без DTMF — цифр не буде, отже «не підтвердив» (gateway.mjs з таким рушієм і не
+//   стартує); переводити одразу після картки — лише явне confirmEnabled=false (VG_CONFIRM=0).
+//   Клієнта з'єднано (connected / _unconfirmed / bridged, і через запасну) — його відкладені передзвони в цього
+//   менеджера знімаємо: він уже говорив із менеджером, передзвонювати не треба.
+//   Менеджер не взяв / зайнятий / «2» / без «1» / поклав до переведення / повтори вичерпано → за noAnswerMode:
+//     busy (типово) — відкладений передзвін {номер, gcid, заявка, картка, менеджер} у callbacks.json; привітання, якщо
+//       ще грає, догрує → стоп утримання → prompts.busy клієнту («лінія зайнята, менеджер передзвонить») → відбій
+//       (busy_callback). Клієнта не тримаємо на лінії. Клієнт сам поклав трубку, поки менеджеру вже дзвонили (у
+//       менеджера пропущений) — теж відкладений передзвін (missed, callbackOnHangup), підсумок client_hangup.
+//     fallback — те саме, що з менеджером, із запасною лінією (connected_fallback); не вийшло і з нею або її немає →
+//       голосова пошта;
+//     voicemail — одразу голосова пошта: привітання, якщо ще грає, догрує → стоп утримання → voicemailPromptFile →
+//       сигнал beepFile → запис голосу клієнта (record) до voicemailMaxSec або до його відбою → кладемо (voicemail;
+//       запис коротший за voicemailMinSec або файла немає — voicemail_empty, порожній файл видаляє gateway.mjs).
+//       Шлюз зупинили під час запису — voicemail з stop 'aborted' і abortReason.
+//   Сліпе переведення (REFER без Replaces) — лише fallback + fallbackMode 'blind' (старий шлях, для дослідів): живий
+//   Binotel 2026-10-17 відповідав на нього фінальним NOTIFY 200 за ~2 мс, навіть коли запасна була недоступна, і
+//   клієнта просто роз'єднувало через 4–5 с. У blind: немає жодної відповіді на REFER за xferTimeoutMs — кладемо A;
 //   REFER прийнято — чекаємо BYE від АТС або фінальний NOTIFY до fallbackRingMs.
-import { normPhone } from '../../server/phone.js'
+//
+// ПЕРЕДЗВІН (kind 'callback'): номер того, хто дзвонить, — із config.managers, порівнюємо ЦІЛКОМ (без підрядка).
+// Це менеджер, а не клієнт: його не вважаємо клієнтом і йому ж не дзвонимо (захист від петлі). Внутрішня лінія
+// (3–4 цифри без X-BINOTEL-GCID) — одразу передзвін. Зовнішній номер менеджера можна підробити: передзвін із нього —
+// лише з managersExternal і managerPin (answer → prompts.pin → PIN цифрами DTMF за pinTimeoutSec; невірний / немає —
+// відбій, callback_denied), інакше 486 (rejected, manager_external). Нога A — менеджер, нога B — клієнт. answer →
+// prompts.cbConnecting («З'єднуємо з клієнтом.») → утримання; одразу набір клієнта: перший у черзі відкладених
+// передзвонів групи менеджера (ще не пробувані — найсвіжіші першими, ті, хто вже не взяв, — у кінці), інакше його
+// останній клієнт (без повторів, не довше callbackDialTimeoutSec; не частіше callbackMaxDialsPerDay за 24 год). Ціль
+// ще на лінії шлюзу (дослуховує «лінія зайнята…») — менеджер на утриманні, чекаємо до callbackLineWaitSec; її вже
+// набирає інший передзвін — беремо наступну. Клієнт відповів → prompts.cbGreeting клієнту → xfer_replaces(A, B):
+// REFER на нозі менеджера з Replaces ноги клієнта — та сама форма, що й перевірена A/B (callbackReferOn 'client' —
+// навпаки: REFER на нозі клієнта з Replaces ноги менеджера) → connected_callback, відкладені передзвони цього клієнта
+// в групи менеджера прибрано. Клієнт не взяв / зайнятий / 4xx/5xx / поклав → prompts.cbNoAnswer менеджеру, відбій,
+// передзвін лишається, спроба +1 (callback_no_answer; після callbackMaxAttempts знімається). Передзвонювати нікому →
+// prompts.cbNone, відбій (callback_none). Менеджер поклав, поки набираємо, — набір клієнта скасовуємо
+// (callback_cancelled).
+import { clientDialUri, isInternalKey, managerGroupOf, managerKeyOf, partyKey, resolveManagers, strictPhone } from './callbacks.mjs'
+import { validPin } from './config.mjs'
 
 const ok2xx = (c) => Number(c) >= 200 && Number(c) < 300
+const NO_ANSWER_MODES = ['busy', 'fallback', 'voicemail']
 
 // Внутрішній дзвінок — тризначний номер БЕЗ X-BINOTEL-GCID: дзвінки зі сценарію (клієнти, у т. ч. короткі
 // номери операторів) Binotel завжди позначає GCID, внутрішні з 907 — ні.
 export const isInternal = (n, gcid = null) => /^\d{3}$/.test(String(n ?? '').trim()) && !gcid
-// Внутрішні — усі (або лише з allowedInternal, якщо список задано); інші — лише з allowedCallers (порівнюємо в E.164).
+// Внутрішні — усі (або лише з allowedInternal, якщо список задано); інші — лише з allowedCallers (порівнюємо в E.164
+// цілком: «+49380500000001» — не +380500000001).
 export function isAllowed(number, allowedCallers = [], { gcid = null, allowedInternal = [] } = {}) {
   const n = String(number ?? '').trim()
   if (isInternal(n, gcid)) return !allowedInternal?.length || allowedInternal.map((x) => String(x).trim()).includes(n)
-  const p = normPhone(n)
-  return !!p && allowedCallers.map((x) => normPhone(x)).includes(p)
+  const p = strictPhone(n)
+  return !!p && (allowedCallers || []).map((x) => strictPhone(x)).includes(p)
 }
 export const callerAllowed = (incoming, config) =>
   isAllowed(incoming?.number, config.allowedCallers, { gcid: incoming?.gcid ?? null, allowedInternal: config.allowedInternal || [] })
+
+// Список менеджерів конфігурації; немає — лише лінія менеджера з managerUri
+const managersOf = (config) => config.managers || resolveManagers(config.managersSpec, config.managerUri)
+// Хто з менеджерів дзвонить: {key, group, external} або null. Внутрішня лінія (3–4 цифри) — лише без X-BINOTEL-GCID
+// (як isInternal: з GCID це дзвінок зі сценарію, тобто клієнт, у т. ч. з коротким номером оператора). Зовнішній номер —
+// лише точний збіг (strictPhone). Чи приймати зовнішнього — externalCallbackOn.
+export function managerCaller(incoming, config) {
+  const k = partyKey(String(incoming?.number ?? '').trim())
+  if (!k) return null
+  const group = managerGroupOf(k, managersOf(config))
+  if (!group) return null
+  const external = !isInternalKey(k)
+  if (!external && incoming?.gcid) return null
+  return { key: group[0], group, external }
+}
+export const isManagerCaller = (incoming, config) => !!managerCaller(incoming, config)
+// Передзвін із зовнішнього номера менеджера (його можна підробити) — лише з явним прапорцем і PIN
+export const externalCallbackOn = (config) => config.managersExternal === true && validPin(config.managerPin)
+// Порівняння PIN без раннього виходу (час не підказує, скільки цифр уже правильні)
+const pinEqual = (a, b) => {
+  const x = String(a ?? '')
+  const y = String(b ?? '')
+  let d = x.length ^ y.length
+  for (let i = 0; i < y.length; i++) d |= (x.charCodeAt(i) || 0) ^ y.charCodeAt(i)
+  return d === 0 && y.length > 0
+}
 
 // Номер стороннього (не пропущеного) абонента в журналі й статусі — лише останні 4 цифри.
 export const maskNumber = (n) => {
@@ -52,44 +115,74 @@ export const maskNumber = (n) => {
   return d ? `…${d.slice(-4)}` : null
 }
 
-// Мітки кроків у журналі для кожної сторони: менеджер — як і раніше, запасна — з префіксом fb.
+// Мітки кроків у журналі для кожної сторони: менеджер — як і раніше, запасна — з префіксом fb, клієнт на передзвоні — cb.
 const MARKS = {
-  manager: { dial: 'dial', ringing: 'managerRinging', answered: 'managerAnswered', ready: 'managerReady', down: 'managerDown', card: 'card', cardDone: 'cardDone', xfer: 'xfer', xferAccepted: 'xferAccepted', xferFinal: 'xferFinal' },
-  fallback: { dial: 'fbDial', ringing: 'fbRinging', answered: 'fbAnswered', ready: 'fbReady', down: 'fbDown', card: 'fbCard', cardDone: 'fbCardDone', xfer: 'fbXfer', xferAccepted: 'fbXferAccepted', xferFinal: 'fbXferFinal' },
+  manager: { dial: 'dial', ringing: 'managerRinging', answered: 'managerAnswered', ready: 'managerReady', down: 'managerDown', card: 'card', cardDone: 'cardDone', confirm: 'confirm', confirmRepeat: 'confirmRepeat', digit: 'digit', xfer: 'xfer', xferAccepted: 'xferAccepted', xferFinal: 'xferFinal' },
+  fallback: { dial: 'fbDial', ringing: 'fbRinging', answered: 'fbAnswered', ready: 'fbReady', down: 'fbDown', card: 'fbCard', cardDone: 'fbCardDone', confirm: 'fbConfirm', confirmRepeat: 'fbConfirmRepeat', digit: 'fbDigit', xfer: 'fbXfer', xferAccepted: 'fbXferAccepted', xferFinal: 'fbXferFinal' },
+  client: { dial: 'cbDial', ringing: 'cbRinging', answered: 'cbAnswered', ready: 'cbReady', down: 'cbDown', card: 'cbGreeting', cardDone: 'cbGreetingDone', confirm: 'cbConfirm', confirmRepeat: 'cbConfirmRepeat', digit: 'cbDigit', xfer: 'xfer', xferAccepted: 'xferAccepted', xferFinal: 'xferFinal' },
 }
 // Рядки статусу (рос.) для кожної сторони
 const WHO = {
   manager: { name: 'менеджер', call: 'звоню менеджеру', redial: 'повторный набор менеджера', to: 'менеджеру', noAnswer: 'менеджер не ответил', answered: 'менеджер ответил', with: 'с менеджером', down: 'менеджер положил трубку' },
   fallback: { name: 'запасная линия', call: 'звоню на запасную линию', redial: 'повторный набор запасной линии', to: 'запасной линии', noAnswer: 'запасная линия не ответила', answered: 'запасная линия ответила', with: 'с запасной линией', down: 'запасная линия положила трубку' },
+  client: { name: 'клиент', call: 'звоню клиенту', redial: 'повторный набор клиента', to: 'клиенту', noAnswer: 'клиент не ответил', answered: 'клиент ответил', with: 'с клиентом', down: 'клиент положил трубку' },
 }
-// Таймери етапу дзвінка стороні B — скасовуємо всі, коли переходимо до наступної сторони чи до пошти
-const STAGE_TIMERS = ['dial', 'ring', 'stageCap', 'graceB', 'tts', 'cardCap', 'afterCard', 'xfer', 'bothDown', 'bridgeCap']
+// Таймери етапу дзвінка стороні B — скасовуємо всі, коли переходимо до наступної сторони, пошти чи останньої фрази
+const STAGE_TIMERS = ['dial', 'ring', 'stageCap', 'graceB', 'tts', 'cardCap', 'afterCard', 'confirm', 'xfer', 'bothDown', 'bridgeCap', 'cbWait']
 const VM_PROMPT_MAX_MS = 30000 // play_done фрази пошти не прийшов — сигнал усе одно
 const VM_BEEP_MAX_MS = 3000
 const VM_DONE_WAIT_MS = 3000 // record_done після зупинки запису не прийшов — завершуємо без нього
+const PROMPT_MAX_MS = 30000 // play_done фрази (підтвердження, «лінія зайнята»…) не прийшов — ідемо далі все одно
+const NOTICE_CAP_MS = 60000 // остання фраза: нога A так і не готова / фраза не скінчилась — кладемо все одно
 
-export function createFlow({ incoming, config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, log = () => {}, onDone = () => {}, rejectReason = null }) {
+export function createFlow({ incoming, config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, callbacks = null, partyBusy = null, log = () => {}, onDone = () => {}, rejectReason = null }) {
   const A = incoming.call
   const number = String(incoming.number ?? '').trim()
-  const internal = isInternal(number, incoming.gcid ?? null)
-  const allowed = callerAllowed(incoming, config)
-  const phone = internal ? null : normPhone(number) || null
+  const gcid = incoming.gcid ?? null
+  const internal = isInternal(number, gcid)
+  const managers = managersOf(config)
+  // Дзвонить менеджер — це передзвін клієнту, а не новий клієнт (і менеджера йому ж самому не набираємо)
+  const mc = managerCaller(incoming, config)
+  const callerManager = mc?.key ?? null
+  const callerGroup = mc?.group ?? null
+  const kind = mc ? 'callback' : 'client'
+  const callback = kind === 'callback'
+  // Зовнішній номер менеджера без VG_MANAGERS_EXTERNAL=1 і PIN — 486: не передзвін (номер міг бути підроблений) і не
+  // клієнт (інакше шлюз набрав би менеджера йому ж самому)
+  const externalDenied = !!mc?.external && !externalCallbackOn(config)
+  const pinRequired = !!mc?.external && !externalDenied
+  const allowed = callback ? !externalDenied : callerAllowed(incoming, config) // менеджери — завжди (зовнішні — з PIN)
+  const phone = internal ? null : strictPhone(number)
   // Чужий номер (його відхиляємо) у статус і журнал — лише маскою
   const shownNumber = allowed ? phone || number || null : maskNumber(phone || number)
-  const who = shownNumber || 'без номера'
+  const who = callback ? `${shownNumber || 'менеджер'}, перезвон` : shownNumber || 'без номера'
+  // Номер клієнта на передзвоні: повністю — лише тестовий з allowedCallers, інакше маскою (як для відхилених)
+  const clientShown = (n) => (isAllowed(n, config.allowedCallers) ? strictPhone(n) || n : maskNumber(n))
   const t0 = clock.now()
   const fallbackMode = config.fallbackMode === 'blind' ? 'blind' : 'consult'
+  const noAnswerMode = NO_ANSWER_MODES.includes(config.noAnswerMode) ? config.noAnswerMode : 'busy'
+  // Підтвердження «1» — у дзвінку клієнта завжди, якщо його не вимкнено явно (VG_CONFIRM=0). Рушій без DTMF цифр не
+  // повідомить — тоді «не підтвердив», а не переведення наосліп (gateway.mjs з таким рушієм і не стартує).
+  const confirmOn = !callback && config.confirmEnabled !== false
+  const prompt = (name) => config.prompts?.[name] || null
+  // Під цим ключем — відкладені передзвони і «останній клієнт» менеджера, якому дзвонимо; шукаємо — за всією групою
+  const mgrKey = managerKeyOf(config.managerUri, managers) || partyKey(config.managerUri)
+  const mgrGroup = managerGroupOf(config.managerUri, managers) || (mgrKey ? [mgrKey] : [])
+  const referOnClient = callback && config.callbackReferOn === 'client'
   const targets = {
-    manager: { uri: config.managerUri, timeoutSec: config.managerTimeoutSec, prefix: 'mgr' },
-    fallback: { uri: config.fallbackUri || '', timeoutSec: config.fallbackTimeoutSec ?? 20, prefix: 'fb' },
+    manager: { uri: config.managerUri, timeoutSec: config.managerTimeoutSec, prefix: 'mgr', retry: true },
+    fallback: { uri: config.fallbackUri || '', timeoutSec: config.fallbackTimeoutSec ?? 20, prefix: 'fb', retry: true },
+    client: { uri: null, timeoutSec: config.callbackDialTimeoutSec ?? 30, prefix: 'cb', retry: false },
   }
+  const greetTag = callback ? 'cbConnecting' : 'greeting'
+  const cardTag = callback ? 'cbGreeting' : 'card'
 
-  let phase = 'new' // new → dialing → card → transferring → connected | bridged | voicemail | fallback (blind) → done
-  let target = 'manager' // кому зараз дзвонимо: manager → fallback
+  let phase = 'new' // new → (pin) → dialing → card → confirm → transferring → connected | bridged | voicemail | notice | fallback (blind) → done
+  let target = callback ? 'client' : 'manager' // кому зараз дзвонимо: manager → fallback; на передзвоні — client
   let stageAt = null // clock.now() першого набору поточної сторони
   let done = false
   let outcome = null
-  let reason = null // чому не вийшло з менеджером (або card_cap / bridge_cap на його етапі)
+  let reason = null // чому не вийшло з менеджером (на передзвоні — з клієнтом; або card_cap / bridge_cap на цьому етапі)
   let fallbackReason = null // те саме для запасної
   let abortReason = null // дзвінок обірвано ззовні: shutdown (зупинка шлюзу) або engine_exit (рушій упав)
   let answeredBy = null
@@ -97,8 +190,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   const errors = []
   const dials = []
   const dialByCall = new Map() // виклик рушія → запис у dials: код розриву ноги, від якої вже відмовились (487 після CANCEL)
-  const retries = { manager: 0, fallback: 0 }
-  const bCodes = { manager: null, fallback: null } // код розриву ноги B кожної сторони
+  const retries = { manager: 0, fallback: 0, client: 0 }
+  const bCodes = { manager: null, fallback: null, client: null } // код розриву ноги B кожної сторони
   const timers = new Set()
   const legA = { call: A, confirmed: false, media: false, grace: false, down: false, code: null }
   let legB = null
@@ -111,23 +204,42 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   let cardSource = null
   let fbCardSource = null
   let cardChars = null
+  let cardText = null
   let category = null
   let serviceRequestId = null
-  let lookupState = lookup && phone ? 'pending' : 'off'
+  let lookupState = lookup && phone && !callback ? 'pending' : 'off'
+  let infoDone = false // текст картки (і заявка) вже відомі
+  let infoResolve = () => {}
+  const infoP = new Promise((r) => { infoResolve = r })
   let xferCode = null
   let xferFinalCode = null
   let xferAccepted = false // REFER/Replaces прийнято (202 або NOTIFY 1xx)
   let fbAccepted = false // blind: сліпий REFER на запасну прийнято
   let vm = null // голосова пошта: {state: wait|prompt|beep|rec|stopping|done, file, sec, stop, empty}
+  let confirm = null // підтвердження поточної сторони: {plays, state: prompt|wait, digit}
+  const confirms = {} // сторона → {plays, digit}: у журнал
+  let ntc = null // остання фраза на A перед відбоєм: {name, state: wait|playing|done}
+  let pendingCb = null // busy: відкладений передзвін {managerKey, stored, id, why}
+  let lastClientFor = null // ключ менеджера, якому клієнта записано «останнім»
+  let cb = null // передзвін: {managerKey, source: pending|last|null, id, number, gcid, serviceRequestId, removed, attempts, dropped, waitedMs}
+  let pin = null // зовнішній менеджер: {state: wait|prompt|entry|ok|fail, buf, result: ok|wrong|timeout}
+  let cbWaitFrom = null // передзвін: з якого моменту чекаємо, поки ціль покладе трубку на іншому дзвінку шлюзу
+  let cbWaitNumber = null // кого чекаємо (інші передзвони його не беруть)
+  let cbDialNumber = null // кого набираємо на передзвоні (інші передзвони його не беруть)
+  let cbSettled = false // після очікування — ще 1 с, щоб АТС закінчила попередній дзвінок
+  let pendingRemoved = null // скільки відкладених передзвонів клієнта знято, коли його з'єднали
+  let servedDone = false
+  let xferLeg = A // на якій нозі REFER (на передзвоні з callbackReferOn 'client' — на нозі клієнта)
   let cardP = Promise.resolve(null)
   const tm = {} // іменовані таймери
 
   const mark = (k) => { if (marks[k] == null) marks[k] = clock.now() - t0 }
   const markT = (k) => mark(MARKS[target][k])
   const W = () => WHO[target]
+  const aName = callback ? 'менеджер' : 'клиент' // хто на нозі A
   const setReason = (why) => { if (target === 'fallback') fallbackReason = why; else reason = why }
-  // Підсумок для сторони, що відповіла: connected → connected_fallback, bridged → bridged_fallback тощо
-  const won = (base) => (target === 'fallback' ? base.replace(/^(connected|bridged)/, '$1_fallback') : base)
+  // Підсумок для сторони, що відповіла: connected → connected_fallback / connected_callback, bridged → bridged_… тощо
+  const won = (base) => (callback ? base.replace(/^(connected|bridged)/, '$1_callback') : target === 'fallback' ? base.replace(/^(connected|bridged)/, '$1_fallback') : base)
   const err = (where, msg) => { errors.push({ at: clock.now() - t0, where, msg: String(msg ?? '').slice(0, 200) }) }
   const later = (name, ms, fn) => {
     cancel(name)
@@ -151,25 +263,177 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   const hangup = (call, code) => send(code ? { cmd: 'hangup', call, code } : { cmd: 'hangup', call })
   const bAlive = () => !!legB && !legB.down
   const legReady = (leg) => leg.confirmed && (leg.media || leg.grace)
-  // Клієнту вже не граємо привітання/утримання: він з кимось говорить, у пошті або дзвінок скінчився
-  const clientBusy = () => phase === 'bridged' || phase === 'connected' || phase === 'voicemail' || phase === 'done'
+  // На A вже не граємо привітання/утримання: розмова, пошта, остання фраза або дзвінок скінчився
+  const clientBusy = () => phase === 'bridged' || phase === 'connected' || phase === 'voicemail' || phase === 'notice' || phase === 'done'
 
   // ---------- старт ----------
 
   function start() {
     if (rejectReason || !allowed) {
-      reason = rejectReason || 'not_allowed'
+      reason = rejectReason || (externalDenied ? 'manager_external' : 'not_allowed')
       hangup(A, 486)
       outcome = 'rejected'
-      say(rejectReason === 'busy' ? 'отклонён (486): уже идёт максимум звонков' : 'отклонён (486): номера нет в списке разрешённых')
+      say(rejectReason === 'busy'
+        ? 'отклонён (486): уже идёт максимум звонков'
+        : externalDenied
+          ? 'отклонён (486): внешний номер менеджера — перезвон с него только с VG_MANAGERS_EXTERNAL=1 и VG_MANAGER_PIN'
+          : 'отклонён (486): номера нет в списке разрешённых')
       return finish()
     }
-    phase = 'dialing'
     send({ cmd: 'answer', call: A, code: 200 })
     mark('answer')
+    if (pinRequired) return startPin()
+    phase = 'dialing'
+    if (callback) return startCallback()
     say('принят, отвечаю')
     cardP = prepareCard()
     later('dial', config.dialDelayMs, dial)
+  }
+
+  // ---------- PIN менеджера, що передзвонює із зовнішнього номера ----------
+  // Фраза prompts.pin (немає — мовчки) → цифри DTMF на нозі A; набрано стільки цифр, скільки в PIN, або «#» —
+  // перевіряємо; «*» — почати знову. Немає pinTimeoutSec після кінця фрази або невірний — відбій (callback_denied).
+  // Цифри PIN не пишемо ніде (журнал — лише результат, траса рушія — без цифр DTMF).
+
+  function startPin() {
+    phase = 'pin'
+    pin = { state: 'wait', buf: '', result: null }
+    mark('pin')
+    say('внешний номер менеджера — жду PIN')
+    later('pinCap', Math.max(1, Number(config.pinTimeoutSec) || 10) * 1000 + PROMPT_MAX_MS, () => pinFailed('timeout')) // нога A так і не готова
+    maybePin()
+  }
+
+  function maybePin() {
+    if (phase !== 'pin' || !pin || pin.state !== 'wait' || legA.down || !legReady(legA)) return
+    const file = prompt('pin')
+    if (!file) return pinWait()
+    pin.state = 'prompt'
+    send({ cmd: 'play', call: A, file, loop: false, tag: 'pin' })
+    mark('pinPrompt')
+    later('pin', PROMPT_MAX_MS, pinWait) // play_done загубився
+  }
+
+  function pinWait() {
+    if (phase !== 'pin' || !pin || (pin.state !== 'wait' && pin.state !== 'prompt')) return
+    pin.state = 'entry'
+    later('pin', Math.max(1, Number(config.pinTimeoutSec) || 10) * 1000, () => pinFailed('timeout'))
+  }
+
+  function onPinDigit(d) {
+    if (phase !== 'pin' || !pin || !d) return
+    if (d === '*') { pin.buf = ''; return }
+    const want = String(config.managerPin ?? '')
+    if (d !== '#') pin.buf += d
+    if (d !== '#' && pin.buf.length < want.length) return
+    if (pin.state === 'prompt') send({ cmd: 'stop', call: A }) // фразу не догравати
+    if (pinEqual(pin.buf, want)) return pinOk()
+    pinFailed('wrong')
+  }
+
+  function pinOk() {
+    pin.state = 'ok'
+    pin.result = 'ok'
+    pin.buf = ''
+    cancel('pin')
+    cancel('pinCap')
+    mark('pinOk')
+    say('PIN верный — перезвон')
+    phase = 'dialing'
+    startCallback()
+    maybeGreeting() // нога A вже готова: «З'єднуємо з клієнтом.» і утримання (якщо є кому дзвонити)
+    maybeNotice()
+  }
+
+  function pinFailed(why) {
+    if (phase !== 'pin' || !pin) return
+    pin.state = 'fail'
+    pin.result = why
+    pin.buf = ''
+    cancel('pin')
+    cancel('pinCap')
+    reason = `pin_${why}`
+    outcome = 'callback_denied'
+    say(why === 'wrong' ? 'неверный PIN — кладу трубку' : 'PIN не введён — кладу трубку')
+    if (!legA.down) hangup(A)
+    finish()
+  }
+
+  // Передзвін: кому дзвонимо — перший у черзі відкладених передзвонів групи менеджера, інакше його останній клієнт.
+  // Не набираємо номер, який уже набирає інший передзвін, і понад ліміт наборів за 24 год; ціль ще на лінії шлюзу —
+  // чекаємо (менеджер на утриманні), поки покладе, не довше callbackLineWaitSec, далі — наступна ціль.
+  function startCallback() {
+    if (phase !== 'dialing' || legA.down) return
+    const busy = (n) => (partyBusy ? partyBusy(n) : null)
+    const capOk = (n) => {
+      try {
+        return !callbacks?.canDial || callbacks.canDial(n)
+      } catch (e) {
+        err('callbacks', e?.message)
+        return true
+      }
+    }
+    const pick = (skip) => {
+      try {
+        return callbacks ? callbacks.pickTarget(callerGroup, { skip }) : null
+      } catch (e) {
+        err('callbacks', e?.message)
+        return null
+      }
+    }
+    const top = pick(null) // перший у черзі без жодних обмежень — для причини, якщо набирати нікого
+    let t = pick((n) => busy(n) === 'dialing' || !capOk(n))
+    if (t && busy(t.number) === 'line') {
+      cbWaitFrom ??= clock.now()
+      if (clock.now() - cbWaitFrom < Math.max(0, Number(config.callbackLineWaitSec ?? 15) || 0) * 1000) {
+        if (cbWaitNumber == null) {
+          mark('cbWait')
+          say(`клиент ${clientShown(t.number)} ещё на линии шлюза — жду, пока положит трубку`)
+        }
+        cbWaitNumber = t.number
+        later('cbWait', 500, startCallback)
+        return
+      }
+      t = pick((n) => !!busy(n) || !capOk(n))
+    }
+    if (t && cbWaitFrom != null && !cbSettled) {
+      // дочекались (або беремо іншу ціль): ще секунда, щоб АТС закінчила попередній дзвінок цього клієнта
+      cbSettled = true
+      cbWaitNumber = t.number
+      later('cbWait', 1000, startCallback)
+      return
+    }
+    cbWaitNumber = null
+    cb = { managerKey: callerManager, source: t?.source ?? null, id: t?.id ?? null, number: t?.number ?? null, gcid: t?.gcid ?? null, serviceRequestId: t?.serviceRequestId ?? null, removed: false, attempts: t?.attempts ?? null, dropped: false, waitedMs: cbWaitFrom != null ? clock.now() - cbWaitFrom : null }
+    serviceRequestId = cb.serviceRequestId
+    const uri = t ? clientDialUri(t.number, config.clientUriTemplate, config.sipServer) : null
+    if (!uri) {
+      if (t) reason = 'bad_number'
+      else if (!top) reason = 'no_target'
+      else if (busy(top.number) === 'line') reason = 'client_on_line'
+      else if (!capOk(top.number)) reason = 'dial_cap'
+      else reason = 'target_busy'
+      if (!t && top) cb = { ...cb, source: top.source, id: top.id, number: top.number, gcid: top.gcid ?? null, serviceRequestId: top.serviceRequestId ?? null }
+      say({
+        bad_number: 'менеджер перезванивает, но номер клиента непригоден — сообщаю и кладу трубку',
+        no_target: 'менеджер перезванивает, но ждущих клиентов нет — сообщаю и кладу трубку',
+        client_on_line: `клиент всё ещё на линии шлюза (${config.callbackLineWaitSec ?? 15} с) — сообщаю менеджеру и кладу трубку`,
+        dial_cap: `клиенту уже звонили ${config.callbackMaxDialsPerDay} раз за сутки — больше не набираю`,
+        target_busy: 'клиента уже набирает другой перезвон — сообщаю и кладу трубку',
+      }[reason])
+      return reason === 'client_on_line' ? notice('cbNoAnswer', 'callback_no_answer') : notice('cbNone', 'callback_none')
+    }
+    targets.client.uri = uri
+    cbDialNumber = t.number
+    try {
+      callbacks?.noteDial?.(t.number)
+    } catch (e) {
+      err('callbacks', e?.message)
+    }
+    say(`менеджер перезванивает: ${cb.source === 'pending' ? `клиент ждёт перезвона${cb.attempts ? ` (попыток уже ${cb.attempts})` : ''}` : 'последний клиент менеджера'} ${clientShown(cb.number)}`)
+    const f = prompt('cbGreeting')
+    cardP = Promise.resolve(f ? { file: f, cached: true } : null)
+    dial() // одразу, без dialDelayMs: менеджер уже чекає
   }
 
   // Пошук → текст → синтез. Ніколи не відхиляється: будь-яка помилка → null (тоді genericCardFile або без картки).
@@ -188,14 +452,16 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       }
       let card = null
       try {
-        card = buildCard(res, { number, phone })
+        card = buildCard(res, { number, phone, speakNumber: config.cardSpeakNumber === true })
       } catch (e) {
         err('card', e?.message)
-        return null
       }
       category = card?.category ?? null
       serviceRequestId = card?.serviceRequestId ?? null
+      cardText = card?.text ?? null
       cardChars = card?.text ? card.text.length : null
+      infoDone = true
+      infoResolve()
       if (!tts || !card?.text || done) return null // дзвінок уже скінчився — синтез не потрібен
       try {
         const r = await tts(card.text)
@@ -208,16 +474,17 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     })()
   }
 
-  // ---------- клієнт: привітання, утримання ----------
+  // ---------- нога A: привітання, утримання ----------
 
   function maybeGreeting() {
-    if (greeting !== 'none' || legA.down || !legReady(legA) || clientBusy()) return
-    if (!config.greetingFile) {
+    if (phase === 'pin' || greeting !== 'none' || legA.down || !legReady(legA) || clientBusy()) return
+    const file = callback ? prompt('cbConnecting') : config.greetingFile
+    if (!file) {
       greeting = 'done'
       return startHold()
     }
     greeting = 'playing'
-    send({ cmd: 'play', call: A, file: config.greetingFile, loop: false, tag: 'greeting' })
+    send({ cmd: 'play', call: A, file, loop: false, tag: greetTag })
     mark('greeting')
   }
 
@@ -225,8 +492,9 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     if (greeting === 'done') return
     greeting = 'done'
     mark('greetingDone')
-    startHold() // на голосовій пошті утримання вже не вмикається (clientBusy)
+    startHold() // на голосовій пошті й останній фразі утримання вже не вмикається (clientBusy)
     maybeVoicemail() // пошта чекала, поки привітання догра
+    maybeNotice() // остання фраза — теж
   }
 
   function startHold() {
@@ -236,7 +504,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     mark('hold')
   }
 
-  // ---------- набір сторони B (менеджер, потім запасна): повтори, тайм-аут ----------
+  // ---------- набір сторони B (менеджер, потім запасна; на передзвоні — клієнт): повтори, тайм-аут ----------
 
   function dial() {
     if (phase !== 'dialing' || legA.down) return
@@ -257,8 +525,9 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     say(attempt === 1 ? W().call : `${W().redial} (${attempt})`)
   }
 
-  // Межа всієї сторони від її першого набору: вікно повторів + повний час дзвінка останньої спроби
-  const windowMs = () => Math.max(0, Number(config.dialRetryWindowSec) || 0) * 1000
+  // Межа всієї сторони від її першого набору: вікно повторів + повний час дзвінка останньої спроби. Клієнту на
+  // передзвоні не повторюємо — лише його тайм-аут від INVITE.
+  const windowMs = () => (targets[target].retry ? Math.max(0, Number(config.dialRetryWindowSec) || 0) * 1000 : 0)
   const stageCapMs = () => windowMs() + targets[target].timeoutSec * 1000
 
   function onDialing(ev) {
@@ -292,12 +561,12 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     return wait
   }
 
-  // Набір не вдався до відповіді: повтор (лише 503/408/480 або помилка рушія) чи наступна сторона.
+  // Набір не вдався до відповіді: повтор (лише 503/408/480 або помилка рушія, і не клієнту на передзвоні) чи далі.
   function dialFailed(code, why) {
     const last = dials[dials.length - 1]
     if (last && last.code == null) last.code = code
     if (phase !== 'dialing') return
-    const retryable = why === 'engine' || config.retryCodes.includes(Number(code))
+    const retryable = targets[target].retry && (why === 'engine' || config.retryCodes.includes(Number(code)))
     const wait = retryable ? retryWaitMs() : null
     if (wait != null) {
       retries[target]++
@@ -312,7 +581,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   function onRingTimeout(kind) {
     if (phase !== 'dialing') return
     say(kind === 'cap'
-      ? `${W().noAnswer} за ${Math.round(stageCapMs() / 1000)} с вместе с повторами`
+      ? `${W().noAnswer} за ${Math.round(stageCapMs() / 1000)} с${windowMs() ? ' вместе с повторами' : ''}`
       : `${W().noAnswer} за ${targets[target].timeoutSec} с звонка`)
     stageFailed(`${target}_timeout`)
   }
@@ -328,6 +597,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     cancel('dial')
     markT('answered')
     say(W().answered)
+    rememberLastClient()
     if (!legB.media) {
       const leg = legB
       later('graceB', config.mediaGraceMs, () => { leg.grace = true; maybeCard() })
@@ -335,7 +605,24 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     maybeCard()
   }
 
-  // ---------- картка на B ----------
+  // Дзвінок дійшов до картки — клієнт стає «останнім клієнтом» цього менеджера (для передзвону, коли відкладеного
+  // немає). Заявку, якщо пошук ще йде, допишемо, коли він закінчиться.
+  function rememberLastClient() {
+    if (callback || !callbacks || !phone) return
+    const key = managerKeyOf(targets[target].uri, managers)
+    if (!key) return
+    const save = () => {
+      try {
+        if (callbacks.setLastClient(key, { number: phone, gcid, srId: serviceRequestId, ts: clock.now() })) lastClientFor = key
+      } catch (e) {
+        err('callbacks', e?.message)
+      }
+    }
+    save()
+    if (!infoDone) infoP.then(() => { if (serviceRequestId) save() })
+  }
+
+  // ---------- картка на B (на передзвоні — привітання клієнту) ----------
 
   function maybeCard() {
     if (phase !== 'card' || cardStarted || !legB || legB.down || !legReady(legB)) return
@@ -348,20 +635,20 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     const leg = legB
     waited.then((r) => {
       if (done || phase !== 'card' || !bAlive() || legB !== leg) return
-      const file = r?.file || config.genericCardFile || null
-      const src = r?.file ? (r.cached ? 'cache' : 'tts') : file ? 'generic' : 'none'
+      const file = r?.file || (callback ? null : config.genericCardFile) || null
+      const src = callback ? (file ? 'prompt' : 'none') : r?.file ? (r.cached ? 'cache' : 'tts') : file ? 'generic' : 'none'
       if (target === 'fallback') fbCardSource = src
       else cardSource = src
       if (!file) {
-        say('карточки нет — сразу перевожу')
-        later('afterCard', config.afterCardMs, () => transfer('no_card'))
+        say(callback ? 'фразы для клиента нет — сразу соединяю' : confirmOn ? 'карточки нет — сразу спрашиваю подтверждение' : 'карточки нет — сразу перевожу')
+        later('afterCard', config.afterCardMs, () => afterCard('no_card'))
         return
       }
       cardPlaying = true
-      send({ cmd: 'play', call: legB.call, file, loop: false, tag: 'card' })
+      send({ cmd: 'play', call: legB.call, file, loop: false, tag: cardTag })
       markT('card')
-      say(`карточка ${W().to} (${src})`)
-      later('cardCap', config.cardMaxSec * 1000, () => transfer('card_cap'))
+      say(callback ? `приветствие клиенту (${src})` : `карточка ${W().to} (${src})`)
+      later('cardCap', config.cardMaxSec * 1000, () => afterCard('card_cap'))
     })
   }
 
@@ -370,22 +657,107 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     cardPlaying = false
     markT('cardDone')
     cancel('cardCap')
-    later('afterCard', config.afterCardMs, () => transfer('card_done'))
+    later('afterCard', config.afterCardMs, () => afterCard('card_done'))
+  }
+
+  // Картку дограно (або обмеження cardMaxSec, або картки немає): підтвердження «1», без нього — одразу переведення
+  function afterCard(why) {
+    if (phase !== 'card') return
+    cancel('cardCap')
+    cancel('afterCard')
+    cardPlaying = false // card_cap: фраза підтвердження замінить картку, що ще грає
+    if (why === 'card_cap') setReason('card_cap')
+    if (confirmOn) return startConfirm()
+    transfer(why)
+  }
+
+  // ---------- підтвердження: «1» — з'єднати, «2» — не може говорити ----------
+
+  function startConfirm() {
+    if (legA.down) return clientGone()
+    if (!bAlive()) return stageFailed(`${target}_hangup`)
+    phase = 'confirm'
+    confirm = confirms[target] || { plays: 0, state: null, digit: null }
+    confirms[target] = confirm
+    confirmPlay()
+  }
+
+  function confirmPlay() {
+    if (phase !== 'confirm' || !bAlive()) return
+    confirm.plays++
+    confirm.state = 'prompt'
+    markT(confirm.plays === 1 ? 'confirm' : 'confirmRepeat')
+    const file = prompt('confirm')
+    if (!file) {
+      // фрази немає (синтез вимкнено або не вдався): чекаємо цифру мовчки — менеджер знає, що натиснути
+      if (confirm.plays === 1) say(`${W().name}: фразы подтверждения нет — жду «${config.confirmDigit ?? '1'}» молча`)
+      return confirmWait()
+    }
+    send({ cmd: 'play', call: legB.call, file, loop: false, tag: 'confirm' })
+    say(confirm.plays === 1 ? `${W().name}: жду «1» — соединить, «2» — не может говорить` : `${W().name}: цифры нет — повторяю вопрос`)
+    later('confirm', PROMPT_MAX_MS, confirmWait) // play_done загубився
+  }
+
+  // Фраза скінчилась — чекаємо цифру confirmTimeoutSec
+  function confirmWait() {
+    if (phase !== 'confirm' || !confirm || confirm.state !== 'prompt') return
+    confirm.state = 'wait'
+    later('confirm', Math.max(0, Number(config.confirmTimeoutSec) || 0) * 1000, onConfirmTimeout)
+  }
+
+  function onConfirmTimeout() {
+    if (phase !== 'confirm') return
+    const repeats = Math.max(0, Number(config.confirmRepeats ?? 1) || 0)
+    if (confirm.plays <= repeats) return confirmPlay()
+    say(`${W().name} не нажал «${config.confirmDigit ?? '1'}» — как не ответил`)
+    stageFailed(`${target}_no_confirm`)
+  }
+
+  // DTMF на нозі B. «1» приймаємо і під час картки (менеджер знає порядок); інші цифри — не відповідь, пропускаємо.
+  function onDtmf(ev) {
+    if (!confirmOn || !legB || ev.call !== legB.call || legB.down) return
+    if (phase !== 'card' && phase !== 'confirm') return
+    const d = String(ev.digit ?? '').trim()
+    const yes = String(config.confirmDigit ?? '1')
+    const no = String(config.declineDigit ?? '2')
+    if (d !== yes && d !== no) return
+    const c = confirms[target] || (confirms[target] = { plays: 0, state: null, digit: null })
+    c.digit = d
+    markT('digit')
+    if (d === yes) {
+      say(`${W().name} нажал «${d}» — соединяю`)
+      if (cardPlaying || c.state === 'prompt') send({ cmd: 'stop', call: legB.call }) // картку / питання не догравати
+      cardPlaying = false
+      return transfer('confirmed')
+    }
+    say(`${W().name} нажал «${d}» — не может говорить`)
+    stageFailed(`${target}_declined`)
   }
 
   // ---------- переведення ----------
 
+  let xferWaits = 0
   function transfer(why) {
-    if (phase !== 'card') return
+    if (phase !== 'card' && phase !== 'confirm') return
     if (legA.down) return clientGone()
     if (!bAlive()) return stageFailed(`${target}_hangup`)
+    // REFER — лише в підтвердженому діалозі A. На передзвоні клієнт міг узяти раніше, ніж дійшов ACK менеджера:
+    // чекаємо CONFIRMED ноги A по 200 мс, але не довше ~5 с (далі пробуємо все одно — помилка REFER → міст)
+    if (!legA.confirmed && xferWaits < 25) {
+      xferWaits++
+      later('afterCard', 200, () => transfer(why))
+      return
+    }
     phase = 'transferring'
     cancel('cardCap')
     cancel('afterCard')
-    send({ cmd: 'xfer_replaces', call: A, dest: legB.call })
+    cancel('confirm')
+    // Типово REFER на нозі A з Replaces ноги B (перевірена на Binotel форма); на передзвоні з callbackReferOn 'client' —
+    // навпаки, REFER на нозі клієнта з Replaces ноги менеджера: тоді в Refer-To URI менеджера, а не номер клієнта
+    xferLeg = referOnClient ? legB.call : A
+    send({ cmd: 'xfer_replaces', call: xferLeg, dest: referOnClient ? A : legB.call })
     markT('xfer')
-    if (why === 'card_cap') setReason('card_cap')
-    say(`соединяю клиента ${W().with} (REFER/Replaces)`)
+    say(callback ? `соединяю менеджера с клиентом (REFER/Replaces на ноге ${referOnClient ? 'клиента' : 'менеджера'})` : `соединяю клиента ${W().with} (REFER/Replaces)`)
     later('xfer', config.xferTimeoutMs, onXferTimeout)
   }
 
@@ -409,6 +781,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       phase = 'connected'
       outcome = won('connected')
       answeredBy = target
+      served()
       say('соединены, выхожу из звонка')
       if (legA.down && !bAlive()) return finish()
       later('clear', config.xferClearMs, clearLegs)
@@ -423,6 +796,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   const unconfirmed = () => {
     outcome = won('connected_unconfirmed')
     answeredBy = target
+    served()
     finish()
   }
 
@@ -433,14 +807,14 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       say('нет ответа на перевод — соединяю через себя')
       return bridgeOrRecover()
     }
-    // REFER/Replaces принят, АТС сняла ногу B, а клиент всё ещё на нашей ноге A. При удачном Replaces Binotel
+    // REFER/Replaces принят, АТС сняла ногу B, а A всё ещё на нашей ноге. При удачном Replaces Binotel
     // кладёт A сразу за B (вживую 2026-10-17 — через 1 мс после NOTIFY 200), а 202/NOTIFY Binotel о переводе на
-    // слово верить нельзя. Раз A жива xferTimeoutMs — клиента никуда не перевели: следующая сторона или почта.
+    // слово верить нельзя. Раз A жива xferTimeoutMs — никуда не перевели: как не ответил.
     if (xferAccepted && !legA.down) {
-      say(`перевод принят, АТС сняла звонок ${W().to}, а клиент всё ещё на линии — перевод не состоялся`)
+      say(`перевод принят, АТС сняла звонок ${W().to}, а ${aName} всё ещё на линии — перевод не состоялся`)
       return stageFailed(`${target}_xfer_unconfirmed`)
     }
-    // REFER/Replaces принят, и АТС уже сняла ногу клиента — так она завершает заменённый диалог после
+    // REFER/Replaces принят, и АТС уже сняла ногу A — так она завершает заменённый диалог после
     // успешного Replaces. Следующая сторона здесь увела бы клиента от того, кто ответил: просто выходим.
     if (xferAccepted) {
       say('перевод принят, итог не пришёл — считаю соединёнными, выхожу из звонка')
@@ -458,6 +832,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       outcome = won('bridged')
       answeredBy = target
       holdOn = false
+      served()
       send({ cmd: 'bridge', a: A, b: legB.call })
       mark('bridged')
       // Страховка від «вічного» моста: BYE міг загубитися (зник інтернет), а RTP рушій не стежить
@@ -474,10 +849,41 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     return stageFailed(`${target}_hangup`)
   }
 
-  // ---------- наступна сторона: менеджер → запасна → голосова пошта ----------
+  // Клієнт і менеджер говорять (з'єднано, у т. ч. через запасну чи міст): відкладені передзвони цього клієнта в групи
+  // менеджера виконано — прибираємо всі (на передзвоні — і той, з якого дзвонили, і, якщо ціллю був «останній
+  // клієнт», його старий запис), інакше менеджеру потім набрали б уже обслуженого клієнта.
+  function served() {
+    if (servedDone) return
+    servedDone = true
+    const n = callback ? cb?.number : phone
+    const keys = callback ? callerGroup : mgrGroup
+    if (!n || !callbacks?.removePendingFor || !keys?.length) return
+    try {
+      pendingRemoved = callbacks.removePendingFor(keys, n) || 0
+      if (callback && cb) cb.removed = pendingRemoved > 0
+    } catch (e) {
+      err('callbacks', e?.message)
+    }
+  }
 
-  // Поточна сторона не взяла, зайнята, поклала до переведення або повтори вичерпано: кладемо її ногу (чи
-  // відмовляємось від набору, що ще йде) і йдемо далі.
+  // Передзвін не вдався з боку клієнта: спроба +1, запис — у кінець черги (після callbackMaxAttempts — знято)
+  function callbackFailed() {
+    if (!cb || cb.source !== 'pending' || !cb.id || !callbacks?.markAttempt) return
+    try {
+      const r = callbacks.markAttempt(cb.id)
+      if (r) {
+        cb.attempts = r.attempts
+        cb.dropped = !!r.dropped
+      }
+    } catch (e) {
+      err('callbacks', e?.message)
+    }
+  }
+
+  // ---------- далі: менеджер → «лінія зайнята» / запасна / голосова пошта ----------
+
+  // Поточна сторона не взяла, зайнята, відмовилась, не підтвердила, поклала до переведення або повтори вичерпано:
+  // кладемо її ногу (чи відмовляємось від набору, що ще йде) і йдемо далі.
   function stageFailed(why) {
     if (done) return
     if (legA.down) return clientGone()
@@ -488,14 +894,51 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       pendingRef = null
     }
     if (bAlive()) hangup(legB.call)
-    if (target === 'manager' && targets.fallback.uri) {
+    if (callback) {
+      callbackFailed()
+      say(`${W().noAnswer} (${why}) — сообщаю менеджеру и кладу трубку${cb?.dropped ? `; попыток ${cb.attempts} — перезвон снят` : ''}`)
+      return notice('cbNoAnswer', 'callback_no_answer')
+    }
+    if (target === 'manager' && noAnswerMode === 'busy') return busyCallback(why)
+    if (target === 'manager' && noAnswerMode === 'fallback' && targets.fallback.uri) {
       if (fallbackMode === 'blind') return blindFallback(why)
       return startFallback(why)
     }
     return startVoicemail(why)
   }
 
-  // Запасна — так само, як менеджер: набір із повторами, картка, REFER/Replaces. Клієнт тим часом на утриманні.
+  // Типово: клієнта не тримаємо — «лінія зайнята, менеджер передзвонить», відбій; передзвін — у callbacks.json
+  function busyCallback(why) {
+    savePending()
+    say(`${W().noAnswer} (${why}) — клиенту «линия занята, менеджер перезвонит»${pendingCb.stored ? ', перезвон сохранён' : ''}, кладу трубку`)
+    notice('busy', 'busy_callback')
+  }
+
+  function savePending({ missed = false } = {}) {
+    pendingCb = { managerKey: mgrKey, stored: false, id: null, ...(missed ? { missed: true } : {}) }
+    if (!phone) { pendingCb.why = 'no_number'; return } // внутрішній / без номера — передзвонювати нікуди
+    if (!callbacks) { pendingCb.why = 'no_store'; return }
+    try {
+      const e = callbacks.addPending({ managerKey: mgrKey, clientNumber: phone, gcid, serviceRequestId, card: cardText, missed, ts: clock.now() })
+      pendingCb.stored = true
+      pendingCb.id = e?.id ?? null
+      mark('callbackStored')
+    } catch (e) {
+      pendingCb.why = 'error'
+      err('callbacks', e?.message)
+      return
+    }
+    // Менеджер відмовив раніше, ніж закінчився пошук клієнта: заявку й картку допишемо, коли будуть
+    if (!infoDone) {
+      const id = pendingCb.id
+      infoP.then(() => {
+        try { callbacks.updatePending(id, { serviceRequestId, card: cardText }) } catch { /* передзвін уже є, без заявки */ }
+      })
+    }
+  }
+
+  // Запасна — так само, як менеджер: набір із повторами, картка, підтвердження, REFER/Replaces.
+  // Клієнт тим часом на утриманні.
   function startFallback(why) {
     target = 'fallback'
     phase = 'dialing'
@@ -503,6 +946,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     cardStarted = false
     cardPlaying = false
     xferAccepted = false
+    confirm = null
     mark('fallback')
     say(`запасная линия (${why})`)
     dial()
@@ -562,6 +1006,48 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     finish()
   }
 
+  // ---------- остання фраза на A і відбій ----------
+
+  // «Лінія зайнята…» клієнту, «Клієнт не відповідає.» / «немає клієнтів» менеджеру — і кладемо трубку. Підсумок уже
+  // відомий (out). Привітання, якщо ще грає, догрує (не обриваємо на півслові); фрази немає — кладемо одразу.
+  function notice(name, out) {
+    phase = 'notice'
+    outcome = out
+    ntc = { name, state: 'wait' }
+    mark('notice')
+    later('ntcCap', NOTICE_CAP_MS, noticeDone)
+    maybeNotice()
+  }
+
+  function maybeNotice() {
+    if (phase !== 'notice' || !ntc || ntc.state !== 'wait' || legA.down || !legReady(legA)) return
+    if (greeting === 'playing') {
+      if (tm.ntcGreeting == null) later('ntcGreeting', PROMPT_MAX_MS, () => { greeting = 'done'; maybeNotice() })
+      return
+    }
+    cancel('ntcGreeting')
+    if (holdOn) {
+      holdOn = false
+      send({ cmd: 'stop', call: A })
+    }
+    const file = prompt(ntc.name)
+    if (!file) return noticeDone()
+    ntc.state = 'playing'
+    send({ cmd: 'play', call: A, file, loop: false, tag: ntc.name })
+    mark('noticePlay')
+    later('ntc', PROMPT_MAX_MS, noticeDone)
+  }
+
+  function noticeDone() {
+    if (!ntc || ntc.state === 'done') return
+    ntc.state = 'done'
+    cancel('ntc')
+    cancel('ntcCap')
+    mark('noticeDone')
+    if (!legA.down) hangup(A)
+    finish()
+  }
+
   // ---------- голосова пошта ----------
 
   function startVoicemail(why) {
@@ -613,7 +1099,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     cancel('vmStep')
     let file = null
     try {
-      file = voicemailPath({ gcid: incoming.gcid ?? null, number: phone || number || null })
+      file = voicemailPath({ gcid, number: phone || number || null })
     } catch (e) {
       err('voicemail', e?.message)
     }
@@ -682,14 +1168,22 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     finish()
   }
 
+  // A поклав (клієнт; на передзвоні — менеджер): кладемо B або скасовуємо набір, що ще йде
   function clientGone() {
-    outcome = 'client_hangup'
+    const dialingNow = phase === 'dialing'
+    const before = phase
+    outcome = callback ? 'callback_cancelled' : 'client_hangup'
     if (pendingRef) {
       abandoned.add(pendingRef)
       pendingRef = null
     }
     if (bAlive()) hangup(legB.call)
-    say('клиент положил трубку')
+    // busy: менеджеру вже дзвонили (у нього пропущений від шлюзу), а клієнт не дочекався — передзвін має дістатися
+    // саме цьому клієнту, а не тому, хто чекає з ранку чи був «останнім» тиждень тому
+    const missed = !callback && noAnswerMode === 'busy' && config.callbackOnHangup !== false && target === 'manager' && !pendingCb &&
+      ['dialing', 'card', 'confirm', 'transferring'].includes(before) && dials.some((d) => d.to === 'manager')
+    if (missed) savePending({ missed: true })
+    say(callback ? `менеджер положил трубку${dialingNow ? ' — отменяю звонок клиенту' : ''}` : `клиент положил трубку${missed && pendingCb?.stored ? ' — перезвон сохранён (у менеджера пропущенный)' : ''}`)
     finish()
   }
 
@@ -700,21 +1194,26 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     legA.code = code ?? null
     mark('clientDown')
     switch (phase) {
+      case 'pin':
       case 'dialing':
       case 'card':
+      case 'confirm':
         return clientGone()
       case 'transferring':
-        // АТС після REFER гасить обидві ноги — це не обов'язково клієнт поклав. Чекаємо NOTIFY або тайм-аут.
+        // АТС після REFER гасить обидві ноги — це не обов'язково A поклав. Чекаємо NOTIFY або тайм-аут.
         if (!bAlive()) later('bothDown', 1000, unconfirmed)
         return
       case 'bridged':
         if (bAlive()) hangup(legB.call)
-        say('клиент положил трубку')
+        say(`${aName} положил трубку`)
         return finish()
       case 'connected':
         if (!bAlive()) finish()
         return
       case 'fallback':
+        return finish()
+      case 'notice':
+        // поклав під час останньої фрази — підсумок уже є (busy_callback, callback_no_answer…)
         return finish()
       case 'voicemail':
         // Поклав під час запису — запис зберігаємо: рушій сам закриває файл і шле record_done
@@ -742,6 +1241,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       case 'dialing':
         return dialFailed(code, 'hangup')
       case 'card':
+      case 'confirm':
         markT('down')
         say(`${W().down} до перевода`)
         return stageFailed(`${target}_hangup`)
@@ -774,7 +1274,10 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         if (ev.call === A && phase === 'voicemail' && (vm?.state === 'prompt' || vm?.state === 'beep')) {
           if (vm.state === 'prompt') vmBeep()
           else vmRecord()
-        } else if (ev.call === A && greeting === 'playing') onGreetingDone() // пошта, що чекала привітання, піде далі
+        } else if (ev.call === A && phase === 'notice' && ntc?.state === 'playing') noticeDone()
+        else if (ev.call === A && phase === 'pin' && pin?.state === 'prompt') pinWait()
+        else if (ev.call === A && greeting === 'playing') onGreetingDone() // пошта / остання фраза, що чекали привітання, підуть далі
+        else if (legB && ev.call === legB.call && phase === 'confirm' && confirm?.state === 'prompt') confirmWait()
         else if (legB && ev.call === legB.call && cardPlaying) onCardDone()
         return
       case 'record':
@@ -798,6 +1301,14 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     }
   }
 
+  // Нога A стала готова (CONFIRMED + медіа або grace): PIN, привітання, пошта чи остання фраза, що чекали
+  const onAReady = () => {
+    maybePin()
+    maybeGreeting()
+    maybeVoicemail()
+    maybeNotice()
+  }
+
   function handle(ev) {
     if (!ev || typeof ev !== 'object') return
     if (done) {
@@ -815,9 +1326,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
           if (ev.state === 'CONFIRMED' && !legA.confirmed) {
             legA.confirmed = true
             mark('clientConfirmed')
-            if (!legA.media) later('graceA', config.mediaGraceMs, () => { legA.grace = true; maybeGreeting(); maybeVoicemail() })
-            maybeGreeting()
-            maybeVoicemail()
+            if (!legA.media) later('graceA', config.mediaGraceMs, () => { legA.grace = true; onAReady() })
+            onAReady()
           } else if (ev.state === 'DISCONNECTED' && !legA.down) onADown(ev.code)
         } else if (isB && !legB.down) {
           if (ev.state === 'EARLY') onBRinging()
@@ -834,8 +1344,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         if (isA && ev.active) {
           legA.media = true
           cancel('graceA')
-          maybeGreeting()
-          maybeVoicemail()
+          onAReady()
         } else if (isB && ev.active) {
           legB.media = true // може прийти й у EARLY (183): картку граємо лише після CONFIRMED
           if (legB.confirmed) cancel('graceB')
@@ -843,16 +1352,23 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         }
         return
       case 'play_done':
-        if (isA && ev.tag === 'greeting') onGreetingDone()
+        if (isA && ev.tag === 'pin') pinWait()
+        else if (isA && ev.tag === greetTag) onGreetingDone()
+        else if (isA && ntc && ev.tag === ntc.name) noticeDone()
         else if (isA && ev.tag === 'voicemail') vmBeep()
         else if (isA && ev.tag === 'beep') vmRecord()
-        else if (isB && ev.tag === 'card') onCardDone()
+        else if (isB && ev.tag === cardTag) onCardDone()
+        else if (isB && ev.tag === 'confirm') confirmWait()
+        return
+      case 'dtmf':
+        if (isB) onDtmf(ev)
+        else if (isA && phase === 'pin') onPinDigit(String(ev.digit ?? '').trim())
         return
       case 'record_done':
         if (isA) onRecordDone(ev)
         return
       case 'xfer':
-        if (isA) onXfer(ev)
+        if (ev.call === xferLeg) onXfer(ev)
         return
       case 'error':
         return onError(ev)
@@ -870,7 +1386,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       // це повідомлення клієнта, а не просто обірваний дзвінок
       if (vm.state === 'rec') vm.stop = 'aborted'
       outcome = 'voicemail'
-    } else if (phase !== 'connected') outcome = 'aborted' // переведення вже вдалося — лишаємо connected
+    } else if (phase !== 'connected' && phase !== 'notice') outcome = 'aborted' // переведення вже вдалося / підсумок останньої фрази вже є
     finish()
   }
 
@@ -881,12 +1397,14 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     for (const h of timers) clock.clearTimeout(h)
     timers.clear()
     mark('end')
+    const conf = Object.fromEntries(Object.entries(confirms).map(([k, v]) => [k, { plays: v.plays, digit: v.digit }]))
     const entry = {
-      v: 2,
+      v: 3,
+      kind,
       startedAt: new Date(t0).toISOString(),
       endedAt: new Date(clock.now()).toISOString(),
       durationMs: clock.now() - t0,
-      gcid: incoming.gcid ?? null,
+      gcid,
       number: shownNumber,
       internal,
       outcome,
@@ -894,6 +1412,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       fallbackReason,
       abortReason,
       answeredBy,
+      noAnswerMode,
       fallbackMode,
       category,
       serviceRequestId,
@@ -901,13 +1420,22 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       cardSource,
       fbCardSource,
       cardChars,
+      confirm: Object.keys(conf).length ? conf : null,
+      // busy: відкладений передзвін; передзвін: кому й звідки (номер клієнта — за правилами маски)
+      callback: callback
+        ? { managerKey: cb?.managerKey ?? callerManager, source: cb?.source ?? null, client: cb?.number ? clientShown(cb.number) : null, gcid: cb?.gcid ?? null, serviceRequestId: cb?.serviceRequestId ?? null, pendingId: cb?.id ?? null, removed: !!cb?.removed, attempts: cb?.attempts ?? null, dropped: !!cb?.dropped, waitedMs: cb?.waitedMs ?? null, referOn: referOnClient ? 'client' : 'manager' }
+        : pendingCb,
+      pendingRemoved, // клієнта з'єднано — стільки його відкладених передзвонів знято
+      pin: pin ? pin.result || 'unfinished' : null, // зовнішній менеджер: ok | wrong | timeout (цифр немає)
+      lastClientFor,
       dials: dials.map(({ to, attempt, at, code }) => ({ to, attempt, at, code })),
       retries: retries.manager,
       fallbackRetries: retries.fallback,
       xferCode: xferFinalCode ?? xferCode,
       clientCode: legA.code,
-      managerCode: bCodes.manager,
+      managerCode: callback ? null : bCodes.manager,
       fallbackCode: bCodes.fallback,
+      ...(callback ? { calleeCode: bCodes.client } : {}),
       voicemail: vm && (vm.file || vm.stop) ? { file: vm.file, sec: vm.sec, stop: vm.stop, ...(vm.empty ? { empty: true } : {}) } : null,
       t: { ...marks },
       errors,
@@ -924,6 +1452,10 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     get done() { return done },
     get phase() { return phase },
     get target() { return target },
+    get kind() { return kind },
+    // Номер клієнта цього дзвінка (для диспетчера: чи зайнятий він зараз на шлюзі): клієнт — його номер; передзвін — кого
+    // набираємо або чекаємо
+    get partyNumber() { return done ? null : callback ? cbDialNumber ?? cbWaitNumber : phone },
     get callA() { return A },
     get callB() { return legB?.call ?? null },
   }
@@ -932,7 +1464,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
 // ---------- диспетчер: події рушія → потрібний сценарій ----------
 // Вхідний створює сценарій; 'dialing' прив'язує ногу B за ref; решта — за номером виклику (error без call — за ref).
 // Подію для ще невідомого виклику тримаємо недовго: рушій міг повідомити стан B раніше за 'dialing'.
-export function createDispatcher({ config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, log = () => {}, onDone = () => {} }) {
+export function createDispatcher({ config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, callbacks = null, log = () => {}, onDone = () => {} }) {
   const byCall = new Map()
   const byRef = new Map()
   const active = new Set()
@@ -949,6 +1481,17 @@ export function createDispatcher({ config, send, clock, lookup = null, buildCard
       for (const c of own.calls) if (byCall.get(c) === flow) byCall.delete(c)
       for (const r of own.refs) if (byRef.get(r) === flow) byRef.delete(r)
     }, config.lateEventsMs)
+  }
+
+  // Цей номер зараз на іншому дзвінку шлюзу: 'line' — клієнт на лінії (ще дослуховує фразу, говорить через міст…),
+  // 'dialing' — його набирає (чи чекає) інший передзвін. Передзвін не набирає клієнта двічі й не дзвонить зайнятому.
+  function partyBusy(number, self) {
+    if (!number) return null
+    for (const f of active) {
+      if (f === self || f.done || f.partyNumber !== number) continue
+      return f.kind === 'client' ? 'line' : 'dialing'
+    }
+    return null
   }
 
   function onIncoming(ev) {
@@ -971,6 +1514,8 @@ export function createDispatcher({ config, send, clock, lookup = null, buildCard
       buildCard,
       tts,
       voicemailPath,
+      callbacks,
+      partyBusy: (n) => partyBusy(n, flow),
       log,
       rejectReason: active.size >= config.maxCalls ? 'busy' : null,
       onDone: (entry) => {

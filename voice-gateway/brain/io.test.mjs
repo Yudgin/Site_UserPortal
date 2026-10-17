@@ -9,8 +9,8 @@ import { makeTokenSource, accessSecret } from './gcp.mjs'
 import { makeJournal } from './journal.mjs'
 import { startEngine, redact, redactEvent } from './engine.mjs'
 import { makeDailyLog, pruneOld, pruneGatewayData, ensurePrivateDir, makeVoicemailPath, ensureBeep, BEEP_NAME, repairWavHeader, repairVoicemailHeaders, findGitRoot } from './storage.mjs'
-import { parseLineSecret, clean, makePrompter, summary } from './gateway.mjs'
-import { loadConfig, extUri, isOff, defaultDataDir, GATEWAY_DIR } from './config.mjs'
+import { parseLineSecret, clean, makePrompter, summary, parseArgs } from './gateway.mjs'
+import { loadConfig, extUri, isOff, defaultDataDir, GATEWAY_DIR, PROMPT_TEXTS, PROMPT_ENV } from './config.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -171,6 +171,12 @@ test('engine: JSON-рядки в обидва боки, stderr лише у фа�
   assert.equal((fs.statSync(traceFile).mode & 0o777), 0o600)
   assert.equal((fs.statSync(path.dirname(traceFile)).mode & 0o777), 0o700)
   assert.deepEqual(redact({ cmd: 'answer', call: 1 }), { cmd: 'answer', call: 1 })
+  // номер у URI набору / сліпого переведення — 4 цифри; внутрішні лінії й імена — як є; цифри DTMF (PIN) — ні
+  assert.deepEqual(redact({ cmd: 'dial', ref: 'cb-1-1', uri: 'sip:0501234567@sip14.binotel.com;transport=udp' }), { cmd: 'dial', ref: 'cb-1-1', uri: 'sip:…4567@sip14.binotel.com;transport=udp' })
+  assert.deepEqual(redact({ cmd: 'xfer', call: 1, uri: 'sip:+380501234567@x' }), { cmd: 'xfer', call: 1, uri: 'sip:…4567@x' })
+  assert.deepEqual(redact({ cmd: 'dial', ref: 'mgr-1-1', uri: 'sip:907@sip14.binotel.com;transport=udp' }).uri, 'sip:907@sip14.binotel.com;transport=udp')
+  assert.deepEqual(redact({ cmd: 'dial', ref: 'fb-1-1', uri: 'sip:op@127.0.0.1:5094' }).uri, 'sip:op@127.0.0.1:5094')
+  assert.deepEqual(redactEvent({ ev: 'dtmf', call: 2, digit: '7', method: 'rfc2833' }), { ev: 'dtmf', call: 2, digit: '<…>', method: 'rfc2833' })
 })
 
 test('lookup: запити спільного clientLookup, бюджет — null, помилка — null; firebase-admin знаходиться в server/', async () => {
@@ -264,6 +270,77 @@ test('config: повтори у вікні 12 с через 2 с, запасна
   }
   assert.equal(isOff('906'), false)
   assert.equal(isOff(undefined), false)
+})
+
+test('config: типово «лінія зайнята» + передзвін, підтвердження «1» (10 с, повтор 1), менеджери з VG_MANAGERS + лінія менеджера, номер у картці не кажемо', () => {
+  const c = loadConfig({})
+  assert.equal(c.noAnswerMode, 'busy')
+  assert.deepEqual([c.confirmEnabled, c.confirmTimeoutSec, c.confirmRepeats, c.confirmDigit, c.declineDigit, c.dtmfSupported], [true, 10, 1, '1', '2', null])
+  assert.deepEqual(c.managers, [['907']])
+  assert.deepEqual([c.callbackTtlHours, c.lastClientTtlDays, c.callbackDialTimeoutSec], [24, 30, 30])
+  assert.equal(c.clientUriTemplate, 'sip:{national}@{server};transport=udp')
+  assert.equal(c.cardSpeakNumber, false)
+  assert.deepEqual(c.promptTexts, PROMPT_TEXTS)
+  assert.equal(PROMPT_TEXTS.confirm, "Натисніть один, щоб з'єднатися з клієнтом, або два — якщо не можете говорити.")
+  assert.equal(PROMPT_TEXTS.busy, 'На жаль, лінія менеджера зараз зайнята. Менеджер побачить ваш дзвінок і передзвонить вам.')
+  assert.deepEqual(Object.values(c.promptFiles), [null, null, null, null, null, null, null])
+  assert.equal(PROMPT_TEXTS.pin, 'Введіть пін-код.')
+  // зовнішні номери менеджерів — лише з прапорцем і PIN; черга, ліміти, очікування лінії, пропущений, REFER
+  assert.deepEqual([c.managersExternal, c.managerPin, c.managerPinInvalid, c.pinTimeoutSec], [false, null, false, 10])
+  assert.deepEqual([c.callbackMaxAttempts, c.callbackMaxDialsPerDay, c.callbackLineWaitSec, c.callbackOnHangup, c.callbackReferOn], [3, 5, 15, true, 'manager'])
+  const c3 = loadConfig({ VG_MANAGERS_EXTERNAL: '1', VG_MANAGER_PIN: ' 2468 ', VG_PIN_TIMEOUT_SEC: '7', VG_CALLBACK_MAX_ATTEMPTS: '0', VG_CALLBACK_MAX_DIALS_DAY: '2', VG_CALLBACK_LINE_WAIT_SEC: '5', VG_CALLBACK_ON_HANGUP: '0', VG_CALLBACK_REFER_ON: ' Client ', VG_PIN_WAV: '/w/pin.wav' })
+  assert.deepEqual([c3.managersExternal, c3.managerPin, c3.pinTimeoutSec, c3.callbackMaxAttempts, c3.callbackMaxDialsPerDay, c3.callbackLineWaitSec, c3.callbackOnHangup, c3.callbackReferOn, c3.promptFiles.pin],
+    [true, '2468', 7, 0, 2, 5, false, 'client', '/w/pin.wav'])
+  for (const bad of ['12', '12345678901', 'abcd', '24 68']) {
+    const cb = loadConfig({ VG_MANAGER_PIN: bad })
+    assert.deepEqual([cb.managerPin, cb.managerPinInvalid], [null, true], bad)
+  }
+  assert.deepEqual(c.prompts, {})
+  for (const [m, want] of [['fallback', 'fallback'], [' VoiceMail ', 'voicemail'], ['busy', 'busy'], ['what', 'busy']]) assert.equal(loadConfig({ VG_NO_ANSWER_MODE: m }).noAnswerMode, want, m)
+  const c2 = loadConfig({ VG_MANAGERS: '907=0676575085, 905', VG_MANAGER: '0676575085', VG_CONFIRM: '0', VG_CONFIRM_TIMEOUT_SEC: '5', VG_CONFIRM_REPEATS: '0', VG_CALLBACK_TTL_HOURS: '12', VG_LAST_CLIENT_DAYS: '7', VG_CALLBACK_DIAL_TIMEOUT_SEC: '20', VG_CLIENT_URI: 'sip:{e164}@{server}', VG_CARD_SPEAK_NUMBER: '1', [PROMPT_ENV.confirm]: '/w/confirm.wav', VG_CB_NONE_WAV: '/w/none.wav' })
+  assert.deepEqual(c2.managers, [['907', '+380676575085'], ['905']])
+  assert.deepEqual([c2.confirmEnabled, c2.confirmTimeoutSec, c2.confirmRepeats, c2.callbackTtlHours, c2.lastClientTtlDays, c2.callbackDialTimeoutSec, c2.clientUriTemplate, c2.cardSpeakNumber],
+    [false, 5, 0, 12, 7, 20, 'sip:{e164}@{server}', true])
+  assert.deepEqual([c2.promptFiles.confirm, c2.promptFiles.cbNone, c2.promptFiles.busy], ['/w/confirm.wav', '/w/none.wav', null])
+  assert.deepEqual(loadConfig({ VG_MANAGERS: '905' }).managers, [['905'], ['907']]) // лінія менеджера — завжди
+})
+
+test('gateway: прапорці --no-answer, --managers, --client-uri', () => {
+  const o = parseArgs(['--local', '--manager', 'sip:0500000002@127.0.0.1:5093', '--no-answer', ' Fallback ', '--managers', '907=0676575085', '--client-uri', 'sip:{national}@127.0.0.1:5091'])
+  assert.deepEqual([o.local, o.manager, o.noAnswer, o.managers, o.clientUri], [true, 'sip:0500000002@127.0.0.1:5093', 'fallback', '907=0676575085', 'sip:{national}@127.0.0.1:5091'])
+  assert.throws(() => parseArgs(['--no-answer']), /требует значение/)
+})
+
+test('tts: сталі фрази — prompt-<sha1>.wav, прибирання кешу їх не чіпає (картки з іменем — прибираються)', async () => {
+  const dir = tmpDir()
+  const f = fakeFetch([{ status: 200, bytes: Buffer.alloc(8000 * 2, 1) }, { status: 200, bytes: Buffer.alloc(8000 * 2, 1) }])
+  const tts = makeTts({ cacheDir: dir, getApiKey: async () => KEY, voiceId: 'v', model: 'm', fetchImpl: f })
+  const p = await tts(PROMPT_TEXTS.busy, { prefix: 'prompt' })
+  assert.equal(path.basename(p.file), `prompt-${sha1(PROMPT_TEXTS.busy)}.wav`)
+  assert.equal(f.calls[0].body.text, PROMPT_TEXTS.busy)
+  assert.equal(f.calls[0].body.language_code, 'uk')
+  const c = await tts('Дзвонить клієнт.')
+  assert.match(path.basename(c.file), /^card-[0-9a-f]{40}\.wav$/)
+  assert.deepEqual(await tts(PROMPT_TEXTS.busy, { prefix: 'prompt' }), { file: p.file, cached: true }) // з кешу, без мережі
+  assert.equal(f.calls.length, 2)
+  const old = (Date.now() - 400 * 86400000) / 1000
+  fs.utimesSync(p.file, old, old)
+  fs.utimesSync(c.file, old, old)
+  const data = path.join(dir, 'data')
+  fs.mkdirSync(data)
+  assert.equal(pruneGatewayData({ dataDir: data, cacheDir: dir, retentionDays: { logs: 14, cache: 30, journal: 90, voicemail: 90 } }), 1)
+  assert.ok(fs.existsSync(p.file) && !fs.existsSync(c.file))
+})
+
+test('gateway: підсумок — «лінія зайнята» з передзвоном, відповідь «1 / 2», передзвін менеджера', () => {
+  assert.equal(summary({ number: '+380500000001', outcome: 'busy_callback', reason: 'manager_declined', confirm: { manager: { plays: 1, digit: '2' } }, callback: { managerKey: '907', stored: true, id: 'x' }, t: {} }),
+    'итог +380500000001: busy_callback (manager_declined), менеджер нажал «2», клиенту «линия занята», перезвон сохранён')
+  assert.equal(summary({ number: '+380500000001', outcome: 'busy_callback', reason: 'manager_no_confirm', confirm: { manager: { plays: 2, digit: null } }, callback: { stored: false, why: 'no_number' }, t: {} }),
+    'итог +380500000001: busy_callback (manager_no_confirm), менеджер не нажал «1» (вопрос 2 раз), клиенту «линия занята», перезвон не сохранён (no_number)')
+  assert.equal(summary({ kind: 'callback', number: '907', outcome: 'connected_callback', cardSource: 'prompt', callback: { source: 'pending', client: '…4567', removed: true }, t: { xfer: 9000 } }),
+    'итог 907: connected_callback, перевод на 9.0 с, перезвон: ждал перезвона …4567, ожидание перезвона снято')
+  assert.equal(summary({ kind: 'callback', number: '907', outcome: 'callback_none', reason: 'no_target', callback: { source: null }, t: {} }),
+    'итог 907: callback_none (no_target), перезвон: некому')
 })
 
 test('config: дані шлюзу типово поза репозиторієм (worktree видаляють), шляхи абсолютні; поріг порожнього повідомлення', () => {
@@ -496,7 +573,7 @@ test('gateway: менеджер з VG_MANAGER на сервері лінії; р
     const n = (fs.existsSync(${JSON.stringify(runs)}) ? Number(fs.readFileSync(${JSON.stringify(runs)}, 'utf8')) : 0) + 1
     fs.writeFileSync(${JSON.stringify(runs)}, String(n))
     const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n')
-    out({ ev: 'ready' })
+    out(process.env.FAKE_NO_DTMF ? { ev: 'ready' } : { ev: 'ready', dtmf: true })
     createInterface({ input: process.stdin }).on('line', (l) => {
       const c = JSON.parse(l)
       fs.appendFileSync(${JSON.stringify(cmdsLog)}, JSON.stringify({ run: n, cmd: c.cmd, server: c.server, user: c.user, pw: typeof c.password === 'string' && c.password.length > 0 }) + '\\n')
@@ -513,7 +590,7 @@ test('gateway: менеджер з VG_MANAGER на сервері лінії; р
   const wav = path.join(dir, 'p.wav')
   fs.writeFileSync(wav, wavFromPcm16(Buffer.alloc(1600)))
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^VG_|^BINOTEL_/.test(k))),
-    VG_MANAGER: '905', VG_GREETING_WAV: wav, VG_HOLD_WAV: wav, VG_DATA_DIR: path.join(dir, 'data'), VG_CACHE_DIR: path.join(dir, 'cache'), VG_ENGINE_RESTART_MS: '200' }
+    VG_MANAGER: '905', VG_NO_ANSWER_MODE: 'fallback', VG_GREETING_WAV: wav, VG_HOLD_WAV: wav, VG_DATA_DIR: path.join(dir, 'data'), VG_CACHE_DIR: path.join(dir, 'cache'), VG_ENGINE_RESTART_MS: '200' }
   const gwPath = fileURLToPath(new URL('./gateway.mjs', import.meta.url))
   const gw = spawn(process.execPath, [gwPath, '--engine', fakeSh, '--no-tts', '--no-lookup'], { env, stdio: ['pipe', 'pipe', 'pipe'] })
   let out = ''
@@ -530,7 +607,11 @@ test('gateway: менеджер з VG_MANAGER на сервері лінії; р
   const rs = regs()
   assert.equal(rs.length, 2, out)
   assert.deepEqual(rs.map((r) => [r.run, r.server, r.user, r.pw]), [[1, 'sip15.binotel.com', '901', true], [2, 'sip15.binotel.com', '901', true]])
-  assert.match(out, /менеджер sip:905@sip15\.binotel\.com;transport=udp; запасная sip:906@sip15\.binotel\.com;transport=udp/)
+  assert.match(out, /менеджер sip:905@sip15\.binotel\.com;transport=udp; подтверждение «1»/)
+  assert.match(out, /→ запасная sip:906@sip15\.binotel\.com;transport=udp \(набор, карточка, REFER\/Replaces\), потом голосовая почта/)
+  assert.match(out, /перезвон: менеджеры 905 \(внешние номера — нет, 486\);/) // лінія менеджера — завжди серед менеджерів (захист від петлі)
+  assert.ok(!/не сообщает DTMF/.test(out), out)
+  assert.match(out, /синтез выключен — нет фраз: вопрос менеджеру «1 \/ 2»/)
   assert.match(out, /движок завершился \(code 1\)/)
   assert.match(out, /перезапускаю движок/)
   assert.match(out, /шлюз остановлен/)
@@ -545,4 +626,51 @@ test('gateway: менеджер з VG_MANAGER на сервері лінії; р
   assert.ok(engLog)
   assert.equal(fs.statSync(path.join(dir, 'data', 'logs', engLog)).mode & 0o777, 0o600)
   assert.equal((fs.readFileSync(path.join(dir, 'data', 'logs', engLog), 'utf8').match(/==== .* старт /g) || []).length, 2)
+})
+
+// Рушій без DTMF (старий engine/sip-engine): з підтвердженням «1» шлюз не стартує — без «1» не переводимо, а з таким
+// рушієм не з'єднався б жоден дзвінок; переводити без «1» — лише явне VG_CONFIRM=0.
+test('gateway: рушій без DTMF і підтвердження «1» — не стартує (код 2, без local/register); VG_CONFIRM=0 — працює', async () => {
+  const dir = tmpDir()
+  const cmdsLog = path.join(dir, 'cmds.jsonl')
+  const fakeJs = path.join(dir, 'fake-engine.mjs')
+  fs.writeFileSync(fakeJs, `
+    import fs from 'node:fs'
+    import { createInterface } from 'node:readline'
+    const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n')
+    out({ ev: 'ready', record: true })
+    createInterface({ input: process.stdin }).on('line', (l) => {
+      const c = JSON.parse(l)
+      fs.appendFileSync(${JSON.stringify(cmdsLog)}, JSON.stringify({ run: process.env.RUN, cmd: c.cmd }) + '\\n')
+      if (c.cmd === 'local') out({ ev: 'reg', code: 200, reason: 'local', active: true, local: true })
+      if (c.cmd === 'quit') setTimeout(() => process.exit(0), 20)
+    })
+  `)
+  const fakeSh = path.join(dir, 'fake-engine.sh')
+  fs.writeFileSync(fakeSh, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeJs)}\n`)
+  fs.chmodSync(fakeSh, 0o755)
+  const wav = path.join(dir, 'p.wav')
+  fs.writeFileSync(wav, wavFromPcm16(Buffer.alloc(1600)))
+  const gwPath = fileURLToPath(new URL('./gateway.mjs', import.meta.url))
+  const run = (extra, killAfterMs) => new Promise((resolve) => {
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^VG_|^BINOTEL_/.test(k))),
+      VG_GREETING_WAV: wav, VG_HOLD_WAV: wav, VG_DATA_DIR: path.join(dir, 'data'), VG_CACHE_DIR: path.join(dir, 'cache'), ...extra }
+    const gw = spawn(process.execPath, [gwPath, '--local', '--manager', 'sip:907@127.0.0.1:5094', '--engine', fakeSh, '--no-tts', '--no-lookup'], { env, stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = ''
+    gw.stdout.on('data', (b) => { out += b })
+    gw.stderr.on('data', (b) => { out += b })
+    const t = setTimeout(() => gw.kill('SIGTERM'), killAfterMs)
+    gw.on('exit', (code) => { clearTimeout(t); resolve({ code, out }) })
+  })
+  const cmds = (r) => (fs.existsSync(cmdsLog) ? fs.readFileSync(cmdsLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((c) => c.run === r).map((c) => c.cmd) : [])
+  const a = await run({ RUN: 'a' }, 8000)
+  assert.equal(a.code, 2, a.out)
+  assert.match(a.out, /не сообщает DTMF: подтверждение «1» невозможно, а переводить без «1» нельзя — шлюз не запускается/)
+  assert.match(a.out, /VG_CONFIRM=0/)
+  assert.deepEqual(cmds('a'), ['quit']) // ні local, ні register
+  const b = await run({ RUN: 'b', VG_CONFIRM: '0' }, 1500)
+  assert.equal(b.code, 0, b.out)
+  assert.match(b.out, /без подтверждения «1»/)
+  assert.ok(!/шлюз не запускается/.test(b.out), b.out)
+  assert.deepEqual(cmds('b'), ['local', 'quit'])
 })

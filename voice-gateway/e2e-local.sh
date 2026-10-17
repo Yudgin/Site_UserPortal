@@ -3,17 +3,32 @@
 # Без Binotel, ElevenLabs і Firestore: усе лише на 127.0.0.1 (шлюз :5092, клієнт :5091, менеджер :5093,
 # запасна лінія :5094). Консолі pjsua керуються файлами: tail -n0 -F <name>.ctl | pjsua …  (команди дописуємо в .ctl).
 #
+# Менеджер — pjsua з числовою ідентичністю sip:0500000002@127.0.0.1:5093 (його дзвінок на шлюз — передзвін; це
+# «зовнішній» номер, тож передзвін із нього — лише з VG_MANAGERS_EXTERNAL=1 і PIN 2468, який pjsua набирає «#»), клієнт —
+# sip:0501112233@127.0.0.1:5091. Фрази підтвердження, передзвону і PIN — тони різної частоти ($WORK/prompts, VG_*_WAV).
+# У трасі мозку номер у URI набору — лише 4 цифри, цифр DTMF немає; у рядках [engine] лога рушія номера клієнта немає.
 # Сценарії:
-#   s1  з'єднання: відповідь → привітання → утримання → набір менеджера → картка → REFER/Replaces → connected
-#   s2  менеджер не бере (без автовідповіді) → тайм-аут → набір запасної → вона відповідає → картка →
-#       REFER/Replaces → connected_fallback (сліпого REFER немає)
+#   s1  з'єднання: відповідь → привітання → утримання → набір менеджера → картка → питання «1 / 2» → менеджер-pjsua
+#       тисне «1» (RFC 2833, консоль «#») → REFER/Replaces → connected; клієнт — «останній клієнт» менеджера
+#   s2  VG_NO_ANSWER_MODE=fallback: менеджер не бере → тайм-аут → набір запасної → вона відповідає → картка →
+#       питання → «1» → REFER/Replaces → connected_fallback (сліпого REFER немає)
 #   s3  номер не з білого списку → 486, outcome rejected (типовий список не послаблено)
-#   s4  менеджер і запасна відповідають 503 → повтори в межах вікна → голосова пошта: фраза, сигнал, запис голосу
-#       клієнта (pjsua грає WAV) до VG_VOICEMAIL_MAX_SEC → outcome voicemail, у файлі > 1 с звуку
-#   s5  менеджер і запасна не беруть (тайм-аути) → голосова пошта, клієнт кладе трубку під час запису →
+#   s4  fallback: менеджер і запасна відповідають 503 → повтори в межах вікна → голосова пошта: фраза, сигнал, запис
+#       голосу клієнта (pjsua грає WAV) до VG_VOICEMAIL_MAX_SEC → outcome voicemail, у файлі > 1 с звуку
+#   s5  fallback: менеджер і запасна не беруть (тайм-аути) → голосова пошта, клієнт кладе трубку під час запису →
 #       запис зупинено й збережено, outcome voicemail
-#   s6  менеджер і запасна зайняті (486) за ~1 с → привітання догрує (не обриваємо) → фраза, сигнал, запис →
+#   s6  fallback: менеджер і запасна зайняті (486) за ~1 с → привітання догрує (не обриваємо) → фраза, сигнал, запис →
 #       клієнт кладе трубку одразу → outcome voicemail_empty, порожній WAV видалено
+#   s7  типовий режим: менеджер бере, але цифри не тисне → питання двічі → клієнту «лінія зайнята», відбій
+#       (busy_callback), передзвін у callbacks.json; менеджер-pjsua дзвонить на шлюз → фраза PIN → набирає 2468 →
+#       шлюз одразу набирає клієнта (автовідповідь) → привітання → REFER на ногу менеджера з Replaces ноги клієнта →
+#       менеджер і клієнт говорять напряму (connected_callback), передзвін прибрано
+#   s8  менеджер дзвонить на шлюз (PIN), а передзвонювати нікому → «немає клієнтів» і відбій (callback_none)
+#   s9  зовнішній номер менеджера без VG_MANAGERS_EXTERNAL → 486 (rejected, manager_external): не передзвін і не клієнт,
+#       нікому не дзвонить, хоч передзвін і чекає
+#   s10 VG_CALLBACK_REFER_ON=client: відкладений передзвін уже в callbacks.json → менеджер дзвонить (PIN) → набір
+#       клієнта → REFER на нозі КЛІЄНТА з Replaces ноги менеджера (у Refer-To — менеджер, не номер клієнта) →
+#       connected_callback
 #
 # Запуск: voice-gateway/e2e-local.sh        Журнали — voice-gateway/.e2e/<сценарій>/ (у git не потрапляють).
 # Рушій — VG_ENGINE_PATH (або ENGINE), типово engine/sip-engine. Поки шлюз працює зі старим sip-engine:
@@ -37,8 +52,13 @@ CLIENT_PORT=5091
 MGR_PORT=5093
 FB_PORT=5094
 GW_URI="sip:gw@127.0.0.1:$GW_PORT"
-MANAGER_URI="sip:mgr@127.0.0.1:$MGR_PORT"
+MANAGER_NUM=0500000002
+MANAGER_URI="sip:$MANAGER_NUM@127.0.0.1:$MGR_PORT"
+MANAGER_E164=+380500000002
 FALLBACK_URI="sip:op@127.0.0.1:$FB_PORT"
+CLIENT_URI_TPL="sip:{national}@127.0.0.1:$CLIENT_PORT" # як шлюз набирає клієнта на передзвоні
+MANAGER_PIN=2468 # PIN менеджера для передзвону з «зовнішнього» номера (тестовий)
+PROMPT_DIR="$WORK/prompts"
 # Тестовий номер клієнта: його немає в типовому allowedCallers — пропускаємо лише прапорцем --allow цього прогону
 ALLOWED_NUM=0501112233
 ALLOWED_E164=+380501112233
@@ -108,10 +128,15 @@ journal_ge() { [ "$(journal_lines)" -ge "$1" ]; }
 
 start_gateway() { # [VAR=значення …] — додаткові налаштування шлюзу для сценарію
   # VG_TRACE=1 — траса команд/подій (типово вимкнена), за нею й перевіряємо; рівень 4 — тексти SIP у лозі рушія
+  # фрази підтвердження й передзвону — свої WAV (синтез вимкнено): тони, щоб їх було чути в записах pjsua
   env VG_DATA_DIR="$SDIR/data" VG_CACHE_DIR="$SDIR/cache" VG_MANAGER_TIMEOUT_SEC=4 VG_FALLBACK_TIMEOUT_SEC=4 \
-    VG_VOICEMAIL_WAV="$VM_PROMPT" VG_VOICEMAIL_MAX_SEC=4 VG_TRACE=1 SIP_ENGINE_LOG_LEVEL=4 "$@" \
+    VG_VOICEMAIL_WAV="$VM_PROMPT" VG_VOICEMAIL_MAX_SEC=4 VG_TRACE=1 SIP_ENGINE_LOG_LEVEL=4 \
+    VG_CONFIRM_WAV="$PROMPT_DIR/confirm.wav" VG_BUSY_WAV="$PROMPT_DIR/busy.wav" VG_CB_CONNECTING_WAV="$PROMPT_DIR/cb-connecting.wav" \
+    VG_CB_NONE_WAV="$PROMPT_DIR/cb-none.wav" VG_CB_GREETING_WAV="$PROMPT_DIR/cb-greeting.wav" VG_CB_NO_ANSWER_WAV="$PROMPT_DIR/cb-no-answer.wav" \
+    VG_PIN_WAV="$PROMPT_DIR/pin.wav" VG_MANAGERS_EXTERNAL=1 VG_MANAGER_PIN="$MANAGER_PIN" \
+    VG_CONFIRM_TIMEOUT_SEC=3 "$@" \
     "$NODE" "$HERE/brain/gateway.mjs" --local --bind 127.0.0.1 --port "$GW_PORT" --user gw --engine "$ENGINE" \
-      --manager "$MANAGER_URI" --fallback "$FALLBACK_URI" --no-tts --no-lookup \
+      --manager "$MANAGER_URI" --fallback "$FALLBACK_URI" --no-tts --no-lookup --client-uri "$CLIENT_URI_TPL" \
       --card "$WORK/card.wav" --allow "$ALLOWED_E164" > "$SDIR/gateway.out" 2>&1 &
   GW_PID=$!
   if ! wait_until 10 trace_has '"ev":"reg"'; then
@@ -176,7 +201,9 @@ stop_peers() { # покласти всі дзвінки, вийти (pjsua до�
 read -r -d '' CHECK_JS <<'JS'
 import fs from 'node:fs'
 import path from 'node:path'
-const [scn, dir, MGR_URI, FB_URI, ALLOWED, DENIED, GW, CL, MG, FB] = process.argv.slice(1)
+const [scn, dir, MGR_URI, FB_URI, ALLOWED, DENIED, GW, CL, MG, FB, MGR_E164] = process.argv.slice(1)
+// URI так, як його пише траса мозку: user-частина з 5+ цифр — лише останні 4 цифри (номер клієнта / менеджера)
+const mU = (u) => String(u).replace(/^((?:sips?|tel):)([^@;>]*)/i, (m, sc, user) => ((user.match(/\d/g) || []).length >= 5 ? `${sc}…${user.replace(/\D/g, '').slice(-4)}` : m))
 const GWA = `127.0.0.1:${GW}`, CLA = `127.0.0.1:${CL}`, MGA = `127.0.0.1:${MG}`, FBA = `127.0.0.1:${FB}`
 let pass = 0, fail = 0
 const ok = (cond, desc, detail = '') => {
@@ -184,6 +211,10 @@ const ok = (cond, desc, detail = '') => {
   return !!cond
 }
 const read = (f) => { try { return f ? fs.readFileSync(f, 'utf8') : '' } catch { return '' } }
+const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')) } catch { return null } }
+const CB_FILE = path.join(dir, 'data', 'callbacks.json')
+const LAST_FILE = path.join(dir, 'data', 'last-clients.json')
+const noPending = () => { const j = readJson(CB_FILE); return !fs.existsSync(CB_FILE) || (j && Array.isArray(j.pending) && j.pending.length === 0) }
 const find = (d, re) => { try { const n = fs.readdirSync(d).filter((x) => re.test(x)).sort()[0]; return n ? path.join(d, n) : null } catch { return null } }
 const logs = path.join(dir, 'data', 'logs')
 const journal = read(find(path.join(dir, 'data'), /^calls-.*\.jsonl$/)).split('\n').filter(Boolean).map((l) => JSON.parse(l))
@@ -286,7 +317,10 @@ const B = Bs[0] ?? null
 const down = (c) => evs.some((x) => x.ev === 'state' && x.call === c && x.state === 'DISCONNECTED')
 const mgrDials = (e.dials || []).filter((d) => d.to === 'manager')
 const fbDials = (e.dials || []).filter((d) => d.to === 'fallback')
-const dialB = (uri) => evs.filter((x) => x.ev === 'dialing' && cmds.some((c) => c.cmd === 'dial' && c.ref === x.ref && c.uri === uri)).map((x) => x.call)
+const dialB = (uri) => evs.filter((x) => x.ev === 'dialing' && cmds.some((c) => c.cmd === 'dial' && c.ref === x.ref && c.uri === mU(uri))).map((x) => x.call)
+const engLines = read(find(logs, /^engine-.*\.log$/)).split('\n').filter((l) => l.includes('[engine]'))
+const traceText = read(find(logs, /^brain-.*\.log$/))
+const nat = `0${ALLOWED.slice(4)}`
 // Повтори набору: усі спроби з кодом code, між ними ~interval, остання почалась у межах вікна від першої
 function retriesOk(desc, list, code, intervalMs, windowMs) {
   const gaps = list.slice(1).map((d, i) => d.at - list[i].at)
@@ -311,16 +345,26 @@ function voicemailOk(minSec, maxSec, stop) {
   return rd
 }
 
-ok(journal.length === 1, 'в журнале шлюза ровно одна строка', `строк ${journal.length}`)
-if (journal.length) {
-  console.log(`  журнал: outcome=${e.outcome} reason=${e.reason} number=${e.number} xferCode=${e.xferCode} cardSource=${e.cardSource} dials=${JSON.stringify(e.dials)} retries=${e.retries} errors=${JSON.stringify(e.errors)}`)
-  console.log(`  шаги, с от входящего: ${Object.entries(t).map(([k, v]) => `${k} ${(v / 1000).toFixed(2)}`).join(', ')}`)
+const lines = scn === 's7' ? 2 : 1 // s7: звонок клиента и перезвон менеджера
+// Номер клиента и PIN — не в трассе мозга (URI набора маской, цифр DTMF нет) и не в строках [engine] лога движка
+ok(!traceText.includes(nat.slice(1)) && !engLines.some((l) => l.includes(nat.slice(1))), 'полного номера клиента нет ни в трассе мозга, ни в строках [engine] лога движка')
+ok(!evs.some((x) => x.ev === 'dtmf' && x.digit !== '<…>') && !traceText.includes('2468'), 'в трассе нет цифр DTMF (и PIN)')
+ok(journal.length === lines, `в журнале шлюза строк: ${lines}`, `строк ${journal.length}`)
+for (const j of journal) {
+  console.log(`  журнал: kind=${j.kind} outcome=${j.outcome} reason=${j.reason} number=${j.number} xferCode=${j.xferCode} cardSource=${j.cardSource} confirm=${JSON.stringify(j.confirm)} callback=${JSON.stringify(j.callback)} dials=${JSON.stringify(j.dials)} retries=${j.retries} errors=${JSON.stringify(j.errors)}`)
+  console.log(`  шаги, с от входящего: ${Object.entries(j.t || {}).map(([k, v]) => `${k} ${(v / 1000).toFixed(2)}`).join(', ')}`)
 }
 
 switch (scn) {
   case 's1': {
-    ok(e.outcome === 'connected' && e.reason == null, 'исход connected', `${e.outcome}/${e.reason}`)
+    ok(e.outcome === 'connected' && e.reason == null && e.kind === 'client', 'исход connected', `${e.outcome}/${e.reason}`)
     ok(e.number === ALLOWED, `номер клиента ${ALLOWED} (пропущен флагом --allow)`, e.number)
+    ok(e.confirm?.manager?.digit === '1' && e.confirm.manager.plays === 1, 'менеджер ответил «1» на вопрос с первого раза', JSON.stringify(e.confirm))
+    ok(evs.some((x) => x.ev === 'dtmf' && x.call === B && x.method === 'rfc2833'), 'движок сообщил DTMF (RFC 2833) с ноги менеджера; цифра — в журнале, в трассе скрыта')
+    ok(t.cardDone < t.confirm && t.confirm < t.digit && t.digit <= t.xfer, 'карточка → вопрос «1 / 2» → «1» → REFER', `${s('cardDone')} ${s('confirm')} ${s('digit')} ${s('xfer')}`)
+    const last = readJson(LAST_FILE)
+    ok(last?.managers?.[MGR_E164]?.number === ALLOWED && mode(LAST_FILE) === 0o600 && e.lastClientFor === MGR_E164, `last-clients.json: менеджер ${MGR_E164} → этот клиент, права 0600`, JSON.stringify(last))
+    ok(noPending(), 'ожидающих перезвона нет (менеджер ответил)')
     ok(e.xferCode === 200, 'финальный NOTIFY перевода — 200', String(e.xferCode))
     ok(e.dials?.length === 1 && e.dials[0].code === 200 && e.retries === 0, 'менеджер ответил с первого набора', JSON.stringify(e.dials))
     ok(e.cardSource === 'generic', 'карточка — файл --card (синтез выключен)', e.cardSource)
@@ -329,8 +373,9 @@ switch (scn) {
     order('команды движку', [
       ['answer', (c) => c.cmd === 'answer' && c.call === A && c.code === 200],
       ['play greeting', (c) => c.cmd === 'play' && c.call === A && c.tag === 'greeting' && !c.loop],
-      ['dial менеджера', (c) => c.cmd === 'dial' && c.uri === MGR_URI],
+      ['dial менеджера', (c) => c.cmd === 'dial' && c.uri === mU(MGR_URI)],
       ['play card менеджеру', (c) => c.cmd === 'play' && c.call === B && c.tag === 'card'],
+      ['play confirm менеджеру', (c) => c.cmd === 'play' && c.call === B && c.tag === 'confirm'],
       ['xfer_replaces', (c) => c.cmd === 'xfer_replaces' && c.call === A && c.dest === B],
     ])
     const iHold = cmds.findIndex((c) => c.cmd === 'play' && c.call === A && c.tag === 'hold' && c.loop === true)
@@ -340,9 +385,9 @@ switch (scn) {
     ok(A != null && B != null && down(A) && down(B), `обе ноги шлюза закрыты (клиент #${A}, менеджер #${B})`)
     const refer = tx(eng, 'REFER', CLA)[0]
     const rt = hdr(refer, 'Refer-To') || ''
-    ok(refer && rt.includes(`mgr@${MGA}`) && /\?Replaces=/.test(rt) && !/Require=replaces/i.test(rt), 'шлюз → клиенту REFER, Refer-To на менеджера с ?Replaces= (без Require=replaces, как консоль pjsua с Binotel)', rt.slice(0, 120))
+    ok(refer && rt.includes(`${MGR_URI.slice(4)}`) && /\?Replaces=/.test(rt) && !/Require=replaces/i.test(rt), 'шлюз → клиенту REFER, Refer-To на менеджера с ?Replaces= (без Require=replaces, как консоль pjsua с Binotel)', rt.slice(0, 120))
     ok(rx(cl, 'REFER', GWA).length >= 1, 'клиент получил REFER от шлюза')
-    const inv = tx(cl, 'INVITE', MGA).find((b) => b.first.startsWith('INVITE sip:mgr@') && hdr(b, 'Replaces'))
+    const inv = tx(cl, 'INVITE', MGA).find((b) => b.first.startsWith(`INVITE ${MGR_URI.split('@')[0]}@`) && hdr(b, 'Replaces'))
     const repl = hdr(inv, 'Replaces') || ''
     ok(!!inv, 'клиент → менеджеру INVITE с заголовком Replaces', repl.slice(0, 80))
     const cid = callId(inv)
@@ -367,13 +412,17 @@ switch (scn) {
     const wait = t.fallback - t.dial
     ok(wait >= 3500 && wait <= 5500, `набор запасной через ${(wait / 1000).toFixed(1)} с после набора менеджера (VG_MANAGER_TIMEOUT_SEC=4)`)
     ok(fbDials.length === 1 && fbDials[0].code === 200 && e.fbCardSource === 'generic', 'запасная ответила с первого набора, ей сыграна карточка (--card)', JSON.stringify(fbDials))
+    ok(e.noAnswerMode === 'fallback' && e.confirm?.fallback?.digit === '1' && !e.confirm?.manager, 'режим fallback; запасная ответила «1» на вопрос', JSON.stringify(e.confirm))
+    ok(evs.some((x) => x.ev === 'dtmf' && x.call === FB_B), 'движок сообщил DTMF с ноги запасной')
+    ok(noPending(), 'в режиме fallback перезвон не откладывается')
     ok(t.fbDial < t.fbAnswered && t.fbAnswered <= t.fbCard && t.fbCard < t.fbCardDone && t.fbCardDone < t.fbXfer && t.fbXfer < t.fbXferFinal, 'запасной: набор → ответ → карточка до конца → REFER → NOTIFY 200', `${s('fbDial')} ${s('fbAnswered')} ${s('fbCard')} ${s('fbCardDone')} ${s('fbXfer')} ${s('fbXferFinal')}`)
     order('команды движку', [
       ['answer', (c) => c.cmd === 'answer' && c.call === A],
-      ['dial менеджера', (c) => c.cmd === 'dial' && c.uri === MGR_URI],
+      ['dial менеджера', (c) => c.cmd === 'dial' && c.uri === mU(MGR_URI)],
       ['hangup менеджера (CANCEL)', (c) => c.cmd === 'hangup' && c.call === B],
-      ['dial запасной', (c) => c.cmd === 'dial' && c.uri === FB_URI],
+      ['dial запасной', (c) => c.cmd === 'dial' && c.uri === mU(FB_URI)],
       ['play card запасной', (c) => c.cmd === 'play' && c.call === FB_B && c.tag === 'card'],
+      ['play confirm запасной', (c) => c.cmd === 'play' && c.call === FB_B && c.tag === 'confirm'],
       ['xfer_replaces', (c) => c.cmd === 'xfer_replaces' && c.call === A && c.dest === FB_B],
     ])
     ok(!cmds.some((c) => c.cmd === 'xfer'), 'слепого перевода (xfer без Replaces) не было')
@@ -417,8 +466,8 @@ switch (scn) {
       new Set(fb.filter((b) => b.dir === 'TX' && !b.req && b.code === 503 && b.method === 'INVITE' && b.peer === GWA).map(callId)).size === fbDials.length, 'менеджер и запасная отвечали шлюзу 503 на каждый набор')
     order('команды движку', [
       ['answer', (c) => c.cmd === 'answer' && c.call === A],
-      ['dial менеджера', (c) => c.cmd === 'dial' && c.uri === MGR_URI],
-      ['dial запасной', (c) => c.cmd === 'dial' && c.uri === FB_URI],
+      ['dial менеджера', (c) => c.cmd === 'dial' && c.uri === mU(MGR_URI)],
+      ['dial запасной', (c) => c.cmd === 'dial' && c.uri === mU(FB_URI)],
       ['stop ожидания', (c) => c.cmd === 'stop' && c.call === A],
       ['play voicemail', (c) => c.cmd === 'play' && c.call === A && c.tag === 'voicemail' && !c.loop],
       ['play beep', (c) => c.cmd === 'play' && c.call === A && c.tag === 'beep' && !c.loop],
@@ -467,6 +516,124 @@ switch (scn) {
     ok(cmds.some((c) => c.cmd === 'record' && c.call === A) && !cmds.some((c) => c.cmd === 'record_stop'), 'запись начата, остановил её отбой клиента')
     break
   }
+  case 's7': {
+    const e0 = journal[0] || {}
+    const e1 = journal[1] || {}
+    const t0 = e0.t || {}
+    const t1 = e1.t || {}
+    const incs = evs.filter((x) => x.ev === 'incoming').map((x) => x.call)
+    const [A1, M] = incs
+    const [B1, C] = Bs
+    // 1) клієнт, менеджер мовчить
+    ok(e0.kind === 'client' && e0.outcome === 'busy_callback' && e0.reason === 'manager_no_confirm', 'звонок клиента: busy_callback (manager_no_confirm)', `${e0.kind}/${e0.outcome}/${e0.reason}`)
+    ok(e0.confirm?.manager?.plays === 2 && e0.confirm.manager.digit === null, 'вопрос «1 / 2» прозвучал дважды, цифры не было', JSON.stringify(e0.confirm))
+    ok(t0.confirmRepeat - t0.confirm >= 2900 && t0.notice - t0.confirmRepeat >= 2900, `повтор вопроса и отказ — после паузы VG_CONFIRM_TIMEOUT_SEC=2 (${((t0.confirmRepeat - t0.confirm) / 1000).toFixed(1)} с, ${((t0.notice - t0.confirmRepeat) / 1000).toFixed(1)} с)`)
+    ok(e0.callback?.stored === true && e0.callback.managerKey === MGR_E164, 'перезвон сохранён под ключом менеджера', JSON.stringify(e0.callback))
+    order('команды первого звонка', [
+      ['answer клиенту', (c) => c.cmd === 'answer' && c.call === A1],
+      ['dial менеджера', (c) => c.cmd === 'dial' && c.uri === mU(MGR_URI)],
+      ['play card', (c) => c.cmd === 'play' && c.call === B1 && c.tag === 'card'],
+      ['play confirm', (c) => c.cmd === 'play' && c.call === B1 && c.tag === 'confirm'],
+      ['play confirm ещё раз', (c) => c.cmd === 'play' && c.call === B1 && c.tag === 'confirm'],
+      ['hangup менеджера', (c) => c.cmd === 'hangup' && c.call === B1],
+      ['stop ожидания', (c) => c.cmd === 'stop' && c.call === A1],
+      ['play busy клиенту', (c) => c.cmd === 'play' && c.call === A1 && c.tag === 'busy'],
+      ['hangup клиента', (c) => c.cmd === 'hangup' && c.call === A1],
+    ])
+    ok(evs.some((x) => x.ev === 'play_done' && x.call === A1 && x.tag === 'busy') && rx(cl, 'BYE', GWA).length >= 1, 'клиент дослушал «линия занята», шлюз положил трубку (BYE клиенту)')
+    const before = readJson(path.join(dir, 'callbacks-before.json'))
+    const p = before?.pending?.[0] || {}
+    ok(before?.v === 1 && before.pending.length === 1 && p.managerKey === MGR_E164 && p.clientNumber === ALLOWED && p.id && Number.isFinite(p.ts), 'callbacks.json до перезвона: клиент и менеджер', JSON.stringify(before))
+    ok(p.card === 'Дзвонить клієнт.' && !/\d{4}/.test(p.card), 'в передзвоне карточка без номера телефона', p.card)
+    ok(readJson(LAST_FILE)?.managers?.[MGR_E164]?.number === ALLOWED, 'last-clients.json: менеджеру предлагали этого клиента')
+    // 2) менеджер передзвонює
+    ok(e1.kind === 'callback' && e1.outcome === 'connected_callback' && e1.number === MGR_E164 && e1.answeredBy === 'client', 'перезвон: connected_callback, звонил менеджер', `${e1.kind}/${e1.outcome}/${e1.number}`)
+    ok(e1.pin === 'ok' && t1.pinPrompt != null && t1.pinOk != null && t1.pinOk <= t1.cbDial, 'внешний номер менеджера: фраза PIN, PIN верный, потом набор клиента', `${e1.pin} ${JSON.stringify(t1)}`)
+    ok(e1.callback?.source === 'pending' && e1.callback.removed === true && e1.callback.client === ALLOWED && e1.callback.pendingId === p.id, 'перезвон взял ожидающего клиента и снял ожидание', JSON.stringify(e1.callback))
+    order('команды перезвона', [
+      ['answer менеджеру', (c) => c.cmd === 'answer' && c.call === M],
+      ['play pin менеджеру', (c) => c.cmd === 'play' && c.call === M && c.tag === 'pin'],
+      ['dial клиента', (c) => c.cmd === 'dial' && c.uri === mU(`sip:${nat}@${CLA}`)],
+      ['play cbConnecting менеджеру', (c) => c.cmd === 'play' && c.call === M && c.tag === 'cbConnecting'],
+      ['play cbGreeting клиенту', (c) => c.cmd === 'play' && c.call === C && c.tag === 'cbGreeting'],
+      ['xfer_replaces (нога менеджера, Replaces ноги клиента)', (c) => c.cmd === 'xfer_replaces' && c.call === M && c.dest === C],
+    ])
+    const iM = cmds.findIndex((c) => c.cmd === 'answer' && c.call === M)
+    ok(iM > 0 && !cmds.slice(iM).some((c) => c.cmd === 'dial' && c.uri === mU(MGR_URI)), 'на перезвоне шлюз не звонил менеджеру (петли нет)')
+    ok(!cmds.slice(iM).some((c) => c.tag === 'confirm'), 'на перезвоне вопроса «1 / 2» нет')
+    const dM = cmds.findIndex((c) => c.cmd === 'dial' && c.uri === mU(`sip:${nat}@${CLA}`))
+    const pM = cmds.findIndex((c) => c.cmd === 'play' && c.call === M && c.tag === 'pin')
+    ok(dM > pM && pM > iM && cmds.slice(pM + 1, dM).every((c) => c.cmd === 'stop' && c.call === M) && t1.cbDial - t1.pinOk < 200, 'клиента набрали сразу после верного PIN')
+    ok(cmds.some((c) => c.cmd === 'play' && c.call === M && c.tag === 'hold' && c.loop), 'менеджер ждал на удержании')
+    const refer = tx(eng, 'REFER', MGA)[0]
+    const rt = hdr(refer, 'Refer-To') || ''
+    ok(refer && rt.includes(`${nat}@${CLA}`) && /\?Replaces=/.test(rt), 'шлюз → менеджеру REFER: Refer-To на клиента с ?Replaces=', rt.slice(0, 120))
+    const inv = tx(mg, 'INVITE', CLA).find((b) => hdr(b, 'Replaces'))
+    ok(!!inv, 'менеджер → клиенту INVITE с Replaces')
+    const cid = callId(inv)
+    const ok200 = resp(mg, 'RX', 200, 'INVITE', cid)
+    ok(!!ok200, 'клиент ответил менеджеру 200')
+    ok(sdpPort(inv) >= 4200 && sdpPort(inv) < 4300 && sdpPort(ok200) >= 4100 && sdpPort(ok200) < 4200, `голос напрямую менеджер↔клиент (RTP ${sdpPort(inv)} ↔ ${sdpPort(ok200)})`)
+    const replacedCid = (hdr(inv, 'Replaces') || '').split(';')[0]
+    ok(tx(cl, 'BYE', GWA).some((b) => callId(b) === replacedCid), 'у клиента звонок от шлюза заменён: BYE шлюзу по Call-ID из Replaces', replacedCid)
+    ok(tx(cl, 'BYE', MGA).some((b) => callId(b) === cid), 'прямой разговор клиент–менеджер жил до конца теста (BYE клиент → менеджер)')
+    ok(noPending() && mode(CB_FILE) === 0o600, 'после перезвона ожидающих нет; callbacks.json — 0600')
+    ok([A1, B1, M, C].every((c) => c != null && down(c)), 'все ноги шлюза закрыты')
+    ok(activeSec(path.join(dir, 'mgr-rec.wav')) >= 4, 'менеджер слышал карточку, вопрос, «соединяем» и ожидание')
+    ok(activeSec(path.join(dir, 'client-rec.wav')) >= 4, 'клиент слышал приветствие, ожидание, «линия занята» и приветствие перезвона')
+    break
+  }
+  case 's8': {
+    ok(e.kind === 'callback' && e.outcome === 'callback_none' && e.reason === 'no_target' && e.number === MGR_E164 && e.pin === 'ok', 'исход callback_none (no_target), звонил менеджер, PIN верный', `${e.kind}/${e.outcome}/${e.reason}/${e.number}/${e.pin}`)
+    ok(!cmds.some((c) => c.cmd === 'dial'), 'шлюз никому не звонил (ни клиенту, ни менеджеру — петли нет)')
+    order('команды', [
+      ['answer менеджеру', (c) => c.cmd === 'answer' && c.call === A],
+      ['play pin', (c) => c.cmd === 'play' && c.call === A && c.tag === 'pin'],
+      ['play cbNone', (c) => c.cmd === 'play' && c.call === A && c.tag === 'cbNone'],
+      ['hangup', (c) => c.cmd === 'hangup' && c.call === A],
+    ])
+    ok(!cmds.some((c) => c.cmd === 'play' && (c.tag === 'cbConnecting' || c.tag === 'hold')), 'без «соединяем» и удержания')
+    ok(evs.some((x) => x.ev === 'play_done' && x.call === A && x.tag === 'cbNone') && rx(mg, 'BYE', GWA).length >= 1, 'фраза доиграла, менеджер получил BYE от шлюза')
+    ok(activeSec(path.join(dir, 'mgr-rec.wav')) >= 0.8, 'менеджер слышал фразу «нет клиентов»')
+    ok(noPending(), 'ожидающих перезвона нет')
+    break
+  }
+  case 's9': {
+    ok(e.kind === 'callback' && e.outcome === 'rejected' && e.reason === 'manager_external' && e.number === `…${MGR_E164.slice(-4)}`, 'исход rejected (manager_external), номер менеджера маской', `${e.kind}/${e.outcome}/${e.reason}/${e.number}`)
+    ok(cmds.some((c) => c.cmd === 'hangup' && c.call === A && c.code === 486) && !cmds.some((c) => c.cmd === 'answer' || c.cmd === 'dial'), 'шлюз не отвечал и никому не звонил (ни клиенту, ни менеджеру): только hangup 486')
+    ok(!!resp(mg, 'RX', 486, 'INVITE'), 'менеджер получил 486 Busy Here')
+    const j = readJson(CB_FILE)
+    ok(j?.pending?.length === 1 && j.pending[0].clientNumber === ALLOWED, 'ожидающий перезвона клиент на месте')
+    ok(/внешних номеров менеджеров \(\+380500000002\) получат «занято» \(486\)/.test(gwOut) && /отклоняю \(486\): перезвон с внешних номеров выключен/.test(gwOut), 'шлюз предупредил при старте и на входящем')
+    break
+  }
+  case 's10': {
+    const M = A
+    const C = B
+    ok(e.kind === 'callback' && e.outcome === 'connected_callback' && e.pin === 'ok' && e.callback?.referOn === 'client' && e.callback.source === 'pending' && e.callback.removed === true, 'перезвон connected_callback, REFER на ноге клиента, ожидание снято', `${e.outcome}/${JSON.stringify(e.callback)}`)
+    order('команды', [
+      ['answer менеджеру', (c) => c.cmd === 'answer' && c.call === M],
+      ['play pin', (c) => c.cmd === 'play' && c.call === M && c.tag === 'pin'],
+      ['dial клиента', (c) => c.cmd === 'dial' && c.uri === mU(`sip:${nat}@${CLA}`)],
+      ['play cbGreeting клиенту', (c) => c.cmd === 'play' && c.call === C && c.tag === 'cbGreeting'],
+      ['xfer_replaces (нога клиента, Replaces ноги менеджера)', (c) => c.cmd === 'xfer_replaces' && c.call === C && c.dest === M],
+    ])
+    const refer = tx(eng, 'REFER', CLA)[0]
+    const rt = hdr(refer, 'Refer-To') || ''
+    // Refer-To — URI менеджера з From його INVITE (pjsip у From/To порт не пише — тому менеджер у s10 на :5060)
+    ok(refer && rt.includes(`sip:${MGR_URI.slice(4).split(':')[0]}`) && /\?Replaces=/.test(rt) && !rt.includes(nat), 'шлюз → клиенту REFER: Refer-To на менеджера с ?Replaces=, номера клиента в нём нет', rt.slice(0, 120))
+    ok(tx(eng, 'REFER', MGA).length === 0, 'менеджеру шлюз REFER не слал')
+    const inv = tx(cl, 'INVITE', MGA).find((b) => hdr(b, 'Replaces'))
+    ok(!!inv, 'клиент → менеджеру INVITE с Replaces')
+    const cid = callId(inv)
+    ok(!!resp(cl, 'RX', 200, 'INVITE', cid), 'менеджер ответил клиенту 200')
+    const replacedCid = (hdr(inv, 'Replaces') || '').split(';')[0]
+    ok(tx(mg, 'BYE', GWA).some((b) => callId(b) === replacedCid), 'у менеджера звонок от шлюза заменён: BYE шлюзу по Call-ID из Replaces', replacedCid)
+    ok(tx(cl, 'BYE', MGA).some((b) => callId(b) === cid), 'прямой разговор клиент–менеджер жил до конца теста (BYE клиент → менеджер)')
+    ok(noPending(), 'ожидающих перезвона нет')
+    ok([M, C].every((c) => c != null && down(c)), 'обе ноги шлюза закрыты')
+    break
+  }
   default:
     ok(false, `неизвестный сценарий ${scn}`)
 }
@@ -477,7 +644,7 @@ JS
 
 check() {
   "$NODE" --input-type=module -e "$CHECK_JS" "$SCN" "$SDIR" "$MANAGER_URI" "$FALLBACK_URI" "$ALLOWED_E164" "$DENIED_NUM" \
-    "$GW_PORT" "$CLIENT_PORT" "$MGR_PORT" "$FB_PORT"
+    "$GW_PORT" "$CLIENT_PORT" "$MGR_PORT" "$FB_PORT" "$MANAGER_E164"
   local r p f
   r="$(cat "$SDIR/result" 2>/dev/null)"
   p="${r% *}"; f="${r#* }"
@@ -518,44 +685,59 @@ for f in "$PROMPTS/04-greeting-unknown-short.wav" "$PROMPTS/05-hold-short.wav" "
 done
 kill_leftovers
 sleep 0.3
-for port in $CLIENT_PORT $GW_PORT $MGR_PORT $FB_PORT; do
+for port in $CLIENT_PORT $GW_PORT $MGR_PORT $FB_PORT 5060; do # 5060 — менеджер у s10
   if udp_bound "$port"; then say "UDP-порт 127.0.0.1:$port занят:"; lsof -nP -a -iUDP@127.0.0.1:$port; exit 2; fi
 done
 rm -rf "$WORK"
-mkdir -p "$WORK"
+mkdir -p "$WORK" "$PROMPT_DIR"
 cp "$CARD_SRC" "$WORK/card.wav"
+# Фрази підтвердження й передзвону — тони різної частоти (синтезу в перевірці немає)
+"$NODE" --input-type=module -e '
+const [mod, dir] = process.argv.slice(1)
+const { toneWav } = await import("file://" + mod)
+const fs = await import("node:fs")
+for (const [n, freq, ms] of [["confirm", 600, 1200], ["busy", 700, 1500], ["cb-connecting", 800, 1000], ["cb-none", 900, 1200], ["cb-greeting", 1100, 1000], ["cb-no-answer", 1300, 1000], ["pin", 500, 800]]) fs.writeFileSync(`${dir}/${n}.wav`, toneWav({ freq, ms }))
+' "$HERE/brain/tts.mjs" "$PROMPT_DIR" || { say "не удалось создать фразы в $PROMPT_DIR"; exit 2; }
 say "Локальная проверка шлюза: движок $ENGINE, pjsua $PJSUA, журналы $WORK"
 say "шлюз $GW_URI, менеджер $MANAGER_URI, запасная $FALLBACK_URI, клиент sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"
 
 # ---------- s1: з'єднання ----------
 
-scenario s1 "клиент → шлюз → менеджер, перевод REFER/Replaces"
+scenario s1 "клиент → шлюз → менеджер, вопрос «1 / 2», менеджер нажимает 1 → перевод REFER/Replaces"
 if start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 200 && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"; then
   peer_cmd client m "$GW_URI"
-  if wait_until 30 journal_ge 1; then
-    sleep 2 # клієнт і менеджер говорять напряму, шлюзу в розмові вже немає
-    peer_cmd client ha
-    sleep 0.7
-    stop_peers
-    stop_gateway
-    check
-  else abort_scenario "за 30 с в журнале шлюза нет строки"; fi
+  if wait_until 30 trace_has '"tag":"confirm"'; then
+    sleep 0.3
+    peer_cmd mgr '#' 1 # консоль pjsua: «#» — DTMF RFC 2833, потім цифри
+    if wait_until 20 journal_ge 1; then
+      sleep 2 # клієнт і менеджер говорять напряму, шлюзу в розмові вже немає
+      peer_cmd client ha
+      sleep 0.7
+      stop_peers
+      stop_gateway
+      check
+    else abort_scenario "за 20 с после «1» в журнале шлюза нет строки"; fi
+  else abort_scenario "за 30 с шлюз не задал менеджеру вопрос «1 / 2»"; fi
 else abort_scenario "участники не запустились"; fi
 
 # ---------- s2: менеджер не бере → запасна відповідає → картка → REFER/Replaces ----------
 
-scenario s2 "менеджер не отвечает → набор запасной → карточка → REFER/Replaces"
-if start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" "" && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" 200 \
+scenario s2 "VG_NO_ANSWER_MODE=fallback: менеджер не отвечает → набор запасной → карточка → «1» → REFER/Replaces"
+if start_gateway VG_NO_ANSWER_MODE=fallback && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" "" && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" 200 \
   && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"; then
   peer_cmd client m "$GW_URI"
-  if wait_until 30 journal_ge 1; then
-    sleep 2 # клієнт і запасна говорять напряму
-    peer_cmd client ha
-    sleep 0.7
-    stop_peers
-    stop_gateway
-    check
-  else abort_scenario "за 30 с в журнале шлюза нет строки"; fi
+  if wait_until 40 trace_has '"tag":"confirm"'; then
+    sleep 0.3
+    peer_cmd fb '#' 1
+    if wait_until 20 journal_ge 1; then
+      sleep 2 # клієнт і запасна говорять напряму
+      peer_cmd client ha
+      sleep 0.7
+      stop_peers
+      stop_gateway
+      check
+    else abort_scenario "за 20 с после «1» в журнале шлюза нет строки"; fi
+  else abort_scenario "за 40 с шлюз не задал запасной вопрос «1 / 2»"; fi
 else abort_scenario "участники не запустились"; fi
 
 # ---------- s3: номер не з білого списку ----------
@@ -573,8 +755,8 @@ else abort_scenario "участники не запустились"; fi
 
 # ---------- s4: 503 і повтори набору → голосова пошта ----------
 
-scenario s4 "менеджер и запасная отвечают 503 → повторы в окне → голосовая почта до 4 с"
-if start_gateway VG_DIAL_RETRY_INTERVAL_MS=1000 VG_DIAL_RETRY_WINDOW_SEC=3 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 503 \
+scenario s4 "fallback: менеджер и запасная отвечают 503 → повторы в окне → голосовая почта до 4 с"
+if start_gateway VG_NO_ANSWER_MODE=fallback VG_DIAL_RETRY_INTERVAL_MS=1000 VG_DIAL_RETRY_WINDOW_SEC=3 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 503 \
   && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" 503 && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$CLIENT_VOICE"; then
   peer_cmd client m "$GW_URI"
   if wait_until 45 journal_ge 1; then
@@ -587,8 +769,8 @@ else abort_scenario "участники не запустились"; fi
 
 # ---------- s5: ніхто не бере → голосова пошта, клієнт кладе трубку під час запису ----------
 
-scenario s5 "менеджер и запасная не берут → голосовая почта, клиент кладёт трубку во время записи"
-if start_gateway VG_FALLBACK_TIMEOUT_SEC=3 VG_VOICEMAIL_MAX_SEC=30 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" "" \
+scenario s5 "fallback: менеджер и запасная не берут → голосовая почта, клиент кладёт трубку во время записи"
+if start_gateway VG_NO_ANSWER_MODE=fallback VG_FALLBACK_TIMEOUT_SEC=3 VG_VOICEMAIL_MAX_SEC=30 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" "" \
   && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" "" && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$CLIENT_VOICE"; then
   peer_cmd client m "$GW_URI"
   if wait_until 40 trace_has '"cmd":"record","call"'; then
@@ -605,8 +787,8 @@ else abort_scenario "участники не запустились"; fi
 
 # ---------- s6: обоє зайняті → пошта після привітання, клієнт кладе одразу після сигналу ----------
 
-scenario s6 "менеджер и запасная заняты (486) → приветствие до конца → почта, клиент кладёт трубку сразу после сигнала"
-if start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 486 && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" 486 \
+scenario s6 "fallback: менеджер и запасная заняты (486) → приветствие до конца → почта, клиент кладёт трубку сразу после сигнала"
+if start_gateway VG_NO_ANSWER_MODE=fallback && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 486 && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" 486 \
   && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$CLIENT_VOICE"; then
   peer_cmd client m "$GW_URI"
   if wait_until 40 trace_has '"cmd":"record","call"'; then
@@ -619,6 +801,90 @@ if start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 486 && start_
     else abort_scenario "за 10 с после отбоя в журнале шлюза нет строки"; fi
   else abort_scenario "за 40 с шлюз не начал запись голосовой почты"; fi
 else abort_scenario "участники не запустились"; fi
+
+# ---------- s7: менеджер мовчить → «лінія зайнята», передзвін → менеджер передзвонює → з'єднано ----------
+
+scenario s7 "менеджер не нажал «1» → «линия занята», перезвон сохранён → менеджер перезванивает → клиент и менеджер соединены"
+if start_gateway VG_CONFIRM_TIMEOUT_SEC=2 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 200 \
+  && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" 200; then
+  peer_cmd client m "$GW_URI"
+  if wait_until 40 journal_ge 1; then
+    cp "$SDIR/data/callbacks.json" "$SDIR/callbacks-before.json" 2>/dev/null
+    sleep 1
+    peer_cmd mgr m "$GW_URI" # менеджер передзвонює на лінію шлюзу
+    wait_until 10 trace_has '"tag":"pin"' && sleep 0.3
+    peer_cmd mgr '#' "$MANAGER_PIN" # PIN (RFC 2833)
+    if wait_until 20 journal_ge 2; then
+      sleep 2 # менеджер і клієнт говорять напряму
+      peer_cmd client ha
+      sleep 0.7
+      stop_peers
+      stop_gateway
+      check
+    else abort_scenario "за 20 с после звонка менеджера в журнале шлюза нет второй строки"; fi
+  else abort_scenario "за 40 с в журнале шлюза нет строки первого звонка"; fi
+else abort_scenario "участники не запустились"; fi
+
+# ---------- s8: менеджер дзвонить, а передзвонювати нікому ----------
+
+scenario s8 "менеджер звонит, а перезванивать некому → «нет клиентов» и отбой"
+if start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" ""; then
+  peer_cmd mgr m "$GW_URI"
+  wait_until 10 trace_has '"tag":"pin"' && sleep 0.3
+  peer_cmd mgr '#' "$MANAGER_PIN"
+  if wait_until 15 journal_ge 1; then
+    sleep 0.5
+    stop_peers
+    stop_gateway
+    check
+  else abort_scenario "за 15 с в журнале шлюза нет строки"; fi
+else abort_scenario "участники не запустились"; fi
+
+# ---------- s9: зовнішній номер менеджера без VG_MANAGERS_EXTERNAL → 486 ----------
+
+# Відкладений передзвін заздалегідь у callbacks.json (0600, тека 0700) — як після звонка клієнта, що не дочекався
+seed_pending() {
+  mkdir -p "$SDIR/data" && chmod 700 "$SDIR/data"
+  "$NODE" -e 'const fs=require("fs");const [f,mgr,cl]=process.argv.slice(1);fs.writeFileSync(f,JSON.stringify({v:1,pending:[{id:"seed-1",managerKey:mgr,clientNumber:cl,gcid:null,serviceRequestId:null,card:"Дзвонить клієнт.",ts:Date.now()}]}),{mode:0o600})' \
+    "$SDIR/data/callbacks.json" "$MANAGER_E164" "$ALLOWED_E164"
+}
+
+scenario s9 "внешний номер менеджера без VG_MANAGERS_EXTERNAL → 486: не перезвон и не клиент"
+seed_pending
+if start_gateway VG_MANAGERS_EXTERNAL=0 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" ""; then
+  peer_cmd mgr m "$GW_URI"
+  if wait_until 10 journal_ge 1; then
+    sleep 0.5
+    stop_peers
+    stop_gateway
+    check
+  else abort_scenario "за 10 с в журнале шлюза нет строки"; fi
+else abort_scenario "участники не запустились"; fi
+
+# ---------- s10: передзвін з REFER на нозі клієнта ----------
+
+scenario s10 "VG_CALLBACK_REFER_ON=client: менеджер перезванивает (PIN) → клиент → REFER на ноге клиента с Replaces ноги менеджера"
+seed_pending
+# Refer-To збирається з From вхідного INVITE менеджера, а pjsip у From/To порт не пише (RFC 3261, табл. 1) — тож
+# клієнт-pjsua набере менеджера на типовий 5060: на цей сценарій менеджер-pjsua слухає саме його. У Binotel From —
+# sip:907@sip14.binotel.com, порт не потрібен.
+MGR_PORT_MAIN=$MGR_PORT
+MGR_PORT=5060
+if start_gateway VG_CALLBACK_REFER_ON=client && start_peer mgr "$MGR_PORT" 4200 "sip:$MANAGER_NUM@127.0.0.1:$MGR_PORT" "" \
+  && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" 200; then
+  peer_cmd mgr m "$GW_URI"
+  wait_until 10 trace_has '"tag":"pin"' && sleep 0.3
+  peer_cmd mgr '#' "$MANAGER_PIN"
+  if wait_until 20 journal_ge 1; then
+    sleep 2 # менеджер і клієнт говорять напряму
+    peer_cmd client ha
+    sleep 0.7
+    stop_peers
+    stop_gateway
+    check
+  else abort_scenario "за 20 с после звонка менеджера в журнале шлюза нет строки"; fi
+else abort_scenario "участники не запустились"; fi
+MGR_PORT=$MGR_PORT_MAIN
 
 # ---------- підсумок ----------
 

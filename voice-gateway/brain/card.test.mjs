@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildCard, groupPhone, spoken, CARD_MAX } from './card.mjs'
+import { buildCard, groupPhone, spoken, hidePhones, CARD_MAX } from './card.mjs'
 
 const NOW = Date.parse('2026-10-16T08:00:00Z')
 const daysAgo = (n) => new Date(NOW - n * 86400e3).toISOString()
@@ -36,22 +36,25 @@ test('закритий ремонт → «Останній ремонт», ст�
   assert.equal(c.category, 'knownClient')
 })
 
-test('нічого не знаємо → номер групами і «У базі порталу немає»', () => {
+test('нічого не знаємо → «новий клієнт, у базі порталу немає» — без номера (з speakNumber — номер групами, як раніше)', () => {
   const c = buildCard({ requests: [], profile: null, orders: [] }, opts)
-  assert.equal(c.text, 'Дзвонить номер 050 000 00 01. У базі порталу немає.')
+  assert.equal(c.text, 'Дзвонить новий клієнт, у базі порталу немає.')
   assert.equal(c.category, 'unknown')
   assert.equal(c.serviceRequestId, null)
+  assert.equal(buildCard({ requests: [], profile: null, orders: [] }, { ...opts, speakNumber: true }).text, 'Дзвонить номер 050 000 00 01. У базі порталу немає.')
 })
 
 test('профіль без імені й заявок; покупець кораблика', () => {
-  assert.equal(buildCard({ requests: [], profile: { source: 'telegram' }, orders: [] }, opts).text, 'Дзвонить номер 050 000 00 01. Звертався, заявок у базі немає.')
+  assert.equal(buildCard({ requests: [], profile: { source: 'telegram' }, orders: [] }, opts).text, 'Дзвонить клієнт. Звертався, заявок у базі немає.')
+  assert.equal(buildCard({ requests: [], profile: { source: 'telegram' }, orders: [] }, { ...opts, speakNumber: true }).text, 'Дзвонить номер 050 000 00 01. Звертався, заявок у базі немає.')
   const c = buildCard({ requests: [], profile: null, orders: [{ id: 'bo1', status: 'done', clientName: 'Сидоренко Олег', soldAt: '2025-06-12T09:00:00Z' }] }, opts)
   assert.equal(c.text, 'Дзвонить Сидоренко Олег. Купив кораблик 12.06.2025, ремонтів у базі немає.')
   assert.equal(c.category, 'knownClient')
 })
 
-test('пошук не встиг (null) → лише номер, без «немає в базі»; внутрішній номер', () => {
-  assert.equal(buildCard(null, opts).text, 'Дзвонить номер 050 000 00 01.')
+test('пошук не встиг (null) → «Дзвонить клієнт.», без «немає в базі»; внутрішній номер', () => {
+  assert.equal(buildCard(null, opts).text, 'Дзвонить клієнт.')
+  assert.equal(buildCard(null, { ...opts, speakNumber: true }).text, 'Дзвонить номер 050 000 00 01.')
   assert.equal(buildCard(null, { number: '907' }).text, 'Дзвонить внутрішній номер 907.')
   assert.equal(buildCard(null, { number: '' }).text, 'Дзвонить невідомий номер.')
 })
@@ -67,4 +70,36 @@ test('довгі ім\'я і скарга → коротко (≤ ~200), без 
 test('кілька відкритих заявок → «(ще N)»', () => {
   const c = buildCard({ requests: [SR(), SR({ id: 'sr2', onec: { number: '77' }, createdAt: daysAgo(10) })], profile: null, orders: [] }, opts)
   assert.match(c.text, /^Дзвонить Петренко Іван\. Ремонт номер 1234 \(ще 1\)\. /)
+})
+
+test('номер телефону в картку не потрапляє: ні замість імені, ні зі скарги (навіть обрізаної), ні з кораблика; дата й номер ремонту лишаються', () => {
+  const noPhone = (t) => !/(\d[\s()+.-]*){9,}/.test(t) && !/050|067/.test(t)
+  const cases = [
+    SR({ clientName: '050 000 00 01' }),
+    SR({ complaint: 'Не крутиться гвинт, передзвоніть на +38 (067) 123-45-67 після обіду, будь ласка, дуже треба' }),
+    SR({ complaint: 'Передзвоніть 0671234567' }),
+    SR({ boat: 'R3 (власник 0501112233)' }),
+  ]
+  for (const r of cases) {
+    const c = buildCard({ requests: [r], profile: null, orders: [] }, opts)
+    assert.ok(noPhone(c.text), c.text)
+    assert.match(c.text, /Ремонт номер 1234/)
+  }
+  assert.equal(buildCard({ requests: [SR({ clientName: '050 000 00 01' })], profile: null, orders: [] }, opts).text.startsWith('Дзвонить клієнт. Ремонт номер 1234.'), true)
+  assert.equal(hidePhones('Купив кораблик 12.06.2025, ремонтів у базі немає.'), 'Купив кораблик 12.06.2025, ремонтів у базі немає.')
+  assert.equal(hidePhones('Ремонт номер 558. 12.06.2025'), 'Ремонт номер 558. 12.06.2025')
+  assert.equal(hidePhones('Дзвонить +380501234567.'), 'Дзвонить.')
+  // телефон після дати чи числа з крапкою (кінець речення) — раніше лишався разом із ними; «/» як розділювач
+  assert.equal(hidePhones('Купив 12.06.2025. 0501112233 Іван'), 'Купив 12.06.2025. Іван')
+  assert.equal(hidePhones('Ремонт 558. 050 111 22 33'), 'Ремонт 558.')
+  assert.equal(hidePhones('Купив 12.06.2025. 0501112233 дзвонити ввечері.'), 'Купив 12.06.2025. дзвонити ввечері.')
+  assert.equal(hidePhones('Дзвоніть 050/111/22/33, після 18'), 'Дзвоніть, після 18')
+  assert.equal(hidePhones('тел. 050.111.22.33'), 'тел.')
+  assert.equal(hidePhones('R3. 2 гвинти, 3.5 кг, ремонт 1234.'), 'R3. 2 гвинти, 3.5 кг, ремонт 1234.')
+  for (const complaint of ['Купив 12.06.2025. 0501112233 дзвонити ввечері', 'Ремонт 558. 050 111 22 33', 'Номер 050/111/22/33']) {
+    const c = buildCard({ requests: [SR({ complaint })], profile: null, orders: [] }, opts)
+    assert.ok(noPhone(c.text) && !/111/.test(c.text), c.text)
+  }
+  // з speakNumber (VG_CARD_SPEAK_NUMBER=1) скаргу не чіпаємо — як раніше
+  assert.match(buildCard({ requests: [SR({ complaint: 'Передзвоніть 0671234567' })], profile: null, orders: [] }, { ...opts, speakNumber: true }).text, /0671234567/)
 })

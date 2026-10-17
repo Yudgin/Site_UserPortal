@@ -1,22 +1,37 @@
 // Процес SIP-рушія (voice-gateway/engine/sip-engine, pjsua2) і обмін з ним JSON-рядками:
 // команди → stdin, події ← stdout (один об'єкт на рядок). stderr рушія (лог pjsip) — лише у файл, не в консоль.
 // Трасу команд/подій за бажанням пишемо в окремий файл; поле password у трасі завжди замінене,
-// а вхідні дзвінки — без імені й URI абонента, номер — лише останні 4 цифри.
+// вхідні дзвінки — без імені й URI абонента, номер — лише останні 4 цифри; у командах dial / xfer номер у URI (клієнт
+// на передзвоні, мобільний менеджера) — теж лише 4 цифри; цифри DTMF у трасу не пишемо (це може бути PIN менеджера).
 import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
 
-export const redact = (cmd) => (cmd && typeof cmd === 'object' && 'password' in cmd ? { ...cmd, password: '<…>' } : cmd)
-
 const last4 = (n) => {
   const d = String(n ?? '').replace(/\D/g, '')
   return d ? `…${d.slice(-4)}` : null
 }
-// Подія для траси: incoming — без from/name, номер маскою (gcid, to, src лишаємо для зіставлення з Binotel).
+// URI для траси: user-частина з 5+ цифр (номер телефону) → останні 4 цифри; внутрішні лінії (907) і імена — як є
+export const maskUri = (uri) => String(uri ?? '').replace(/^((?:sips?|tel):)([^@;>]*)/i, (m, scheme, user) =>
+  ((user.match(/\d/g) || []).length >= 5 ? `${scheme}${last4(user)}` : m))
+
+// Команда для траси: пароль замінено, номер у URI набору / сліпого переведення — маскою
+export const redact = (cmd) => {
+  if (!cmd || typeof cmd !== 'object') return cmd
+  let c = cmd
+  if ('password' in c) c = { ...c, password: '<…>' }
+  if ((c.cmd === 'dial' || c.cmd === 'xfer') && typeof c.uri === 'string') c = { ...c, uri: maskUri(c.uri) }
+  return c
+}
+
+// Подія для траси: incoming — без from/name, номер маскою (gcid, to, src лишаємо для зіставлення з Binotel); dtmf — без
+// цифри (менеджер набирає нею й PIN; що натиснули на питання «1 / 2», видно в журналі дзвінка, поле confirm).
 export const redactEvent = (ev) => {
-  if (!ev || ev.ev !== 'incoming') return ev
+  if (!ev || typeof ev !== 'object') return ev
+  if (ev.ev === 'dtmf') return { ...ev, digit: '<…>' }
+  if (ev.ev !== 'incoming') return ev
   const { from, name, number, ...rest } = ev
   return { ...rest, number: last4(number) }
 }

@@ -464,6 +464,21 @@ static std::string maskTail(const std::string &n) {
   return n.size() <= 4 ? std::string("…") + n : std::string("…") + n.substr(n.size() - 4);
 }
 
+// URI для журналу рушія: user-частину з 5+ цифр (номер телефону — клієнта на передзвоні, мобільний менеджера)
+// замінюємо останніми 4 цифрами: «sip:0501234567@sip14.binotel.com;transport=udp» → «sip:…4567@sip14.binotel.com;…».
+// Внутрішні лінії (907) і нецифрові імена лишаються як є — так лог зручніше читати.
+static std::string maskUri(const std::string &uri) {
+  std::string user = uriUser(uri);
+  int digits = 0;
+  for (char ch : user) digits += (ch >= '0' && ch <= '9');
+  if (digits < 5) return uri;
+  size_t colon = uri.find(':');
+  size_t at = uri.find('@');
+  std::string scheme = colon == std::string::npos ? std::string() : uri.substr(0, colon + 1);
+  if (at == std::string::npos) return scheme + maskTail(user);  // tel:+380… — без хоста
+  return scheme + maskTail(user) + uri.substr(at);
+}
+
 // ---------- стан ----------
 
 class GwCall;
@@ -484,6 +499,11 @@ struct CallRec {
   AudioMediaRecorder *rec = nullptr;  // запис голосу співрозмовника (голосова пошта)
   bool recOn = false;                 // звук виклику вже йде в запис
   std::string recFile;
+  // Остання цифра DTMF: pjsua2 може повідомити те саме натискання двома колбеками (onDtmfDigit і onDtmfEvent)
+  std::string dtmfDigit;
+  int dtmfMethod = -1;
+  int dtmfSrc = 0;  // 1 — onDtmfDigit, 2 — onDtmfEvent
+  Clock::time_point dtmfAt;
 };
 
 static Endpoint *g_ep = nullptr;
@@ -609,6 +629,7 @@ class GwCall : public Call {
   void onCallTransferRequest(OnCallTransferRequestParam &prm) override;
   void onCallReplaceRequest(OnCallReplaceRequestParam &prm) override;
   void onDtmfDigit(OnDtmfDigitParam &prm) override;
+  void onDtmfEvent(OnDtmfEventParam &prm) override;
 
  private:
   const int eid_;
@@ -835,7 +856,7 @@ void GwCall::onCallTransferStatus(OnCallTransferStatusParam &prm) {
 
 // Вхідні REFER та INVITE/Replaces шлюзу не потрібні — відхиляємо
 void GwCall::onCallTransferRequest(OnCallTransferRequestParam &prm) {
-  logf("call %d: incoming REFER to %s rejected", eid_, prm.dstUri.c_str());
+  logf("call %d: incoming REFER to %s rejected", eid_, maskUri(prm.dstUri).c_str());
   prm.statusCode = PJSIP_SC_DECLINE;
 }
 
@@ -844,8 +865,42 @@ void GwCall::onCallReplaceRequest(OnCallReplaceRequestParam &prm) {
   prm.statusCode = PJSIP_SC_DECLINE;
 }
 
-void GwCall::onDtmfDigit(OnDtmfDigitParam &prm) {
-  Ev("dtmf").call(eid_).str("digit", prm.digit).emit();
+// DTMF від співрозмовника (менеджер натискає 1 / 2): RFC 2833 (telephone-event у RTP) і SIP INFO
+// (application/dtmf-relay). pjsua2 з on_dtmf_event віддає RFC 2833 в onDtmfEvent (початок, оновлення тривалості,
+// кінець), а SIP INFO — залежно від версії в один із двох колбеків. Подію мозку шлемо одну на натискання: початок
+// події (без IS_UPDATE) або onDtmfDigit; той самий символ тим самим методом з іншого колбека протягом
+// kDtmfDupWindow — це те саме натискання. Подія: {"ev":"dtmf","call":N,"digit":"1","method":"rfc2833"|"info"}.
+static const auto kDtmfDupWindow = std::chrono::milliseconds(300);
+
+static const char *dtmfMethodName(int m) {
+  switch (m) {
+    case PJSUA_DTMF_METHOD_RFC2833: return "rfc2833";
+    case PJSUA_DTMF_METHOD_SIP_INFO: return "info";
+  }
+  return "other";
+}
+
+static void emitDtmf(int eid, const std::string &digit, int method, int src) {
+  CallRec *r = findRec(eid);
+  if (!r || r->ended || r->silent || digit.empty()) return;
+  auto now = Clock::now();
+  if (r->dtmfSrc != 0 && r->dtmfSrc != src && r->dtmfDigit == digit && r->dtmfMethod == method &&
+      now - r->dtmfAt < kDtmfDupWindow)
+    return;
+  r->dtmfDigit = digit;
+  r->dtmfMethod = method;
+  r->dtmfSrc = src;
+  r->dtmfAt = now;
+  // Саму цифру в лог не пишемо: клієнт міг би набрати щось особисте
+  logf("call %d: dtmf via %s (%s)", eid, dtmfMethodName(method), src == 1 ? "digit" : "event");
+  Ev("dtmf").call(eid).str("digit", digit).str("method", dtmfMethodName(method)).emit();
+}
+
+void GwCall::onDtmfDigit(OnDtmfDigitParam &prm) { emitDtmf(eid_, prm.digit, (int)prm.method, 1); }
+
+void GwCall::onDtmfEvent(OnDtmfEventParam &prm) {
+  if (prm.flags & PJMEDIA_STREAM_DTMF_IS_UPDATE) return;  // те саме натискання: лише нова тривалість
+  emitDtmf(eid_, prm.digit, (int)prm.method, 2);
 }
 
 class GwAccount : public Account {
@@ -1175,7 +1230,7 @@ static void cmdDial(const JObj &o) {
     emitError("dial", 0, ref, why);
     return;
   }
-  logf("call %d: dialing %s (ref %s)", eid, uri.c_str(), ref.c_str());
+  logf("call %d: dialing %s (ref %s)", eid, maskUri(uri).c_str(), ref.c_str());  // номер клієнта — лише 4 цифри
   Ev("dialing").strOrNull("ref", ref).call(eid).emit();
   std::lock_guard<std::mutex> g(g_outMu);
   for (const auto &line : held) writeAll(g_evfd, line.data(), line.size());
@@ -1190,7 +1245,7 @@ static void cmdXfer(const JObj &o) {
   try {
     CallOpParam op(true);
     r->call->xfer(uri, op);
-    logf("call %d: blind transfer to %s", eid, uri.c_str());
+    logf("call %d: blind transfer to %s", eid, maskUri(uri).c_str());
   } catch (Error &e) {
     emitError("xfer", eid, "", e.reason.empty() ? e.info() : e.reason);
   }
@@ -1544,7 +1599,8 @@ int main() {
     Ev("error").null("cmd").null("call").null("ref").str("msg", "init failed: " + e.reason).emit();
     return 1;
   }
-  Ev("ready").boolean("record", true).emit();  // record — рушій уміє record/record_stop (голосова пошта)
+  // record — рушій уміє record/record_stop (голосова пошта); dtmf — повідомляє натискання (RFC 2833 і SIP INFO)
+  Ev("ready").boolean("record", true).boolean("dtmf", true).emit();
 
   std::string inbuf;
   bool eof = false;

@@ -5,13 +5,18 @@
 //                                                     — перевірка на Mac з pjsua без АТС
 // Рядки статусу для оператора — російською; паролі й ключі не друкуються ніде, номери чужих абонентів — маскою.
 // Рушій упав — шлюз сам перезапускає його і заново реєструє лінію (частіше 5 разів за 10 хв — вихід з кодом 1).
+// Менеджер не взяв — типово клієнту «лінія зайнята, менеджер передзвонить» і відкладений передзвін; дзвінок менеджера
+// на шлюз — передзвін клієнту (flow.mjs; із зовнішнього номера — лише з VG_MANAGERS_EXTERNAL=1 і VG_MANAGER_PIN).
+// Рушій без DTMF при увімкненому підтвердженні «1» — шлюз не стартує (без «1» не переводимо, а з таким рушієм не
+// з'єднався б жоден дзвінок).
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
 import { Writable } from 'node:stream'
-import { loadConfig, extUri, isOff } from './config.mjs'
+import { loadConfig, extUri, isOff, NO_ANSWER_MODES } from './config.mjs'
 import { startEngine } from './engine.mjs'
-import { createDispatcher, callerAllowed, maskNumber } from './flow.mjs'
+import { createDispatcher, callerAllowed, managerCaller, externalCallbackOn, maskNumber } from './flow.mjs'
+import { makeCallbackStore, resolveManagers, isInternalKey, partyKey } from './callbacks.mjs'
 import { buildCard } from './card.mjs'
 import { makeTts, readWavInfo, isTelephonyWav } from './tts.mjs'
 import { makeTokenSource, accessSecret } from './gcp.mjs'
@@ -25,15 +30,21 @@ const USAGE = `Использование:
   node gateway.mjs --local --manager URI   локальная проверка без АТС (аккаунт sip:gw@127.0.0.1:5092)
 Флаги:
   --manager 907|URI   кому звонить с карточкой (по умолчанию 907)
-  --fallback 906|URI  запасная линия, если менеджер не взял: тоже набор, карточка и REFER/Replaces
+  --fallback 906|URI  запасная линия (только --no-answer fallback): тоже набор, карточка, «1» и REFER/Replaces
                       (по умолчанию 906; в --local = --manager; none — без неё, сразу голосовая почта)
   --allow +380…,…     добавить разрешённых звонящих (внутренние — 3-значные без X-BINOTEL-GCID — разрешены всегда)
   --no-tts            без синтеза карточки        --no-lookup   без поиска клиента в Firestore
   --card file.wav     готовая карточка, если синтез выключен или не удался
   --server host       SIP-сервер (реальный режим, по умолчанию sip14.binotel.com)
   --bind IP --port N --user NAME   адрес локального режима (127.0.0.1, 5092, gw)
-  --engine PATH       путь к sip-engine (или env VG_ENGINE_PATH; с записью голосовой почты — engine/sip-engine-next)
-  --max-calls N       одновременных звонков (по умолчанию 2)`
+  --engine PATH       путь к sip-engine (или env VG_ENGINE_PATH; с DTMF «1»/«2» и голосовой почтой — engine/sip-engine-next)
+  --max-calls N       одновременных звонков (по умолчанию 2)
+  --no-answer MODE    менеджер не взял: busy (по умолчанию: «линия занята», перезвон), fallback (запасная, потом
+                      голосовая почта), voicemail (сразу голосовая почта); или env VG_NO_ANSWER_MODE
+  --managers LIST     номера/линии менеджеров через запятую (один человек — через «=»: 907=0676575085); их звонок
+                      на шлюз — перезвон клиенту. Линия --manager входит всегда. Или env VG_MANAGERS
+  --client-uri TPL    как набирать клиента при перезвоне: {national} {e164} {digits} {server}
+                      (по умолчанию sip:{national}@{server};transport=udp; или env VG_CLIENT_URI)`
 
 export function parseArgs(argv) {
   const o = { local: false, tts: true, lookup: true, allow: [] }
@@ -57,6 +68,9 @@ export function parseArgs(argv) {
       case '--user': o.user = need(i, a); i++; break
       case '--engine': o.engine = need(i, a); i++; break
       case '--max-calls': o.maxCalls = Number(need(i, a)); i++; break
+      case '--no-answer': o.noAnswer = need(i, a).trim().toLowerCase(); i++; break
+      case '--managers': o.managers = need(i, a); i++; break
+      case '--client-uri': o.clientUri = need(i, a); i++; break
       case '-h': case '--help': o.help = true; break
       default: throw new Error(`неизвестный флаг ${a}`)
     }
@@ -156,6 +170,7 @@ function checkPrompt(label, file, { required }) {
 
 const secs = (ms) => (ms == null ? '—' : `${(ms / 1000).toFixed(1)} с`)
 const ABORTED = { shutdown: 'остановка шлюза', engine_exit: 'движок упал' }
+const CB_SOURCE = { pending: 'ждал перезвона', last: 'последний клиент менеджера' }
 
 export function summary(e) {
   const t = e.t || {}
@@ -167,7 +182,22 @@ export function summary(e) {
   if (t.xfer != null || t.fbXfer != null) bits.push(`перевод на ${secs(t.fbXfer ?? t.xfer)}`)
   if (e.retries) bits.push(`повторов набора ${e.retries}`)
   if (e.fallbackRetries) bits.push(`повторов набора запасной ${e.fallbackRetries}`)
-  if (e.cardSource) bits.push(`карточка: ${e.cardSource}`)
+  if (e.cardSource && e.kind !== 'callback') bits.push(`карточка: ${e.cardSource}`)
+  for (const [side, c] of Object.entries(e.confirm || {})) {
+    const who = side === 'fallback' ? 'запасная' : 'менеджер'
+    bits.push(c.digit ? `${who} нажал «${c.digit}»` : `${who} не нажал «1» (вопрос ${c.plays} раз)`)
+  }
+  if (e.outcome === 'busy_callback') bits.push(e.callback?.stored ? 'клиенту «линия занята», перезвон сохранён' : `клиенту «линия занята», перезвон не сохранён (${e.callback?.why || 'ошибка'})`)
+  if (e.outcome === 'client_hangup' && e.callback?.missed) bits.push(e.callback.stored ? 'у менеджера пропущенный — перезвон сохранён' : `перезвон не сохранён (${e.callback.why || 'ошибка'})`)
+  if (e.pin) bits.push(`PIN: ${{ ok: 'верный', wrong: 'неверный', timeout: 'не введён' }[e.pin] || e.pin}`)
+  if (e.kind === 'callback' && e.outcome !== 'rejected' && e.outcome !== 'callback_denied') {
+    const c = e.callback || {}
+    bits.push(c.source ? `перезвон: ${CB_SOURCE[c.source] || c.source} ${c.client || ''}`.trim() : 'перезвон: некому')
+    if (c.removed) bits.push('ожидание перезвона снято')
+    if (c.dropped) bits.push(`клиент не ответил ${c.attempts} раз — перезвон снят`)
+    else if (c.attempts && e.outcome === 'callback_no_answer') bits.push(`попыток ${c.attempts}`)
+  }
+  if (e.kind !== 'callback' && e.pendingRemoved) bits.push(`ожидание перезвона снято (${e.pendingRemoved})`)
   if (e.voicemail?.empty) bits.push(`сообщения нет (запись ${e.voicemail.sec != null ? `${e.voicemail.sec.toFixed(1)} с` : '—'}${e.voicemail.removed ? ', пустой файл удалён' : ''})`)
   else if (e.voicemail?.file) bits.push(`сообщение ${e.voicemail.sec != null ? `${e.voicemail.sec.toFixed(1)} с` : '(длина неизвестна)'}: ${e.voicemail.file}`)
   if (e.errors?.length) bits.push(`ошибок ${e.errors.length}`)
@@ -194,6 +224,15 @@ async function main() {
   if (args.engine) config.enginePath = path.resolve(args.engine)
   if (Number.isFinite(args.maxCalls) && args.maxCalls > 0) config.maxCalls = args.maxCalls
   if (args.allow.length) config.allowedCallers = [...config.allowedCallers, ...args.allow]
+  if (args.noAnswer != null) {
+    if (!NO_ANSWER_MODES.includes(args.noAnswer)) {
+      process.stdout.write(`--no-answer: ${NO_ANSWER_MODES.join(' | ')}\n\n${USAGE}\n`)
+      process.exit(2)
+    }
+    config.noAnswerMode = args.noAnswer
+  }
+  if (args.managers != null) config.managersSpec = args.managers
+  if (args.clientUri) config.clientUriTemplate = args.clientUri
   if (!args.tts) config.ttsEnabled = false
   if (!args.lookup) config.lookupEnabled = false
   if (args.card) config.genericCardFile = path.resolve(args.card)
@@ -204,6 +243,7 @@ async function main() {
     }
     config.managerUri = args.manager
     config.fallbackUri = isOff(args.fallback) ? '' : args.fallback || args.manager
+    config.managers = resolveManagers(config.managersSpec, config.managerUri)
   }
   // Реальний режим: номер лінії або URI як задано (прапорець → VG_* → 907/906); URI — коли відомий сервер лінії
   const managerRaw = args.manager || config.manager
@@ -264,6 +304,7 @@ async function main() {
     config.sipServer = line.server
     config.managerUri = extUri(managerRaw, config.sipServer)
     config.fallbackUri = fallbackRaw ? extUri(fallbackRaw, config.sipServer) : ''
+    config.managers = resolveManagers(config.managersSpec, config.managerUri)
   }
 
   // Синтез і пошук — необов'язкові: не вдалося підготувати → дзвінки йдуть без картки / лише з номером
@@ -278,6 +319,36 @@ async function main() {
     tts = makeTts({ cacheDir: config.cacheDir, getApiKey, voiceId: config.ttsVoiceId, model: config.ttsModel, timeoutMs: config.ttsTimeoutMs })
     getApiKey().then(() => status('ключ синтеза получен'), (e) => warn(`ключ синтеза: ${e.message} — карточки будут без синтеза, пока не получится`))
   }
+  // Фрази підтвердження й передзвону: свій WAV (VG_*_WAV) або синтез тим самим голосом (кеш cache/prompt-<sha1>.wav).
+  // Не вийшло — фразу пропускаємо (дзвінок іде далі); синтез пробуємо знову з наступним дзвінком, не частіше раз на хвилину.
+  const PROMPT_LABELS = { confirm: 'вопрос менеджеру «1 / 2»', busy: '«линия занята» клиенту', cbConnecting: '«соединяем с клиентом» менеджеру', cbNone: '«нет ждущих клиентов» менеджеру', cbGreeting: 'приветствие клиенту при перезвоне', cbNoAnswer: '«клиент не отвечает» менеджеру', pin: '«введите пин-код» менеджеру' }
+  for (const [name, file] of Object.entries(config.promptFiles)) {
+    if (file) config.prompts[name] = checkPrompt(PROMPT_LABELS[name] || name, path.resolve(file), { required: false })
+  }
+  let promptsAt = 0
+  let promptsBusy = false
+  // Фраза PIN потрібна лише з передзвоном із зовнішніх номерів
+  const missingPrompts = () => Object.keys(config.promptTexts).filter((k) => !config.prompts[k] && (k !== 'pin' || externalCallbackOn(config)))
+  const synthPrompts = async (first = false) => {
+    const missing = missingPrompts()
+    if (!tts || !missing.length || promptsBusy || (!first && Date.now() - promptsAt < 60000)) return
+    promptsBusy = true
+    promptsAt = Date.now()
+    const failed = []
+    for (const k of missing) { // по черзі: не впираємось у ліміт одночасних запитів ElevenLabs
+      try {
+        config.prompts[k] = (await tts(config.promptTexts[k], { prefix: 'prompt' })).file
+      } catch (e) {
+        failed.push(`${PROMPT_LABELS[k] || k}: ${e.message}`)
+      }
+    }
+    promptsBusy = false
+    if (failed.length) warn(`фразы не синтезированы (${failed.length}): ${failed.join('; ')} — звонки без них, попробую снова со следующим звонком`)
+    else status(`фразы подтверждения и перезвона готовы: ${missing.length} (синтез или кэш)`)
+  }
+  if (tts) synthPrompts(true)
+  else if (missingPrompts().length) warn(`синтез выключен — нет фраз: ${missingPrompts().map((k) => PROMPT_LABELS[k] || k).join(', ')} (их WAV: VG_CONFIRM_WAV, VG_BUSY_WAV, VG_CB_*_WAV); звонки идут без них`)
+
   let lookup = null
   if (config.lookupEnabled) {
     const { makeLookup } = await import('./lookup.mjs')
@@ -307,10 +378,30 @@ async function main() {
       warn(`сигнал перед записью: ${e.message} — запись без сигнала`)
     }
   }
+  // Відкладені передзвони й «останній клієнт» менеджера: <data>/callbacks.json і last-clients.json (номери клієнтів, 0600)
+  const callbacks = makeCallbackStore({ dataDir: config.dataDir, callbackTtlHours: config.callbackTtlHours, lastClientTtlDays: config.lastClientTtlDays, maxAttempts: config.callbackMaxAttempts, maxDialsPerDay: config.callbackMaxDialsPerDay, log: warn })
+  try {
+    const waiting = callbacks.listPending().length
+    if (waiting) status(`ждут перезвона менеджера: ${waiting}`)
+    // Записи під ключами, яких немає серед поточних менеджерів (VG_MANAGER / VG_MANAGERS змінили) — їх ніхто не побачить
+    const orphans = callbacks.orphanKeys(config.managers)
+    if (orphans.length) warn(`в callbacks.json / last-clients.json есть записи менеджеров, которых нет среди текущих (${orphans.join(', ')}): их перезвоны недоступны. Добавьте этот номер в группу менеджера в VG_MANAGERS (например 907=0676575085)`)
+  } catch (e) {
+    warn(`передзвоны: ${e.message}`)
+  }
+  // Хто може передзвонювати: внутрішні лінії менеджерів — завжди; зовнішні номери — лише з VG_MANAGERS_EXTERNAL=1 і PIN
+  const externalNums = config.managers.flat().filter((k) => !isInternalKey(k))
+  const internalNums = config.managers.flat().filter((k) => isInternalKey(k))
+  if (config.managerPinInvalid) warn('VG_MANAGER_PIN должен быть 4–8 цифр — PIN не задан')
+  if (externalNums.length && !externalCallbackOn(config)) warn(`звонки на шлюз с внешних номеров менеджеров (${externalNums.join(', ')}) получат «занято» (486): номер можно подделать. Перезвон с них — только VG_MANAGERS_EXTERNAL=1 и VG_MANAGER_PIN (4–8 цифр)`)
+  if (config.managersExternal && !config.managerPin) warn('VG_MANAGERS_EXTERNAL=1 без VG_MANAGER_PIN — внешние номера менеджеров всё равно получат 486')
+  const mgrK = partyKey(config.managerUri)
+  if (mgrK && !isInternalKey(mgrK) && !internalNums.length) warn(`менеджер — внешний номер (${mgrK}), а внутренних линий менеджеров нет: звонок с 907 шлюз примет за клиента и наберёт менеджеру. Для перезвона с внутренней линии: VG_MANAGERS=907=${mgrK.replace('+380', '0')}`)
   const prune = () => {
     try {
       repairVoicemailHeaders({ dataDir: config.dataDir, minAgeMs: 120000 }) // свіжі файли ще може писати рушій
       const n = pruneGatewayData({ dataDir: config.dataDir, cacheDir: config.cacheDir, retentionDays: config.retentionDays })
+      callbacks.prune() // прострочені передзвони (> callbackTtlHours) і останні клієнти (> lastClientTtlDays)
       if (n) status(`удалено старых файлов: ${n} (логи > ${config.retentionDays.logs} дн, карточки > ${config.retentionDays.cache} дн, журнал > ${config.retentionDays.journal} дн, голосовые сообщения > ${config.retentionDays.voicemail} дн)`)
     } catch (e) {
       warn(`очистка старых файлов: ${e.message}`)
@@ -324,10 +415,16 @@ async function main() {
   const engineLog = makeDailyLog({ dir: logDir, prefix: 'engine', timeZone: config.timeZone })
   const traceLog = config.trace ? makeDailyLog({ dir: logDir, prefix: 'brain', timeZone: config.timeZone }) : null
 
-  status(`режим: ${args.local ? 'локальный' : 'линия Binotel'}; менеджер ${config.managerUri}; запасная ${config.fallbackUri || 'нет'}${config.fallbackUri ? (config.fallbackMode === 'blind' ? ' (слепой перевод)' : ' (набор, карточка, REFER/Replaces)') : ''}; голосовая почта ${config.voicemailEnabled ? `до ${config.voicemailMaxSec} с` : 'выкл'}; движок ${config.enginePath}`)
+  const noAnswer = {
+    busy: 'клиенту «линия занята», перезвон менеджера',
+    fallback: `запасная ${config.fallbackUri || 'нет'}${config.fallbackUri ? (config.fallbackMode === 'blind' ? ' (слепой перевод)' : ' (набор, карточка, REFER/Replaces)') : ''}, потом голосовая почта ${config.voicemailEnabled ? `до ${config.voicemailMaxSec} с` : 'выкл'}`,
+    voicemail: `голосовая почта ${config.voicemailEnabled ? `до ${config.voicemailMaxSec} с` : 'выкл'}`,
+  }[config.noAnswerMode]
+  status(`режим: ${args.local ? 'локальный' : 'линия Binotel'}; менеджер ${config.managerUri}; ${config.confirmEnabled ? `подтверждение «1» (ждём ${config.confirmTimeoutSec} с, вопрос ещё ${config.confirmRepeats} раз)` : 'без подтверждения «1»'}; не взял/«2»/без «1» → ${noAnswer}; движок ${config.enginePath}`)
+  status(`перезвон: менеджеры ${config.managers.map((g) => g.join('=')).join(', ') || 'нет'} (внешние номера — ${externalCallbackOn(config) ? 'с PIN' : 'нет, 486'}); ждёт ${config.callbackTtlHours} ч, не взял ${config.callbackMaxAttempts || '∞'} раз — снят, не чаще ${config.callbackMaxDialsPerDay || '∞'} наборов клиента в сутки; последний клиент — ${config.lastClientTtlDays} дн; клиента набираю ${config.clientUriTemplate}; REFER на ноге ${config.callbackReferOn === 'client' ? 'клиента' : 'менеджера'}`)
   const internal = config.allowedInternal.length ? `внутренние ${config.allowedInternal.join(', ')}` : 'внутренние'
   if (!config.allowedCallers.length) status('ВНИМАНИЕ: список разрешённых звонящих пуст — все внешние звонки получат «занято» и пойдут дальше по сценарию Binotel. Задайте VG_ALLOWED_CALLERS или --allow.')
-  status(`разрешены: ${config.allowedCallers.join(', ') || 'никто'} + ${internal}; синтез ${config.ttsEnabled ? 'вкл' : 'выкл'}; поиск ${config.lookupEnabled ? 'вкл' : 'выкл'}${config.genericCardFile ? '; общая карточка есть' : ''}${config.trace ? '; трасса вкл' : ''}`)
+  status(`разрешены: ${config.allowedCallers.join(', ') || 'никто'} + ${internal} + менеджеры; синтез ${config.ttsEnabled ? 'вкл' : 'выкл'}; поиск ${config.lookupEnabled ? 'вкл' : 'выкл'}${config.genericCardFile ? '; общая карточка есть' : ''}${config.trace ? '; трасса вкл' : ''}`)
 
   // ---------- рушій: запуск і перезапуск після падіння ----------
   // Упав сам (не Ctrl+C) — журналимо незавершені дзвінки як aborted і за RESTART_MS піднімаємо новий рушій із
@@ -343,6 +440,8 @@ async function main() {
   let restartTimer = null
   const untrustedSeen = new Map() // IP → коли востаннє показували (сканери шлють сотні INVITE)
   let warnedNoRecord = false
+  let warnedNoDtmf = false
+  let fatalCode = null // шлюз зупиняється з цим кодом (рушій без DTMF при увімкненому підтвердженні)
 
   // Перед виходом дописати логи на диск (process.exit не чекає на потоки), але не довше 1 с
   const flushLogs = () => Promise.race([
@@ -363,6 +462,7 @@ async function main() {
       buildCard: (res, o) => buildCard(res, { ...o, nowMs: Date.now() }),
       tts,
       voicemailPath: (o) => makeVoicemailPath({ dataDir: config.dataDir, timeZone: config.timeZone, ...o }),
+      callbacks,
       log: status,
       onDone: (entry) => {
         const vm = entry.voicemail
@@ -402,7 +502,22 @@ async function main() {
           clearTimeout(readyTimer)
           // Старий рушій (без команди record) — голосової пошти немає: дзвінок, який ніхто не взяв, кладемо
           config.recordSupported = ev.record === true
-          if (!config.recordSupported && config.voicemailEnabled && !warnedNoRecord) {
+          // Старий рушій не повідомляє DTMF (pjsua2 віддає цифри лише в onDtmfEvent). Переводити без «1» не можна
+          // (голосова пошта мобільного оператора забрала б клієнта), а чекати «1», якої не буде, — жоден дзвінок не
+          // з'єднався б. Тому з увімкненим підтвердженням не стартуємо; без «1» — лише явне VG_CONFIRM=0.
+          config.dtmfSupported = ev.dtmf === true
+          if (!config.dtmfSupported && config.confirmEnabled) {
+            warn(`движок ${config.enginePath} не сообщает DTMF: подтверждение «1» невозможно, а переводить без «1» нельзя — шлюз не запускается. Новый движок: make -C voice-gateway/engine sip-engine-next и VG_ENGINE_PATH=voice-gateway/engine/sip-engine-next (переводить без «1» — только явно VG_CONFIRM=0)`)
+            fatalCode = 2
+            stopping = true
+            if (!eng.send({ cmd: 'quit' })) eng.kill()
+            break
+          }
+          if (!config.dtmfSupported && externalCallbackOn(config) && !warnedNoDtmf) {
+            warnedNoDtmf = true
+            warn(`движок ${config.enginePath} не сообщает DTMF — PIN не ввести: перезвон с внешних номеров менеджеров невозможен`)
+          }
+          if (!config.recordSupported && config.voicemailEnabled && config.noAnswerMode !== 'busy' && !warnedNoRecord) {
             warnedNoRecord = true
             warn(`движок ${config.enginePath} не умеет запись — голосовой почты не будет. Новый движок: make -C voice-gateway/engine sip-engine-next и VG_ENGINE_PATH=voice-gateway/engine/sip-engine-next`)
           }
@@ -429,8 +544,12 @@ async function main() {
         }
         case 'incoming': {
           const gcid = ev.gcid ? `, gcid ${clean(ev.gcid, 32)}` : ''
-          if (callerAllowed(ev, config)) status(`входящий: ${clean(ev.number || ev.from || '?', 40)}${ev.name ? ` «${clean(ev.name, 60)}»` : ''}${gcid}`)
+          const mc = managerCaller(ev, config)
+          if (mc?.external && !externalCallbackOn(config)) status(`входящий с внешнего номера менеджера ${maskNumber(ev.number) || '?'} — отклоняю (486): перезвон с внешних номеров выключен${gcid}`)
+          else if (mc) status(`входящий от менеджера ${clean(ev.number || '?', 40)} — перезвон клиенту${mc.external ? ' (нужен PIN)' : ''}${gcid}`)
+          else if (callerAllowed(ev, config)) status(`входящий: ${clean(ev.number || ev.from || '?', 40)}${ev.name ? ` «${clean(ev.name, 60)}»` : ''}${gcid}`)
           else status(`входящий с номера не из списка: ${maskNumber(ev.number) || '?'}${gcid}`) // чужих не показуємо повністю
+          synthPrompts() // якщо якоїсь фрази ще немає — ще спроба синтезу (не частіше раз на хвилину)
           break
         }
         case 'untrusted': {
@@ -461,7 +580,7 @@ async function main() {
       eng.close()
       if (stopping) {
         status('шлюз остановлен')
-        exitNow(0)
+        exitNow(fatalCode ?? 0)
         return
       }
       warn(`движок завершился (code ${code}${signal ? `, ${signal}` : ''}) — смотрите ${engineLog.file || logDir}`)
