@@ -29,8 +29,17 @@
 #   s10 VG_CALLBACK_REFER_ON=client: відкладений передзвін уже в callbacks.json → менеджер дзвонить (PIN) → набір
 #       клієнта → REFER на нозі КЛІЄНТА з Replaces ноги менеджера (у Refer-To — менеджер, не номер клієнта) →
 #       connected_callback
+#   s11 VG_NO_ANSWER_MODE=ai: менеджер не бере → ШІ (підроблений ElevenLabs на 127.0.0.1:5097, fake-ai-server.mjs): перша
+#       фраза, стан заявки, питання в передзвін, прощання → шлюз кладе трубку, коли прощання дограно (ai_noted); голос
+#       клієнта доходить до «моделі», тон «моделі» — до клієнта; розшифровка у data/ai/, питання — у callbacks.json
+#   s12 ШІ в неробочий час: менеджеру не дзвонимо, ШІ одразу; клієнт перебиває довгу фразу → interruption → черга
+#       рушія скинута (клієнт чує менше) → прощання → відбій (ai_answered)
+#   s13 ШІ передає менеджеру: менеджер узяв, але «1» не натиснув → ШІ → transfer_to_manager → сесію ШІ закрито → набір
+#       менеджера → картка → «1» → REFER/Replaces → connected (ai.transfers 1)
+#   s14 ШІ недоступний: підроблений ElevenLabs рве з'єднання → клієнту «лінія зайнята», передзвін один (busy_callback, ai_error)
 #
 # Запуск: voice-gateway/e2e-local.sh        Журнали — voice-gateway/.e2e/<сценарій>/ (у git не потрапляють).
+# Лише деякі сценарії: ONLY="s11 s12" voice-gateway/e2e-local.sh
 # Рушій — VG_ENGINE_PATH (або ENGINE), типово engine/sip-engine. Поки шлюз працює зі старим sip-engine:
 #   VG_ENGINE_PATH="$PWD/voice-gateway/engine/sip-engine-next" voice-gateway/e2e-local.sh
 # Код виходу: 0 — усі перевірки пройшли; 1 — є помилки; 2 — не вдалося запустити (порти, pjsua, движок).
@@ -58,6 +67,8 @@ MANAGER_E164=+380500000002
 FALLBACK_URI="sip:op@127.0.0.1:$FB_PORT"
 CLIENT_URI_TPL="sip:{national}@127.0.0.1:$CLIENT_PORT" # як шлюз набирає клієнта на передзвоні
 MANAGER_PIN=2468 # PIN менеджера для передзвону з «зовнішнього» номера (тестовий)
+AI_PORT=5097 # підроблений ElevenLabs Agents (TCP, WebSocket)
+AI_URL="ws://127.0.0.1:$AI_PORT/v1/convai/conversation?agent_id=test"
 PROMPT_DIR="$WORK/prompts"
 # Тестовий номер клієнта: його немає в типовому allowedCallers — пропускаємо лише прапорцем --allow цього прогону
 ALLOWED_NUM=0501112233
@@ -73,6 +84,7 @@ TOTAL_FAIL=0
 PEERS=""      # «name:pid» через пробіл — pjsua поточного сценарію
 GW_PID=""
 ENGINE_PID=""
+AI_PID=""
 
 say() { printf '%s\n' "$*"; }
 
@@ -93,6 +105,7 @@ kill_leftovers() {
   pkill -f -- "--log-file=$WORK/" 2>/dev/null
   pkill -f -- "--card $WORK/card.wav" 2>/dev/null
   pkill -f -- "tail -n0 -F $WORK/" 2>/dev/null
+  pkill -f -- "--record $WORK/" 2>/dev/null
   return 0
 }
 
@@ -102,6 +115,7 @@ cleanup() {
   PEERS=""
   if [ -n "$GW_PID" ]; then kill_wait "$GW_PID" 10; GW_PID=""; fi
   if [ -n "$ENGINE_PID" ]; then kill_wait "$ENGINE_PID" 3; ENGINE_PID=""; fi
+  if [ -n "$AI_PID" ]; then kill_wait "$AI_PID" 3; AI_PID=""; fi
   kill_leftovers
 }
 trap 'cleanup' EXIT
@@ -123,6 +137,9 @@ udp_bound() { lsof -nP -a -iUDP@127.0.0.1:"$1" >/dev/null 2>&1; }
 trace_has() { grep -Eq -- "$1" "$SDIR"/data/logs/brain-*.log 2>/dev/null; }
 journal_lines() { cat "$SDIR"/data/calls-*.jsonl 2>/dev/null | grep -c . ; }
 journal_ge() { [ "$(journal_lines)" -ge "$1" ]; }
+confirm_plays() { grep -h ' >> ' "$SDIR"/data/logs/brain-*.log 2>/dev/null | grep -c '"tag":"confirm"'; }
+confirm_ge() { [ "$(confirm_plays)" -ge "$1" ]; }
+tcp_listen() { lsof -nP -a -iTCP@127.0.0.1:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
 # ---------- учасники ----------
 
@@ -173,6 +190,15 @@ start_peer() { # name port rtp id [auto-answer] [wav — грати в дзві�
   sleep 0.3 # консоль pjsua готова читати stdin
   return 0
 }
+
+# Підроблений ElevenLabs Agents: сценарій $SDIR/ai-script.json, усе, що прийшло, — у $SDIR/ai-rec.json
+start_fake_ai() {
+  "$NODE" "$HERE/brain/fake-ai-server.mjs" --port "$AI_PORT" --script "$SDIR/ai-script.json" --record "$SDIR/ai-rec.json" > "$SDIR/ai.out" 2>&1 &
+  AI_PID=$!
+  if ! wait_until 5 tcp_listen "$AI_PORT"; then say "  поддельный ElevenLabs не поднялся"; sed 's/^/    | /' "$SDIR/ai.out"; return 1; fi
+  return 0
+}
+stop_fake_ai() { if [ -n "$AI_PID" ]; then kill_wait "$AI_PID" 3; AI_PID=""; fi; }
 
 peer_pid() { local p; for p in $PEERS; do [ "${p%%:*}" = "$1" ] && { echo "${p#*:}"; return; }; done; }
 peer_cmd() { # name рядок… — кожен аргумент окремим рядком у консоль pjsua
@@ -344,6 +370,32 @@ function voicemailOk(minSec, maxSec, stop) {
   ok(rd && rd.file === f && rd.final === true, 'событие record_done: файл закрыт движком (заголовок с длиной)', JSON.stringify(rd))
   return rd
 }
+
+// Секунди тону hz у записі pjsua: 20-мс кадри з рівнем і часткою потужності на hz (Гьорцель) — «голос» ШІ (700 Гц)
+function toneSec(file, hz) {
+  let b
+  try { b = fs.readFileSync(file) } catch { return 0 }
+  let off = 12, rate = 8000, dataOff = -1, dataLen = 0
+  while (off + 8 <= b.length) {
+    const id = b.toString('ascii', off, off + 4), len = b.readUInt32LE(off + 4)
+    if (id === 'fmt ') rate = b.readUInt32LE(off + 12)
+    if (id === 'data') { dataOff = off + 8; dataLen = len && off + 8 + len <= b.length ? len : b.length - off - 8; break }
+    off += 8 + len + (len & 1)
+  }
+  if (dataOff < 0) return 0
+  const n = Math.floor(dataLen / 2), N = Math.round(rate * 0.02), k = 2 * Math.cos((2 * Math.PI * hz) / rate)
+  let hits = 0
+  for (let i = 0; i + N <= n; i += N) {
+    let s1 = 0, s2 = 0, en = 0
+    for (let j = 0; j < N; j++) { const x = b.readInt16LE(dataOff + 2 * (i + j)); en += x * x; const s0 = x + k * s1 - s2; s2 = s1; s1 = s0 }
+    if (en / N < 300 * 300) continue
+    if ((s1 * s1 + s2 * s2 - k * s1 * s2) / (N * N / 2) / (en / N) > 0.6) hits++
+  }
+  return hits * 0.02
+}
+const aiRec = readJson(path.join(dir, 'ai-rec.json'))
+const aiSess = e.ai?.sessions || []
+const aiTools = aiSess.flatMap((x) => (x.toolCalls || []).map((tc) => ({ ...tc, abs: x.at + tc.at })))
 
 const lines = scn === 's7' ? 2 : 1 // s7: звонок клиента и перезвон менеджера
 // Номер клиента и PIN — не в трассе мозга (URI набора маской, цифр DTMF нет) и не в строках [engine] лога движка
@@ -634,6 +686,71 @@ switch (scn) {
     ok([M, C].every((c) => c != null && down(c)), 'обе ноги шлюза закрыты')
     break
   }
+  case 's11': {
+    ok(e.outcome === 'ai_noted' && e.reason === 'manager_timeout' && e.noAnswerMode === 'ai', 'исход ai_noted (менеджер не взял, ответил ИИ)', `${e.outcome}/${e.reason}/${e.noAnswerMode}`)
+    ok(e.ai?.kind === 'busy' && aiSess.length === 1 && aiSess[0].provider === 'elevenlabs', 'одна сессия ИИ (elevenlabs) вместо «линия занята»', JSON.stringify(e.ai?.kind))
+    ok(JSON.stringify(aiTools.map((x) => [x.name, x.ok])) === JSON.stringify([['get_request_status', true], ['save_question_for_manager', true], ['end_call', true]]), 'инструменты: стан заявки → вопрос → завершить', JSON.stringify(aiTools))
+    order('команды', [
+      ['answer', (c) => c.cmd === 'answer' && c.call === A],
+      ['dial менеджера', (c) => c.cmd === 'dial' && c.uri === mU(MGR_URI)],
+      ['hangup менеджера (тайм-аут)', (c) => c.cmd === 'hangup' && c.call === B],
+      ['audio_start ноги клиента', (c) => c.cmd === 'audio_start' && c.call === A && c.rate === 8000],
+      ['stop удержания (ИИ заговорил)', (c) => c.cmd === 'stop' && c.call === A],
+      ['hangup клиента', (c) => c.cmd === 'hangup' && c.call === A],
+    ])
+    ok(!cmds.some((c) => c.cmd === 'play' && c.tag === 'busy'), '«линия занята» не звучала')
+    ok(evs.some((x) => x.ev === 'audio' && x.call === A && x.state === 'started') && evs.some((x) => x.ev === 'audio' && x.call === A && x.state === 'closed'), 'движок открыл и закрыл поток звука к мозгу')
+    const init = aiRec?.inits?.[0]?.conversation_config_override || {}
+    ok(/штучний інтелект/.test(init.agent?.first_message || '') && /записується/.test(init.agent?.first_message || '') && init.agent?.language === 'uk', 'первая фраза: «штучний інтелект», «записується», язык uk', init.agent?.first_message)
+    ok(/завжди відповідай українською/.test(init.agent?.prompt?.prompt || ''), 'инструкции модели — на украинском, отвечать по-украински')
+    ok(!JSON.stringify(aiRec?.inits || []).includes(nat.slice(1)), 'номера клиента в данных для ИИ нет')
+    ok(aiRec?.toolResults?.length === 2 && aiRec.toolResults[1].result?.saved === true, 'результаты инструментов дошли до «модели» (вопрос сохранён)', JSON.stringify(aiRec?.toolResults))
+    ok((aiRec?.loudChunks || 0) >= 50, `голос клиента дошёл до «модели»: ${aiRec?.loudChunks} громких кадров по 20 мс`)
+    ok(aiRec?.closes?.some((c) => c.by === 'client' && c.code === 1000), 'шлюз закрыл сессию ИИ (1000)')
+    const j = readJson(CB_FILE)
+    ok(j?.pending?.length === 1 && j.pending[0].clientNumber === ALLOWED && j.pending[0].note?.question === 'Коли буде готовий ремонт?' && j.pending[0].note.topic === 'repair', 'перезвон с вопросом клиента в callbacks.json', JSON.stringify(j?.pending?.[0]?.note))
+    const tf = e.ai?.transcriptFile || ''
+    const tr = readJson(tf)
+    ok(tf.startsWith(path.join(dir, 'data', 'ai') + path.sep) && mode(tf) === 0o600 && tr?.turns?.filter((x) => x.speaker === 'ai').length === 4, 'расшифровка — data/ai/<дата>/*.json (0600), 4 реплики ИИ', `${tf} ${mode(tf)?.toString(8)} ${tr?.turns?.length}`)
+    ok(!JSON.stringify(e).includes('Коли буде'), 'в журнале нет текста вопроса')
+    const endCall = aiTools.find((x) => x.name === 'end_call')
+    ok(endCall && t.end - endCall.abs >= 1000, `отбой после того, как прощание (1,2 с) доиграно: через ${endCall ? t.end - endCall.abs : '—'} мс после end_call`)
+    const heard = toneSec(path.join(dir, 'client-rec.wav'), 700)
+    ok(heard >= 3.5, `клиент слышал «голос» ИИ: ${heard.toFixed(1)} с тона 700 Гц (ожидалось ~4,7)`)
+    break
+  }
+  case 's12': {
+    ok(e.outcome === 'ai_answered' && e.reason === 'after_hours' && e.ai?.kind === 'after_hours', 'исход ai_answered, нерабочее время', `${e.outcome}/${e.reason}/${e.ai?.kind}`)
+    ok(!cmds.some((c) => c.cmd === 'dial') && !cmds.some((c) => c.cmd === 'play' && c.tag === 'greeting'), 'менеджеру не звонили, тестового приветствия нет (здоровается ИИ)')
+    ok(cmds.some((c) => c.cmd === 'play' && c.call === A && c.tag === 'hold') && cmds.some((c) => c.cmd === 'audio_start' && c.call === A), 'удержание, пока ИИ подключается; поток звука открыт')
+    ok(/неробочий час/.test(aiRec?.inits?.[0]?.conversation_config_override?.agent?.first_message || ''), 'первая фраза — про нерабочее время')
+    ok(aiRec?.interruptions === 1 && aiRec?.userTurns >= 1, `«модель» услышала, что клиент перебил: interruptions ${aiRec?.interruptions}, реплик ${aiRec?.userTurns}`)
+    const heard = toneSec(path.join(dir, 'client-rec.wav'), 700)
+    ok(heard >= 1.5 && heard <= 3.4, `очередь движка сброшена на перебивании: клиент слышал ${heard.toFixed(1)} с тона из 4 + 0,6 с`)
+    ok(aiTools.some((x) => x.name === 'end_call'), 'ИИ попрощался и завершил звонок')
+    break
+  }
+  case 's13': {
+    ok(e.outcome === 'connected' && e.ai?.transfers === 1 && e.ai?.endReason === 'transfer', 'исход connected через ИИ (transfers 1)', `${e.outcome}/${e.ai?.transfers}/${e.ai?.endReason}`)
+    ok(e.ai?.why === 'manager_no_confirm', 'ИИ ответил, потому что менеджер не нажал «1»', e.ai?.why)
+    ok(mgrDials.length === 2 && !mgrDials[0].ai && mgrDials[1].ai === 1, 'два набора менеджера, второй — по просьбе ИИ', JSON.stringify(mgrDials))
+    ok(aiRec?.toolCalls?.length === 1 && aiRec.toolCalls[0].name === 'transfer_to_manager' && aiRec.closes?.some((c) => c.by === 'client'), '«модель» попросила соединить, шлюз закрыл сессию ИИ на время набора')
+    ok(e.confirm?.manager?.digit === '1' && e.ai?.firstConfirm?.digit == null, 'в первый раз «1» нет, во второй — менеджер нажал «1»', JSON.stringify([e.ai?.firstConfirm, e.confirm]))
+    const B2 = Bs[1]
+    ok(cmds.some((c) => c.cmd === 'play' && c.call === B2 && c.tag === 'card') && cmds.some((c) => c.cmd === 'xfer_replaces' && c.call === A && c.dest === B2), 'второму звонку менеджера — карточка, затем REFER/Replaces')
+    const refer = tx(eng, 'REFER', CLA)[0]
+    ok(refer && /\?Replaces=/.test(hdr(refer, 'Refer-To') || ''), 'шлюз → клиенту REFER с Replaces')
+    ok(noPending(), 'клиента соединили — ожидающих перезвона нет')
+    break
+  }
+  case 's14': {
+    ok(e.outcome === 'busy_callback' && e.ai?.error === 'ai_error', 'ИИ недоступен → «линия занята» (busy_callback, ai_error)', `${e.outcome}/${e.ai?.error}`)
+    ok(cmds.some((c) => c.cmd === 'play' && c.call === A && c.tag === 'busy'), 'клиенту сыграли «линия занята»')
+    ok(aiRec?.closes?.some((c) => c.by === 'server'), '«модель» разорвала соединение')
+    const j = readJson(CB_FILE)
+    ok(j?.pending?.length === 1 && j.pending[0].clientNumber === ALLOWED, 'перезвон сохранён один раз')
+    break
+  }
   default:
     ok(false, `неизвестный сценарий ${scn}`)
 }
@@ -663,6 +780,9 @@ scenario() { # id «назва»
   say "=== $1: $2 ==="
 }
 
+# ONLY="s11 s12" — прогнати лише ці сценарії (типово всі)
+want() { [ -z "$ONLY" ] || [[ " $ONLY " == *" $SCN "* ]]; }
+
 abort_scenario() {
   say "  ОШИБКА  $1"
   TOTAL_FAIL=$((TOTAL_FAIL + 1))
@@ -675,7 +795,7 @@ abort_scenario() {
 T0=$(date +%s)
 # Рушій у теці engine збираємо його власною ціллю make (sip-engine-next не чіпає sip-engine живого шлюзу)
 case "$ENGINE" in
-  "$HERE"/engine/sip-engine | "$HERE"/engine/sip-engine-next)
+  "$HERE"/engine/sip-engine | "$HERE"/engine/sip-engine-next | "$HERE"/engine/sip-engine-ai)
     make -C "$HERE/engine" --no-print-directory "$(basename "$ENGINE")" >/dev/null || { say "движок не собрался: make -C voice-gateway/engine $(basename "$ENGINE")"; exit 2; } ;;
   *) [ -x "$ENGINE" ] || { say "нет движка: $ENGINE"; exit 2; } ;;
 esac
@@ -688,6 +808,7 @@ sleep 0.3
 for port in $CLIENT_PORT $GW_PORT $MGR_PORT $FB_PORT 5060; do # 5060 — менеджер у s10
   if udp_bound "$port"; then say "UDP-порт 127.0.0.1:$port занят:"; lsof -nP -a -iUDP@127.0.0.1:$port; exit 2; fi
 done
+if tcp_listen "$AI_PORT"; then say "TCP-порт 127.0.0.1:$AI_PORT занят (поддельный ElevenLabs)"; exit 2; fi
 rm -rf "$WORK"
 mkdir -p "$WORK" "$PROMPT_DIR"
 cp "$CARD_SRC" "$WORK/card.wav"
@@ -698,13 +819,24 @@ const { toneWav } = await import("file://" + mod)
 const fs = await import("node:fs")
 for (const [n, freq, ms] of [["confirm", 600, 1200], ["busy", 700, 1500], ["cb-connecting", 800, 1000], ["cb-none", 900, 1200], ["cb-greeting", 1100, 1000], ["cb-no-answer", 1300, 1000], ["pin", 500, 800]]) fs.writeFileSync(`${dir}/${n}.wav`, toneWav({ freq, ms }))
 ' "$HERE/brain/tts.mjs" "$PROMPT_DIR" || { say "не удалось создать фразы в $PROMPT_DIR"; exit 2; }
+# «Голос» клієнта для ШІ (300 Гц): speech — увесь час уривками по 0,5 с; barge — 2 с тиші, 1,2 с голосу, тиша
+"$NODE" --input-type=module -e '
+const [mod, dir] = process.argv.slice(1)
+const { wavFromPcm16 } = await import("file://" + mod)
+const fs = await import("node:fs")
+const R = 8000
+const seg = (sec, on) => { const n = Math.round(R * sec), b = Buffer.alloc(n * 2); if (on) for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(6000 * Math.sin((2 * Math.PI * 300 * i) / R)), i * 2); return b }
+const speech = []; for (let i = 0; i < 60; i++) speech.push(seg(0.5, true), seg(0.5, false))
+fs.writeFileSync(`${dir}/client-speech.wav`, wavFromPcm16(Buffer.concat(speech)))
+fs.writeFileSync(`${dir}/client-barge.wav`, wavFromPcm16(Buffer.concat([seg(2.0, false), seg(1.2, true), seg(40, false)])))
+' "$HERE/brain/tts.mjs" "$WORK" || { say "не удалось создать «голос» клиента в $WORK"; exit 2; }
 say "Локальная проверка шлюза: движок $ENGINE, pjsua $PJSUA, журналы $WORK"
 say "шлюз $GW_URI, менеджер $MANAGER_URI, запасная $FALLBACK_URI, клиент sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"
 
 # ---------- s1: з'єднання ----------
 
 scenario s1 "клиент → шлюз → менеджер, вопрос «1 / 2», менеджер нажимает 1 → перевод REFER/Replaces"
-if start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 200 && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"; then
+if want && start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 200 && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"; then
   peer_cmd client m "$GW_URI"
   if wait_until 30 trace_has '"tag":"confirm"'; then
     sleep 0.3
@@ -718,12 +850,12 @@ if start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 200 && start_
       check
     else abort_scenario "за 20 с после «1» в журнале шлюза нет строки"; fi
   else abort_scenario "за 30 с шлюз не задал менеджеру вопрос «1 / 2»"; fi
-else abort_scenario "участники не запустились"; fi
+elif want; then abort_scenario "участники не запустились"; fi
 
 # ---------- s2: менеджер не бере → запасна відповідає → картка → REFER/Replaces ----------
 
 scenario s2 "VG_NO_ANSWER_MODE=fallback: менеджер не отвечает → набор запасной → карточка → «1» → REFER/Replaces"
-if start_gateway VG_NO_ANSWER_MODE=fallback && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" "" && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" 200 \
+if want && start_gateway VG_NO_ANSWER_MODE=fallback && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" "" && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" 200 \
   && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"; then
   peer_cmd client m "$GW_URI"
   if wait_until 40 trace_has '"tag":"confirm"'; then
@@ -738,12 +870,12 @@ if start_gateway VG_NO_ANSWER_MODE=fallback && start_peer mgr "$MGR_PORT" 4200 "
       check
     else abort_scenario "за 20 с после «1» в журнале шлюза нет строки"; fi
   else abort_scenario "за 40 с шлюз не задал запасной вопрос «1 / 2»"; fi
-else abort_scenario "участники не запустились"; fi
+elif want; then abort_scenario "участники не запустились"; fi
 
 # ---------- s3: номер не з білого списку ----------
 
 scenario s3 "номер не из списка разрешённых → 486"
-if start_gateway && start_peer client "$CLIENT_PORT" 4100 "sip:$DENIED_NUM@127.0.0.1:$CLIENT_PORT"; then
+if want && start_gateway && start_peer client "$CLIENT_PORT" 4100 "sip:$DENIED_NUM@127.0.0.1:$CLIENT_PORT"; then
   peer_cmd client m "$GW_URI"
   if wait_until 10 journal_ge 1; then
     sleep 0.5
@@ -751,12 +883,12 @@ if start_gateway && start_peer client "$CLIENT_PORT" 4100 "sip:$DENIED_NUM@127.0
     stop_gateway
     check
   else abort_scenario "за 10 с в журнале шлюза нет строки"; fi
-else abort_scenario "участники не запустились"; fi
+elif want; then abort_scenario "участники не запустились"; fi
 
 # ---------- s4: 503 і повтори набору → голосова пошта ----------
 
 scenario s4 "fallback: менеджер и запасная отвечают 503 → повторы в окне → голосовая почта до 4 с"
-if start_gateway VG_NO_ANSWER_MODE=fallback VG_DIAL_RETRY_INTERVAL_MS=1000 VG_DIAL_RETRY_WINDOW_SEC=3 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 503 \
+if want && start_gateway VG_NO_ANSWER_MODE=fallback VG_DIAL_RETRY_INTERVAL_MS=1000 VG_DIAL_RETRY_WINDOW_SEC=3 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 503 \
   && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" 503 && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$CLIENT_VOICE"; then
   peer_cmd client m "$GW_URI"
   if wait_until 45 journal_ge 1; then
@@ -765,12 +897,12 @@ if start_gateway VG_NO_ANSWER_MODE=fallback VG_DIAL_RETRY_INTERVAL_MS=1000 VG_DI
     stop_gateway
     check
   else abort_scenario "за 45 с в журнале шлюза нет строки"; fi
-else abort_scenario "участники не запустились"; fi
+elif want; then abort_scenario "участники не запустились"; fi
 
 # ---------- s5: ніхто не бере → голосова пошта, клієнт кладе трубку під час запису ----------
 
 scenario s5 "fallback: менеджер и запасная не берут → голосовая почта, клиент кладёт трубку во время записи"
-if start_gateway VG_NO_ANSWER_MODE=fallback VG_FALLBACK_TIMEOUT_SEC=3 VG_VOICEMAIL_MAX_SEC=30 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" "" \
+if want && start_gateway VG_NO_ANSWER_MODE=fallback VG_FALLBACK_TIMEOUT_SEC=3 VG_VOICEMAIL_MAX_SEC=30 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" "" \
   && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" "" && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$CLIENT_VOICE"; then
   peer_cmd client m "$GW_URI"
   if wait_until 40 trace_has '"cmd":"record","call"'; then
@@ -783,12 +915,12 @@ if start_gateway VG_NO_ANSWER_MODE=fallback VG_FALLBACK_TIMEOUT_SEC=3 VG_VOICEMA
       check
     else abort_scenario "за 10 с после отбоя в журнале шлюза нет строки"; fi
   else abort_scenario "за 40 с шлюз не начал запись голосовой почты"; fi
-else abort_scenario "участники не запустились"; fi
+elif want; then abort_scenario "участники не запустились"; fi
 
 # ---------- s6: обоє зайняті → пошта після привітання, клієнт кладе одразу після сигналу ----------
 
 scenario s6 "fallback: менеджер и запасная заняты (486) → приветствие до конца → почта, клиент кладёт трубку сразу после сигнала"
-if start_gateway VG_NO_ANSWER_MODE=fallback && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 486 && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" 486 \
+if want && start_gateway VG_NO_ANSWER_MODE=fallback && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 486 && start_peer fb "$FB_PORT" 4300 "$FALLBACK_URI" 486 \
   && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$CLIENT_VOICE"; then
   peer_cmd client m "$GW_URI"
   if wait_until 40 trace_has '"cmd":"record","call"'; then
@@ -800,12 +932,12 @@ if start_gateway VG_NO_ANSWER_MODE=fallback && start_peer mgr "$MGR_PORT" 4200 "
       check
     else abort_scenario "за 10 с после отбоя в журнале шлюза нет строки"; fi
   else abort_scenario "за 40 с шлюз не начал запись голосовой почты"; fi
-else abort_scenario "участники не запустились"; fi
+elif want; then abort_scenario "участники не запустились"; fi
 
 # ---------- s7: менеджер мовчить → «лінія зайнята», передзвін → менеджер передзвонює → з'єднано ----------
 
 scenario s7 "менеджер не нажал «1» → «линия занята», перезвон сохранён → менеджер перезванивает → клиент и менеджер соединены"
-if start_gateway VG_CONFIRM_TIMEOUT_SEC=2 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 200 \
+if want && start_gateway VG_CONFIRM_TIMEOUT_SEC=2 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 200 \
   && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" 200; then
   peer_cmd client m "$GW_URI"
   if wait_until 40 journal_ge 1; then
@@ -823,12 +955,12 @@ if start_gateway VG_CONFIRM_TIMEOUT_SEC=2 && start_peer mgr "$MGR_PORT" 4200 "$M
       check
     else abort_scenario "за 20 с после звонка менеджера в журнале шлюза нет второй строки"; fi
   else abort_scenario "за 40 с в журнале шлюза нет строки первого звонка"; fi
-else abort_scenario "участники не запустились"; fi
+elif want; then abort_scenario "участники не запустились"; fi
 
 # ---------- s8: менеджер дзвонить, а передзвонювати нікому ----------
 
 scenario s8 "менеджер звонит, а перезванивать некому → «нет клиентов» и отбой"
-if start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" ""; then
+if want && start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" ""; then
   peer_cmd mgr m "$GW_URI"
   wait_until 10 trace_has '"tag":"pin"' && sleep 0.3
   peer_cmd mgr '#' "$MANAGER_PIN"
@@ -838,7 +970,7 @@ if start_gateway && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" ""; then
     stop_gateway
     check
   else abort_scenario "за 15 с в журнале шлюза нет строки"; fi
-else abort_scenario "участники не запустились"; fi
+elif want; then abort_scenario "участники не запустились"; fi
 
 # ---------- s9: зовнішній номер менеджера без VG_MANAGERS_EXTERNAL → 486 ----------
 
@@ -851,7 +983,7 @@ seed_pending() {
 
 scenario s9 "внешний номер менеджера без VG_MANAGERS_EXTERNAL → 486: не перезвон и не клиент"
 seed_pending
-if start_gateway VG_MANAGERS_EXTERNAL=0 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" ""; then
+if want && start_gateway VG_MANAGERS_EXTERNAL=0 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" ""; then
   peer_cmd mgr m "$GW_URI"
   if wait_until 10 journal_ge 1; then
     sleep 0.5
@@ -859,7 +991,7 @@ if start_gateway VG_MANAGERS_EXTERNAL=0 && start_peer mgr "$MGR_PORT" 4200 "$MAN
     stop_gateway
     check
   else abort_scenario "за 10 с в журнале шлюза нет строки"; fi
-else abort_scenario "участники не запустились"; fi
+elif want; then abort_scenario "участники не запустились"; fi
 
 # ---------- s10: передзвін з REFER на нозі клієнта ----------
 
@@ -870,7 +1002,7 @@ seed_pending
 # sip:907@sip14.binotel.com, порт не потрібен.
 MGR_PORT_MAIN=$MGR_PORT
 MGR_PORT=5060
-if start_gateway VG_CALLBACK_REFER_ON=client && start_peer mgr "$MGR_PORT" 4200 "sip:$MANAGER_NUM@127.0.0.1:$MGR_PORT" "" \
+if want && start_gateway VG_CALLBACK_REFER_ON=client && start_peer mgr "$MGR_PORT" 4200 "sip:$MANAGER_NUM@127.0.0.1:$MGR_PORT" "" \
   && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" 200; then
   peer_cmd mgr m "$GW_URI"
   wait_until 10 trace_has '"tag":"pin"' && sleep 0.3
@@ -883,8 +1015,96 @@ if start_gateway VG_CALLBACK_REFER_ON=client && start_peer mgr "$MGR_PORT" 4200 
     stop_gateway
     check
   else abort_scenario "за 20 с после звонка менеджера в журнале шлюза нет строки"; fi
-else abort_scenario "участники не запустились"; fi
+elif want; then abort_scenario "участники не запустились"; fi
 MGR_PORT=$MGR_PORT_MAIN
+
+# ---------- s11: менеджер не бере → ШІ: стан заявки, питання, прощання ----------
+
+scenario s11 "VG_NO_ANSWER_MODE=ai: менеджер не берёт → ИИ (поддельный ElevenLabs): стан заявки, вопрос в перезвон, прощание → отбой после фразы"
+cat > "$SDIR/ai-script.json" <<'JSON'
+{"firstSec": 1.5, "auto": true, "vad": false, "steps": [
+  {"afterMs": 800, "tool": {"name": "get_request_status", "expect": true}, "then": {"say": 1.0, "text": "Перевірити заявку зараз не вийшло."}},
+  {"afterMs": 600, "tool": {"name": "save_question_for_manager", "expect": true, "params": {"question": "Коли буде готовий ремонт?", "topic": "repair", "urgent": false, "callback": true}}, "then": {"say": 1.0, "text": "Записав, менеджер передзвонить."}},
+  {"afterMs": 600, "say": 1.2, "text": "До побачення!", "tool": {"name": "end_call"}}
+]}
+JSON
+if want && start_fake_ai && start_gateway VG_NO_ANSWER_MODE=ai VG_AI_EL_URL="$AI_URL" VG_WORK_HOURS= && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" \
+  && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$WORK/client-speech.wav"; then
+  peer_cmd client m "$GW_URI"
+  if wait_until 40 journal_ge 1; then
+    sleep 0.5
+    stop_peers
+    stop_gateway
+    stop_fake_ai
+    check
+  else abort_scenario "за 40 с разговор с ИИ не закончился"; fi
+elif want; then abort_scenario "участники не запустились"; fi
+stop_fake_ai
+
+# ---------- s12: неробочий час, клієнт перебиває ----------
+
+scenario s12 "ИИ в нерабочее время: менеджеру не звоним, ИИ сразу; клиент перебивает → очередь сброшена → прощание → отбой"
+cat > "$SDIR/ai-script.json" <<'JSON'
+{"firstSec": 4, "steps": [{"say": 0.6, "text": "До побачення!", "tool": {"name": "end_call"}}]}
+JSON
+if want && start_fake_ai && start_gateway VG_NO_ANSWER_MODE=ai VG_AI_EL_URL="$AI_URL" VG_WORK_HOURS='sun 00:00-00:01' \
+  && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$WORK/client-barge.wav"; then
+  peer_cmd client m "$GW_URI"
+  if wait_until 20 journal_ge 1; then
+    sleep 0.5
+    stop_peers
+    stop_gateway
+    stop_fake_ai
+    check
+  else abort_scenario "за 20 с разговор с ИИ не закончился"; fi
+elif want; then abort_scenario "участники не запустились"; fi
+stop_fake_ai
+
+# ---------- s13: ШІ передає менеджеру ----------
+
+scenario s13 "ИИ передаёт клиента менеджеру: менеджер не нажал «1» → ИИ → transfer_to_manager → набор менеджера → карточка → «1» → REFER/Replaces → connected"
+cat > "$SDIR/ai-script.json" <<'JSON'
+{"firstSec": 1.0, "auto": true, "vad": false, "steps": [
+  {"afterMs": 500, "say": 1.0, "text": "З'єдную з менеджером, залишайтеся на лінії.", "tool": {"name": "transfer_to_manager", "params": {"reason": "хоче людину"}}}
+]}
+JSON
+if want && start_fake_ai && start_gateway VG_NO_ANSWER_MODE=ai VG_AI_EL_URL="$AI_URL" VG_WORK_HOURS= && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 200 \
+  && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"; then
+  peer_cmd client m "$GW_URI"
+  if wait_until 50 confirm_ge 3; then # двічі питання без відповіді, третє — уже на запит ШІ
+    sleep 0.3
+    peer_cmd mgr '#' 1
+    if wait_until 20 journal_ge 1; then
+      sleep 2
+      peer_cmd client ha
+      sleep 0.7
+      stop_peers
+      stop_gateway
+      stop_fake_ai
+      check
+    else abort_scenario "за 20 с после «1» в журнале нет строки"; fi
+  else abort_scenario "за 50 с не дошло до вопроса «1 / 2» на втором наборе менеджера"; fi
+elif want; then abort_scenario "участники не запустились"; fi
+stop_fake_ai
+
+# ---------- s14: ШІ недоступний ----------
+
+scenario s14 "ИИ недоступен: поддельный ElevenLabs рвёт соединение → клиенту «линия занята», перезвон сохранён (busy_callback, ai_error)"
+cat > "$SDIR/ai-script.json" <<'JSON'
+{"firstSec": 0.8, "closeAfterMs": 1500}
+JSON
+if want && start_fake_ai && start_gateway VG_NO_ANSWER_MODE=ai VG_AI_EL_URL="$AI_URL" VG_WORK_HOURS= && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" \
+  && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"; then
+  peer_cmd client m "$GW_URI"
+  if wait_until 30 journal_ge 1; then
+    sleep 0.5
+    stop_peers
+    stop_gateway
+    stop_fake_ai
+    check
+  else abort_scenario "за 30 с нет строки в журнале"; fi
+elif want; then abort_scenario "участники не запустились"; fi
+stop_fake_ai
 
 # ---------- підсумок ----------
 

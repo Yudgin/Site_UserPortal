@@ -9,7 +9,10 @@
 //   - ping/pong, запис усього, що прийшло, у JSON (для перевірок).
 // Запуск для e2e: node fake-ai-server.mjs --port 5097 --script steps.json --record out.json
 //   steps.json: {"firstSec":1.2, "steps":[{"say":1.0,"text":"…"},{"tool":{"name":"get_request_status","expect":true},
-//                "then":{"say":0.8}}, {"say":0.6,"tool":{"name":"end_call"}}], "closeAfterMs": null, "refuse": false}
+//                "then":{"say":0.8}}, {"say":0.6,"tool":{"name":"end_call"}}], "closeAfterMs": null, "refuse": false,
+//                "auto": false, "vad": true}
+//   auto — кроки за таймером (після першої фрази й після кожного кроку, коли його фразу «дограно», + afterMs кроку), а не
+//   за репліками клієнта; vad:false — без реплік і перебивань (лише лічимо гучні шматки голосу клієнта: loudChunks).
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -54,7 +57,7 @@ function wsFrame(opcode, payload) {
 }
 
 export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {}, recordFile = null, log = () => {} } = {}) {
-  const rec = { connections: 0, inits: [], toolResults: [], userTurns: 0, interruptions: 0, pongs: 0, audioChunks: 0, closes: [], toolCalls: [] }
+  const rec = { connections: 0, inits: [], toolResults: [], userTurns: 0, interruptions: 0, pongs: 0, audioChunks: 0, loudChunks: 0, closes: [], toolCalls: [], t0: null }
   const save = () => { if (recordFile) fs.writeFileSync(recordFile, JSON.stringify(rec, null, 2)) }
   const sockets = new Set()
 
@@ -109,6 +112,15 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
       return id
     }
 
+    const at = () => (rec.t0 == null ? 0 : Date.now() - rec.t0)
+    // auto: наступний крок — коли поточну фразу «дограно» (за часом відтворення) + afterMs наступного кроку
+    function scheduleNext() {
+      if (!script.auto || closed) return
+      const next = (script.steps || [])[stepIdx]
+      if (!next) return
+      setTimeout(() => { if (!closed && !busy) runStep() }, Math.max(0, speakingUntil - Date.now()) + (next.afterMs ?? 500))
+    }
+
     function runStep() {
       const st = (script.steps || [])[stepIdx++]
       if (!st) return
@@ -120,20 +132,25 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
       if (st.tool) {
         const callId = `tc-${stepIdx}`
         const expect = st.tool.expect === true
-        rec.toolCalls.push({ name: st.tool.name, expect })
+        rec.toolCalls.push({ name: st.tool.name, expect, at: at() })
         send({ type: 'client_tool_call', client_tool_call: { tool_name: st.tool.name, tool_call_id: callId, parameters: st.tool.params || {}, event_id: eventId, expects_response: expect } })
         if (expect) {
           busy = true
           pendingTool = { callId, then: st.then || null }
         }
       }
-      if (!busy) send({ type: 'agent_response_complete', agent_response_complete_event: { event_id: eventId } })
+      if (!busy) {
+        send({ type: 'agent_response_complete', agent_response_complete_event: { event_id: eventId } })
+        scheduleNext()
+      }
     }
 
     function onUserAudio(pcm) {
       rec.audioChunks++
       const ms = (pcm.length / 2 / RATE) * 1000
       const loud = rmsOf(pcm) > 600
+      if (loud) rec.loudChunks++
+      if (script.vad === false) return
       if (loud) {
         userSpeech += ms
         silence = 0
@@ -169,6 +186,7 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
       switch (m.type) {
         case 'conversation_initiation_client_data': {
           rec.inits.push(m)
+          rec.t0 = rec.t0 ?? Date.now()
           save()
           send({ type: 'conversation_initiation_metadata', conversation_initiation_metadata_event: { conversation_id: `conv_fake_${rec.connections}`, agent_output_audio_format: script.format || 'pcm_8000', user_input_audio_format: script.format || 'pcm_8000' } })
           const fm = m.conversation_config_override?.agent?.first_message
@@ -178,7 +196,7 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
           }
           pingTimer = setInterval(() => send({ type: 'ping', ping_event: { event_id: ++eventId, ping_ms: 30 } }), 1000)
           if (script.closeAfterMs != null) setTimeout(() => closeConn(1011, 'scripted failure'), script.closeAfterMs)
-          if (script.autoSteps) runStep()
+          if (script.auto) scheduleNext()
           return
         }
         case 'client_tool_result':
@@ -190,6 +208,7 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
             busy = false
             if (then?.say) say(then.say, then.text || null)
             send({ type: 'agent_response_complete', agent_response_complete_event: { event_id: eventId } })
+            scheduleNext()
           }
           return
         case 'pong':
@@ -210,7 +229,7 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
       sock.write(wsFrame(8, p))
       closed = true
       clearInterval(pingTimer)
-      rec.closes.push({ by: 'server', code })
+      rec.closes.push({ by: 'server', code, at: at() })
       save()
       setTimeout(() => sock.destroy(), 100)
     }
@@ -243,7 +262,7 @@ export function startFakeElevenLabs({ port = 0, host = '127.0.0.1', script = {},
           if (!closed) {
             closed = true
             clearInterval(pingTimer)
-            rec.closes.push({ by: 'client', code: payload.length >= 2 ? payload.readUInt16BE(0) : null })
+            rec.closes.push({ by: 'client', code: payload.length >= 2 ? payload.readUInt16BE(0) : null, at: at() })
             save()
             sock.write(wsFrame(8, payload.subarray(0, 2)))
           }

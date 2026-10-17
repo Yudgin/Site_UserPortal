@@ -10,6 +10,7 @@
 ```sh
 make                  # → ./sip-engine
 make sip-engine-next  # тот же код под другим именем → ./sip-engine-next
+make sip-engine-ai    # тот же код (с потоком звука к мозгу для ИИ-собеседника) → ./sip-engine-ai
 make clean
 ```
 
@@ -74,13 +75,15 @@ make clean
 | `bridge` | `a`, `b` | локальный мост звука A↔B в обе стороны (запасной вариант), останавливает проигрыватели |
 | `record` | `call`, `file` (абсолютный путь `.wav`, файла ещё нет) | записывать голос собеседника в WAV; если медиа ещё нет — начнёт, когда появится; одна запись на звонок |
 | `record_stop` | `call` | закончить запись → `record_done` |
+| `audio_start` | `call`, `sock` (абсолютный путь Unix-сокета мозга), `token` (до 128 знаков `[A-Za-z0-9_-]`), `rate` (8000 по умолчанию, 16000, 24000, 48000) | поток звука звонка в мозг и обратно (ИИ-собеседник): движок подключается к сокету, шлёт строку `{"token","call","rate"}\n`, дальше кадры «1 байт типа + u32 LE длина + данные». От движка: `A` — голос собеседника, PCM16LE кадр 20 мс (нет звука — тишина), `M` u32 id + u32 воспроизведено — метка мозга доиграна, `K` u32 воспроизведено + u32 сброшено — ответ на `C`. От мозга: `A` — звук для воспроизведения (очередь до 180 с), `C` — сбросить очередь (собеседник перебил), `M` u32 id — метка в конце очереди. Частоту переводит мост конференции. Один поток на звонок |
+| `audio_stop` | `call` | закрыть поток → `audio closed` (`stop`); сам закрывается при отбое (`hangup`), `bridge`, закрытии сокета мозгом (`peer_closed`) и выходе (`shutdown`) |
 | `quit` | — | положить всё, снять регистрацию, выйти с кодом 0 (то же при конце stdin и SIGTERM/SIGINT) |
 
 События (stdout):
 
 | Событие | Поля |
 |---|---|
-| `ready` | `record: true` — движок умеет `record`/`record_stop`; `dtmf: true` — сообщает DTMF (у старых движков полей нет); ждёт `register`/`local` |
+| `ready` | `record: true` — движок умеет `record`/`record_stop`; `dtmf: true` — сообщает DTMF; `audio: true` — умеет `audio_start`/`audio_stop` (у старых движков полей нет); ждёт `register`/`local` |
 | `reg` | `code`, `reason`, `active`, `expires`; в локальном режиме один раз `{code:200, reason:"local", active:true, local:true}` |
 | `incoming` | `call`, `from` (`sip:0500000001@45.91.130.64`), `number`, `name`, `gcid` (X-BINOTEL-GCID или `null`), `to`, `set_caller_id` (X-BINOTEL-SET-CALLER-ID или `null`), `src` (IP:порт отправителя) |
 | `untrusted` | `src`, `method` — INVITE с недоверенного адреса отклонён 403 (только боевой режим) |
@@ -91,6 +94,7 @@ make clean
 | `xfer` | `call`, `code`, `reason`, `final` (pjsua сообщает 202 как `100 Accepted`, затем NOTIFY 100, 200) |
 | `dtmf` | `call`, `digit` (`"0"`…`"9"`, `"*"`, `"#"`, `"A"`…`"D"`), `method` (`"rfc2833"` / `"info"`) — одно событие на нажатие, например `{"ev":"dtmf","call":2,"digit":"1","method":"rfc2833"}` |
 | `record_done` | `call`, `file`, `sec` (длина звука, с), `reason` (`stop` / `hangup` / `shutdown`), `final` (заголовок WAV с длиной уже записан), `missing: true` — файла нет (или он нулевого размера) |
+| `audio` | `call`, `state` — `started` (`rate`) / `closed` (`reason`: `stop` / `hangup` / `bridge` / `peer_closed` / `shutdown`, `played` — семплов воспроизведено, `queued` — оставалось в очереди, `dropped_frames` — кадров голоса, не влезших в буфер к мозгу) |
 | `error` | `cmd`, `call`, `ref`, `msg`; если `dial` не удалось начать — `{cmd:"dial", ref, call:null}` без `dialing` |
 
 Заголовки X-BINOTEL-* ищутся без учёта регистра; `from`/`to` берутся из самого INVITE (pjsua в CallInfo
@@ -136,6 +140,11 @@ ENGINE="$PWD/sip-engine-next" ./smoke-test.sh  # проверить новый �
 5c. DTMF: движок звонит pjsua; консоль pjsua «#» → «1» (RFC 2833) — ровно одно событие `dtmf` `{digit:"1",
    method:"rfc2833"}`, «*» → «2» (SIP INFO) — `{digit:"2", method:"info"}`, «11» — два события; в журнале движка —
    только метод;
+5d. поток звука к мозгу: «мозг» на Unix-сокете; ошибки (неизвестный звонок, относительный путь, неверная частота, сокета
+   нет, поток уже есть); приветствие с токеном; голос pjsua кадрами 640 Б на 16 кГц; тон 1 кГц 1,5 с + метка → метка
+   через ~1,5 с при 24000 воспроизведённых семплах; 10 с тона и через 0,5 с `C` → `K`, воспроизведено + сброшено = всё
+   отправленное; метка на пустой очереди — сразу; `audio_stop` → `audio closed (stop)`; второй поток (8 кГц), pjsua кладёт
+   трубку → `audio closed (hangup)`; в записи pjsua — чистый тон 1 кГц; токен и путь сокета в лог не попадают;
 6. `quit` → код 0, в stdout только JSON;
 7. `register` на поддельный регистратор 127.0.0.1:5096: 401 → digest (проверяется по паролю) → 200,
    REGISTER на `sip:…;transport=udp`, INVITE с `Route: <sip:…;transport=udp;lr>`, в SDP только 8/0/telephone-event,
