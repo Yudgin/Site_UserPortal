@@ -247,6 +247,41 @@ test('ШІ: end_call — завершення лише тоді, коли про
   }
 })
 
+test('ШІ: transfer_to_manager, одразу за ним end_call (жива проба 17.10) — з\'єднання лишається; end_call потім transfer — з\'єднання', async (t) => {
+  {
+    const { p, events, agent } = await setup(t)
+    p.emit('ready')
+    await sleep(30)
+    p.emit('response_started', {})
+    p.emit('audio', { data: tone(8000, 0.6), itemId: 'xfer' })
+    p.emit('tool_call', { callId: 't1', name: 'transfer_to_manager', args: {} })
+    await sleep(100)
+    p.emit('tool_call', { callId: 'e1', name: 'end_call', args: {} })
+    await sleep(20)
+    p.emit('response_done', {})
+    await until(() => events.ends.length === 1, 3000, 'onEnd')
+    assert.equal(events.ends[0].action, 'transfer')
+    const trs = p.calls.filter((c) => c[0] === 'toolResult').map((c) => c[1])
+    assert.deepEqual(trs.map((r) => [r.callId, r.continue]), [['t1', false], ['e1', false]], 'обидва виклики підтверджено без нової відповіді')
+    const tc = agent.result().toolCalls
+    assert.deepEqual(tc.map((c) => [c.name, c.ignored || null]), [['transfer_to_manager', null], ['end_call', 'transfer_pending']])
+  }
+  {
+    const { p, events } = await setup(t)
+    p.emit('ready')
+    await sleep(30)
+    p.emit('response_started', {})
+    p.emit('audio', { data: tone(8000, 0.6), itemId: 'bye' })
+    p.emit('tool_call', { callId: 'e1', name: 'end_call', args: {} })
+    await sleep(100)
+    p.emit('tool_call', { callId: 't1', name: 'transfer_to_manager', args: {} })
+    await sleep(20)
+    p.emit('response_done', {})
+    await until(() => events.ends.length === 1, 3000, 'onEnd')
+    assert.equal(events.ends[0].action, 'transfer')
+  }
+})
+
 test('ШІ: клієнт перебив прощальну фразу — дію скасовано (модель відповість знову)', async (t) => {
   const { p, events } = await setup(t)
   p.emit('ready')

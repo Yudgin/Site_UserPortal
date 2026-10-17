@@ -243,6 +243,13 @@ export function createAgent({ call, server, provider, connectOpts, onTool, onSpe
     toolCalls.push({ name, at: started, ok: accepted, ms: now() - started })
     if (ended) return
     const action = AFTER_SPEECH[name]
+    if (action && accepted && pendingAction?.action === 'transfer' && action === 'end') {
+      // З'єднання важливіше за відбій: модель буває, що одразу після transfer_to_manager викликає ще й end_call (жива
+      // проба 17.10 — клієнт попросив менеджера, а дзвінок поклали). end_call лише підтверджуємо, з'єднання лишається
+      toolCalls[toolCalls.length - 1].ignored = 'transfer_pending'
+      safe('tool_result', () => p.toolResult({ callId, name, output, continue: false }))
+      return
+    }
     if (action && accepted) {
       // Модель уже сказала фразу перед дією або скаже в цій самій відповіді (звук буває й після виклику): діємо, коли
       // дограно, нової відповіді не просимо. Мітку ставимо, коли відповідь закінчилась: response_done після виклику
