@@ -279,9 +279,16 @@ export const lastActivityMs = (sr) => Math.max(
 const stageEvents = (sr) => (Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).filter(isRealStageEvent)
 const shippedEventMs = (sr, skip1c = false) => Math.max(0, ...stageEvents(sr)
   .filter((h) => h.stage === 'shipped' && !(skip1c && h.by === '1c-sync')).map((h) => msOf(h.at)))
-// Повернення в роботу: справжній етап, крім 'shipped', діагностика, зміна статусу не на 'done'.
+// Робота з корабликом (він у нас): справжній етап, крім 'shipped', діагностика, зміна статусу не на 'done'.
 const reopenEventMs = (sr) => Math.max(0, ...stageEvents(sr).filter((h) => h.stage !== 'shipped').map((h) => msOf(h.at)),
   msOf(sr?.diagnostics?.at), sr?.status !== 'done' ? msOf(sr?.statusChangedAt) : 0)
+// Останній справжній етап (не 'shipped') — щоб відрізнити повторний ПРИЙОМ кораблика ('received', гарантія) від кроків
+// уперед ('repaired', 'packed'…), коли дата відправки невідома.
+const lastWorkStage = (sr) => {
+  let best = null
+  for (const h of stageEvents(sr)) if (h.stage !== 'shipped' && (!best || msOf(h.at) >= msOf(best.at))) best = h
+  return best?.stage || null
+}
 const normTtnDigits = (v) => { const d = String(v ?? '').replace(/\D/g, ''); return d && d !== '0' ? d : '' }
 // Посилки запчастин/купівлі (npScenario parts/purchase) — не повернення кораблика.
 const boatShipStage = (sr) => sr?.stage === 'shipped' && !['parts', 'purchase'].includes(sr?.npScenario)
@@ -302,7 +309,13 @@ export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   const reopenMs = reopenEventMs(sr)
   const shipMs = Math.max(msOf(rd?.shippedAt), shippedEventMs(sr))
   const shipped = !!rd || boatShipStage(sr) || (!!normTtnDigits(sr.returnTtn) && sr.status === 'done')
-  if (shipped && shipMs >= reopenMs) return days(shipMs || lastActivityMs(sr)) <= cfg.transitMaxDays
+  if (shipped) {
+    // Дата відправки відома і новіша за роботу з корабликом → у дорозі.
+    if (shipMs > 0 && shipMs >= reopenMs) return days(shipMs) <= cfg.transitMaxDays
+    // Дата невідома (returnTtn без запису 'shipped'): у дорозі від останньої дії, якщо тільки останній етап — не
+    // повторний прийом кораблика (тоді він знову в нас; ревʼю 2026-10-17, третє коло).
+    if (shipMs === 0 && lastWorkStage(sr) !== 'received') return days(lastActivityMs(sr)) <= cfg.transitMaxDays
+  }
   if (sr.status === 'done') {
     const doneMs = Math.max(msOf(sr.doneAt), msOf(sr.paidAt), msOf(sr.statusChangedAt))
     // Після завершення (або старого імпорту без часу) кораблик повернули в роботу — він у нас.

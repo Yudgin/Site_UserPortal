@@ -67,3 +67,10 @@ test('повторна перевірка: копія вхідної істор�
   const r = returnDeliveryOf({ returnTtn: 0, returnTtnHistory: h, shipment: { statusHistory: h } })
   assert.deepEqual(r, { ttn: null, shippedAt: '2025-08-11T11:28:47.000Z', deliveredAt: '2025-08-11T11:38:39.000Z' })
 })
+
+test('третє коло: приїзд і доставка з однією міткою опитування 1С — доставку не губимо', () => {
+  const r = returnDeliveryOf({ returnTtn: 0,
+    shipment: { statusHistory: [{ status: 'Відправлення отримано', timestamp: '2025-09-09T01:20:05' }] },
+    returnTtnHistory: [{ status: 'Прибув у відділення', timestamp: '2025-09-09T01:20:05' }, { status: 'Відправлення отримано', timestamp: '2025-09-09T01:20:05' }] })
+  assert.equal(r.deliveredAt, '2025-09-08T22:20:05.000Z')
+})

@@ -135,7 +135,9 @@ export const returnDeliveryOf = (raw) => {
   const incoming = Array.isArray(raw?.shipment?.statusHistory) ? raw.shipment.statusHistory : []
   const copyOfIncoming = hist.length > 0 && incoming.length > 0 && JSON.stringify(hist) === JSON.stringify(incoming)
   const arrivedAt = events(incoming).find((e) => DELIVERED_RE.test(e.s))?.t || null
-  let ev = events(hist).filter((e) => !arrivedAt || e.t > arrivedAt)
+  // Для копії вхідної — строго після приїзду; для звичайної історії — не раніше (опитування 1С після простою дає
+  // приїзду й доставці одну мітку часу, як 2025-09-09T01:20:05).
+  let ev = events(hist).filter((e) => !arrivedAt || (copyOfIncoming ? e.t > arrivedAt : e.t >= arrivedAt))
   let start = -1
   ev.forEach((e, i) => { if (CYCLE_START_RE.test(e.s)) start = i })
   if (copyOfIncoming && start < 0) ev = []

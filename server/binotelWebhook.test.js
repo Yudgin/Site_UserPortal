@@ -626,3 +626,12 @@ test('повторна перевірка: гарантія на оплачен�
   assert.equal(currentDelivery(sameShip)?.deliveredAt, daysAgo(16.7))
   assert.equal(isOpen(sameShip, NOW), false) // 16,7 днів після отримання > 14
 })
+
+test('третє коло: відправка з returnTtn без запису shipped після «запаковано» → 21 день; після повторного прийому → у нас', () => {
+  const paid = { status: 'done', paymentId: 'o', paidAt: daysAgo(30), doneAt: daysAgo(30), statusChangedAt: daysAgo(30), createdAt: daysAgo(50), returnTtn: '20450000000001' }
+  // упакували після оплати, потім ТТН без запису 'shipped' → у дорозі від останньої дії (29 днів) → закрита
+  assert.equal(isOpen(SR({ ...paid, stage: 'packed', stageHistory: [{ stage: 'packed', at: daysAgo(29), by: 'm@x' }] }), NOW), false)
+  assert.equal(isOpen(SR({ ...paid, paidAt: daysAgo(12), doneAt: daysAgo(12), statusChangedAt: daysAgo(12), stage: 'packed', stageHistory: [{ stage: 'packed', at: daysAgo(10), by: 'm@x' }] }), NOW), true)
+  // гарантійний повторний прийом після такої відправки → кораблик у нас → відкрита
+  assert.equal(isOpen(SR({ ...paid, stage: 'received', stageHistory: [{ stage: 'packed', at: daysAgo(29), by: 'm@x' }, { stage: 'received', at: daysAgo(25), by: 'm@x' }] }), NOW), true)
+})
