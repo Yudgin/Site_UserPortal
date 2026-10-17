@@ -119,15 +119,28 @@ test('isOpen: вік за createdAt/справжніми діями, не за u
   assert.equal(isOpen(SR({ createdAt: daysAgo(65) }), NOW), true)
   assert.equal(isOpen(SR({ createdAt: daysAgo(180) }), NOW), true)
   assert.equal(isOpen(SR({ createdAt: daysAgo(181) }), NOW), false)
-  assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(14) }), NOW), true)
-  assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(15) }), NOW), false)
+  // правило власника 2026-10-17: відкрита, доки клієнт не отримав кораблик, і ще 14 днів після
+  assert.equal(isOpen(SR({ status: 'done', doneAt: daysAgo(15), createdAt: daysAgo(40) }), NOW), true) // оплачено, ще не відправлено — у нас
+  assert.equal(isOpen(SR({ status: 'done', paidAt: daysAgo(100), createdAt: daysAgo(120) }), NOW), true)
+  // статус 'done' від старого імпорту 1С без ТТН і без часу — давно завершений: вікно 21 день від останньої дії
+  assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(21) }), NOW), true)
+  assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(22) }), NOW), false)
+  assert.equal(isOpen(SR({ status: 'done', stage: 'received', createdAt: daysAgo(100), createdBy: '1c-sync' }), NOW), false)
+  assert.equal(isOpen(SR({ status: 'done', returnTtn: '2045', createdAt: daysAgo(21) }), NOW), true) // у дорозі
+  assert.equal(isOpen(SR({ status: 'done', returnTtn: '2045', createdAt: daysAgo(22) }), NOW), false)
+  assert.equal(isOpen(SR({ status: 'done', returnDelivery: { ttn: '2045', shippedAt: daysAgo(30), deliveredAt: daysAgo(14) }, createdAt: daysAgo(40) }), NOW), true)
+  assert.equal(isOpen(SR({ status: 'done', returnDelivery: { ttn: '2045', shippedAt: daysAgo(30), deliveredAt: daysAgo(15) }, createdAt: daysAgo(40) }), NOW), false)
+  // дата відправки з історії НП важливіша за дату документа
+  assert.equal(isOpen(SR({ status: 'done', returnTtn: '2045', returnDelivery: { ttn: '2045', shippedAt: daysAgo(3), deliveredAt: null }, createdAt: daysAgo(300) }), NOW), true)
   assert.equal(isOpen(SR({ status: 'cancelled', createdAt: daysAgo(0) }), NOW), false)
   assert.equal(isOpen(SR({ createdAt: undefined }), NOW), false)
   // пороги з документа
   const cfg = normalizeRouting({ openMaxAgeDays: 60, doneGraceDays: 0 })
   assert.equal(isOpen(SR({ createdAt: daysAgo(65) }), NOW, cfg), false)
   assert.equal(isOpen(SR({ createdAt: daysAgo(50) }), NOW, cfg), true)
-  assert.equal(isOpen(SR({ status: 'done', createdAt: daysAgo(1) }), NOW, cfg), false)
+  assert.equal(isOpen(SR({ status: 'done', returnDelivery: { ttn: '1', deliveredAt: daysAgo(1) }, createdAt: daysAgo(5) }), NOW, cfg), false)
+  assert.equal(normalizeRouting({ transitMaxDays: 30 }).transitMaxDays, 30)
+  assert.equal(normalizeRouting({}).transitMaxDays, DEFAULT_ROUTING.transitMaxDays)
   assert.equal(normalizeRouting({ openMaxAgeDays: 'x', doneGraceDays: null }).openMaxAgeDays, DEFAULT_ROUTING.openMaxAgeDays)
   assert.equal(normalizeRouting({ doneGraceDays: null }).doneGraceDays, DEFAULT_ROUTING.doneGraceDays)
 })
@@ -135,7 +148,9 @@ test('isOpen: вік за createdAt/справжніми діями, не за u
 test('clientCategory: S2 відкрита / S1 справжня історія (заявка з ТТН, покупка) / профіль не рахується', () => {
   assert.equal(clientCategory(null, NOW), null)
   assert.equal(clientCategory({ requests: [SR()] }, NOW), 'openRequest')
-  assert.equal(clientCategory({ requests: [SR({ status: 'done', createdAt: daysAgo(30) })] }, NOW), 'knownClient')
+  assert.equal(clientCategory({ requests: [SR({ status: 'done', returnTtn: '2045', createdAt: daysAgo(30) })] }, NOW), 'knownClient')
+  assert.equal(clientCategory({ requests: [SR({ status: 'done', doneAt: daysAgo(30), createdAt: daysAgo(50) })] }, NOW), 'openRequest') // оплачено, кораблик у нас
+  assert.equal(clientCategory({ requests: [SR({ status: 'done', createdAt: daysAgo(30) })] }, NOW), 'knownClient') // старий імпорт
   assert.equal(clientCategory({ requests: [SR({ status: 'new', createdAt: daysAgo(400) })] }, NOW), 'knownClient')
   assert.equal(clientCategory({ requests: [SR({ status: 'cancelled', waybillNumber: '2045' })] }, NOW), 'knownClient')
   assert.equal(clientCategory({ requests: [SR({ status: 'cancelled' })] }, NOW), 'unknown') // передумав до відправки
@@ -152,7 +167,7 @@ test('byClient: сценарій routeWithTime; без id або без пошу
   assert.deepEqual(open.response.routeData, { type: 'routeWithTime', id: 501 })
   assert.equal(open.decision, 'byClient:openRequest')
   assert.equal(open.category, 'openRequest')
-  const known = decideCallSettings({ fields, routing, lookup: { requests: [SR({ status: 'done', createdAt: daysAgo(100) })] }, nowMs: NOW })
+  const known = decideCallSettings({ fields, routing, lookup: { requests: [SR({ status: 'done', returnTtn: '2045', createdAt: daysAgo(100) })] }, nowMs: NOW })
   assert.deepEqual(known.response.routeData, { type: 'route', id: 502 })
   const unknown = decideCallSettings({ fields, routing, lookup: { requests: [], profile: null }, nowMs: NOW })
   assert.equal(unknown.response.routeData, undefined)
@@ -487,11 +502,12 @@ test('лінії: чужа лінія (camarad) і вхідний без pbxNumb
   assert.equal(decideCallSettings({ fields: { ...fields, pbxNumber: '0679468531' }, routing: test, lookup, nowMs: NOW }).decision, 'bypass-line')
 })
 
-test('відправлено (shipped): вікно doneGraceDays, а не 180 днів; дата купівлі лише з soldAt', () => {
+test('відправлено (shipped) без відомого отримання: вікно transitMaxDays (21), а не 180 днів; дата купівлі лише з soldAt', () => {
   const shipped = (n) => SR({ status: 'in_work', stage: 'shipped', createdAt: daysAgo(40), stageHistory: [{ stage: 'shipped', at: daysAgo(n), by: 'np-ttn' }] })
   assert.equal(isOpen(shipped(5), NOW), true)
-  assert.equal(isOpen(shipped(20), NOW), false)
-  assert.equal(clientCategory({ requests: [shipped(20)] }, NOW), 'knownClient')
+  assert.equal(isOpen(shipped(21), NOW), true)
+  assert.equal(isOpen(shipped(22), NOW), false)
+  assert.equal(clientCategory({ requests: [shipped(22)] }, NOW), 'knownClient')
   const noSold = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [], orders: [{ id: 'b', status: 'done', clientName: 'Олег', createdAt: '2026-07-18T10:00:00Z' }] })
   assert.equal(noSold.description, 'Купив кораблик, ремонтів у базі немає')
 })
@@ -527,4 +543,19 @@ test('пріоритет: override з force → заголовок X-Runferry-Ro
     await r2.json()
     assert.equal(db.writes.find((w) => w.coll === 'binotelEvents').data.priority, 'override')
   })
+})
+
+test('правило власника: отримання клієнтом з returnDelivery; карточка «Клієнт отримав»', () => {
+  const got = (n) => SR({ status: 'done', stage: 'shipped', returnTtn: '2045', returnDelivery: { ttn: '2045', shippedAt: daysAgo(n + 3), deliveredAt: daysAgo(n) }, createdAt: daysAgo(n + 30) })
+  assert.equal(isOpen(got(2), NOW), true)
+  assert.equal(isOpen(got(14), NOW), true)
+  assert.equal(isOpen(got(15), NOW), false)
+  assert.equal(clientCategory({ requests: [got(2)] }, NOW), 'openRequest')
+  assert.equal(clientCategory({ requests: [got(20)] }, NOW), 'knownClient')
+  const cd = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'done', stage: 'shipped', returnTtn: '2045', returnDelivery: { ttn: '2045', shippedAt: '2026-10-08T09:00:00Z', deliveredAt: '2026-10-10T09:00:00Z' }, createdAt: daysAgo(30) })] })
+  assert.ok(cd.description.startsWith('Ремонт №1234 · Клієнт отримав 10.10'), cd.description)
+  assert.ok(cd.description.length <= DESC_MAX)
+  // скасована з датою доставки — все одно закрита і без «отримав»
+  const c = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'cancelled', returnDelivery: { ttn: '1', deliveredAt: daysAgo(1) }, createdAt: daysAgo(5) })] })
+  assert.ok(c.description.startsWith('Останній ремонт №1234 · Скасовано'), c.description)
 })

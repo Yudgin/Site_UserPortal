@@ -140,7 +140,8 @@ export const DEFAULT_ROUTING = {
   // Пороги «незакритої» заявки (днів від останньої справжньої дії) — див. isOpen. 180 — страховка: на 2026-10-16
   // усі 17 заявок з відкритим статусом молодші (найстарша жива in_work — 65 днів), 60 відрізало б її.
   openMaxAgeDays: 180,
-  doneGraceDays: 14,
+  doneGraceDays: 14, // днів ПІСЛЯ отримання кораблика клієнтом (правило власника 2026-10-17)
+  transitMaxDays: 21, // відправлено, а отримання невідоме: ≈ до 7 днів доставки + 14 днів після отримання
   sendCustomerData: true,
   assignedToEmployeeNumber: null, // 1С зараз завжди шле 906
   mirrorCallEvents: false,
@@ -197,6 +198,7 @@ export function normalizeRouting(doc) {
     categoryRoutes,
     openMaxAgeDays: days(d.openMaxAgeDays, DEFAULT_ROUTING.openMaxAgeDays),
     doneGraceDays: days(d.doneGraceDays, DEFAULT_ROUTING.doneGraceDays),
+    transitMaxDays: days(d.transitMaxDays, DEFAULT_ROUTING.transitMaxDays),
     sendCustomerData: d.sendCustomerData !== false,
     assignedToEmployeeNumber: assigned === '' ? null : /^\d+$/.test(assigned) ? Number(assigned) : assigned, // числом, як шле 1С
     mirrorCallEvents: d.mirrorCallEvents === true,
@@ -250,15 +252,32 @@ export const lastActivityMs = (sr) => Math.max(
   msOf(sr?.paidAt),
   ...(Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).filter(isRealStageEvent).map((h) => msOf(h.at)),
 )
-// Незакрита заявка (узгоджено з сесією «1С телефонія міграція», 2026-10-16). Не скасована і:
-//   - не виконана, а остання дія не старша за openMaxAgeDays (180): ~560 ремонтів з 1С отримали статус один раз при
-//     імпорті (inferStatus), покинуті старі назавжди лишилися б 'new' — поріг лише страховка на майбутнє;
-//   - або виконана чи вже відправлена (stage 'shipped'), але остання дія не старша за doneGraceDays: клієнт дзвонить
-//     «де мій кораблик». Без цього відправка через np-ttn (жива дія) тримала б заявку відкритою ще 180 днів.
+// Заявка відкрита, доки клієнт не отримав кораблик, і ще doneGraceDays (14) днів після отримання (правило власника
+// 2026-10-17, runferry-briefs/telephony/ai-first-discussion-join-2026-10-17.md, розділ 12, п. 4). Скасована — ніколи.
+//   - Отримання відоме (returnDelivery.deliveredAt — дата «Відправлення отримано» зворотної ТТН з історії НП, яку
+//     синхронізація 1С кладе в заявку) → відкрита ≤ doneGraceDays після нього.
+//   - Відправлено (є зворотна ТТН, етап 'shipped' або returnDelivery), а отримання невідоме → відкрита ≤ transitMaxDays
+//     (21) від відправки: дата відправки з історії НП, інакше справжній запис 'shipped', інакше остання дія.
+//   - Виконана, але про відправку нічого не відомо:
+//       · завершена в нашій системі (є doneAt або paidAt — оплата, хаб, застосунок) → кораблик ще в нас → як нижче, 180;
+//       · статус 'done' поставив старий імпорт 1С без ТТН і без часу (403 з 420 виконаних на 2026-10-17 — давно
+//         завершені ремонти) → вважаємо отриманим «десь тоді»: відкрита ≤ transitMaxDays від останньої дії.
+//   - Кораблик ще в нас (не виконана) → відкрита, поки остання дія не старша за openMaxAgeDays (180) — страховка від
+//     покинутих ремонтів з 1С, яким статус поставили один раз при імпорті.
+const shippedEventMs = (sr) => Math.max(0, ...(Array.isArray(sr?.stageHistory) ? sr.stageHistory : [])
+  .filter((h, i) => h && h.stage === 'shipped' && isRealStageEvent(h, i)).map((h) => msOf(h.at)))
+const isShippedToClient = (sr) => sr?.stage === 'shipped' || !!sr?.returnDelivery || (!!sr?.returnTtn && sr?.status === 'done')
 export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   if (!sr || sr.status === 'cancelled') return false
-  const ageDays = (nowMs - lastActivityMs(sr)) / DAY_MS
-  return sr.status === 'done' || sr.stage === 'shipped' ? ageDays <= cfg.doneGraceDays : ageDays <= cfg.openMaxAgeDays
+  const days = (t) => (nowMs - t) / DAY_MS
+  const deliveredMs = msOf(sr.returnDelivery?.deliveredAt)
+  if (deliveredMs) return days(deliveredMs) <= cfg.doneGraceDays
+  if (isShippedToClient(sr)) {
+    const shipMs = msOf(sr.returnDelivery?.shippedAt) || shippedEventMs(sr) || lastActivityMs(sr)
+    return days(shipMs) <= cfg.transitMaxDays
+  }
+  if (sr.status === 'done' && !sr.doneAt && !sr.paidAt) return days(lastActivityMs(sr)) <= cfg.transitMaxDays
+  return days(lastActivityMs(sr)) <= cfg.openMaxAgeDays
 }
 // Справжня історія з клієнтом: будь-яка заявка, крім скасованої без жодної ТТН; або купівля кораблика (не лід і не
 // скасоване замовлення). Самого clientProfiles НЕ досить: профіль створюється автоматично з будь-якої форми чи чату.
@@ -303,9 +322,12 @@ export function buildCustomerData({ phone, requests, orders, profile, siteUrl, a
     const head = `${mainOpen ? 'Ремонт' : 'Останній ремонт'}${no ? ` №${no}` : ''}`
     // Закритий ремонт показуємо статусом («Виконано»/«Скасовано»), а не етапом: синхронізація 1С поставила
     // 'received' сотням виконаних ремонтів, і «Отримано» читалося б як «кораблик у нас». Виняток — «Відправлено».
-    const state = mainOpen
-      ? STAGE_UK[main.stage] || STATUS_UK[main.status] || ''
-      : main.stage === 'shipped' && main.status !== 'cancelled' ? STAGE_UK.shipped : STATUS_UK[main.status] || ''
+    const deliveredAt = main.status !== 'cancelled' ? main.returnDelivery?.deliveredAt : null
+    const state = deliveredAt
+      ? `Клієнт отримав ${ddmmyyyy(deliveredAt).slice(0, 5)}`
+      : mainOpen
+        ? STAGE_UK[main.stage] || STATUS_UK[main.status] || ''
+        : main.stage === 'shipped' && main.status !== 'cancelled' ? STAGE_UK.shipped : STATUS_UK[main.status] || ''
     const more = openCount > 1 ? ` (+${openCount - 1})` : ''
     const parts = [head + more, state, main.boat, main.complaint].filter(Boolean)
     description = clip(parts.join(' · '), DESC_MAX)
