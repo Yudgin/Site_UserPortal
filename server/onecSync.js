@@ -97,6 +97,57 @@ const inferStatus = (raw) => {
   return 'new'
 }
 
+// Доставка зворотної ТТН клієнту за історією НП з 1С (raw.returnTtnHistory: [{status, timestamp}], timestamp —
+// «2025-10-09T10:07:04» за Києвом без зони). Для правила «заявка відкрита, доки клієнт не отримав кораблик, і ще
+// 14 днів після» (власник 2026-10-17; читач — isOpen у binotelWebhook.js). Особливості даних 1С (ревʼю 2026-10-17):
+//   - номер зворотної ТТН у 1С майже завжди 0 (95 з 109 історій), тож історію беремо й без номера;
+//   - історія накопичує кілька посилок: новий рядок зі status '' (або «Створена») — введено нову ТТН; беремо ОСТАННІЙ
+//     цикл: shippedAt — його початок, deliveredAt — ПЕРШЕ «отримано/вручено» в ньому (1С дописує «отримано» на кожному
+//     опитуванні, тож пізніші — не подія); мітки часу — час опитування в 1С, тобто оцінка «не раніше»;
+//   - «отримано відправником» (повернення нам) і відмова — не отримання клієнтом;
+//   - події до приїзду кораблика до нас (перше «отримано» у вхідній історії) не беремо; буває побайтна копія вхідної
+//     історії — з неї беремо лише новий цикл, що почався ПІСЛЯ приїзду (інакше «отримано» вхідної посилки вийшло б
+//     «отриманням клієнтом»), а копія без такого циклу не дає нічого.
+const kyivLocalToIso = (s) => {
+  const str = String(s || '').trim()
+  if (!str) return null
+  if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(str)) { const t = Date.parse(str); return Number.isFinite(t) ? new Date(t).toISOString() : null }
+  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/)
+  if (!m) return null
+  const guess = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0))
+  if (Number.isNaN(guess)) return null
+  // Два проходи: зсув беремо в справжній момент, інакше в ночі переходу на літній/зимовий час помилка на годину.
+  const off1 = kyivOffsetMin(new Date(guess))
+  const off2 = kyivOffsetMin(new Date(guess - off1 * 60000))
+  return new Date(guess - off2 * 60000).toISOString()
+}
+const DELIVERED_RE = /отримано|вручен/i
+const NOT_TO_CLIENT_RE = /відправник|відмов|поверн/i
+const CYCLE_START_RE = /^\s*$|створен/i
+const isDelivered = (status) => DELIVERED_RE.test(status) && !NOT_TO_CLIENT_RE.test(status)
+const events = (hist) => (Array.isArray(hist) ? hist : [])
+  .map((e) => ({ s: String(e?.status ?? ''), t: kyivLocalToIso(e?.timestamp) }))
+  .filter((e) => e.t)
+  .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0))
+export const returnDeliveryOf = (raw) => {
+  const ttn = normTtn(raw?.returnTtn) || null
+  const hist = Array.isArray(raw?.returnTtnHistory) ? raw.returnTtnHistory : []
+  const incoming = Array.isArray(raw?.shipment?.statusHistory) ? raw.shipment.statusHistory : []
+  const copyOfIncoming = hist.length > 0 && incoming.length > 0 && JSON.stringify(hist) === JSON.stringify(incoming)
+  const arrivedAt = events(incoming).find((e) => DELIVERED_RE.test(e.s))?.t || null
+  // Для копії вхідної — строго після приїзду; для звичайної історії — не раніше (опитування 1С після простою дає
+  // приїзду й доставці одну мітку часу, як 2025-09-09T01:20:05).
+  let ev = events(hist).filter((e) => !arrivedAt || (copyOfIncoming ? e.t > arrivedAt : e.t >= arrivedAt))
+  let start = -1
+  ev.forEach((e, i) => { if (CYCLE_START_RE.test(e.s)) start = i })
+  if (copyOfIncoming && start < 0) ev = []
+  if (!ev.length) return ttn ? { ttn, shippedAt: null, deliveredAt: null } : null
+  const cycle = ev.slice(Math.max(start, 0))
+  return { ttn, shippedAt: cycle[0].t, deliveredAt: cycle.find((e) => isDelivered(e.s))?.t || null }
+}
+const sameDelivery = (a, b) => !!a && !!b && (a.ttn || null) === (b.ttn || null) && (a.shippedAt || null) === (b.shippedAt || null)
+  && (a.deliveredAt || null) === (b.deliveredAt || null)
+
 // Фізичний етап ремонту (serviceRequests.stage) за даними 1С — лише те, що видно по ТТН:
 // є зворотна ТТН → 'shipped'; в історії посилки «отримано» → кораблик у нас → 'received';
 // інакше невідомо (null — нічого не ставимо). Статус (status) цим НЕ зачіпається.
@@ -214,6 +265,10 @@ export function registerOnecSync(app, deps) {
       fill('complaint', String(raw.complaint || item.Dist || '').slice(0, 2000))
       fill('waybillNumber', normTtn(raw.shipment?.ttn))
       fill('returnTtn', normTtn(raw.returnTtn))
+      // Доставка зворотної ТТН (дати з історії НП) — оновлюємо, коли змінилась; порівняння за значеннями, щоб нічний
+      // прогін не переписував заявку щоразу (Firestore повертає map в іншому порядку ключів).
+      const rd = returnDeliveryOf(raw)
+      if (rd && !sameDelivery(rd, exists ? cur.returnDelivery : null)) patch.returnDelivery = rd
       fill('serviceCenterId', centerId) // ручной выбор центра на карточке не затираем
       // Адрес НП 1С отдаёт текстом без Ref-ов — кладём текст, только если адреса нет совсем
       // (Ref при необходимости резолвится на карточке заявки/при создании ТТН).

@@ -29,12 +29,18 @@ test('paidRequestPatch: done + paidAt, cancelled stays cancelled, repeat keeps t
   assert.deepEqual(again, { paymentId: 'ord1', updatedAt: NOW, status: 'done' })
 })
 
-test('paid request of an old 1C repair counts as open for doneGraceDays (Binotel S2)', () => {
+test('paid request of an old 1C repair is open (Binotel S2) until the client got the boat + doneGraceDays', () => {
   const nowMs = Date.parse(NOW)
   const old = { status: 'in_work', createdAt: '2025-01-10T00:00:00.000Z' }
   const paid = { ...old, ...paidRequestPatch(old, 'ord1', new Date(nowMs - 3 * DAY).toISOString()) }
   assert.equal(isOpen(paid, nowMs, DEFAULT_ROUTING), true)
-  assert.equal(isOpen(paid, nowMs + 12 * DAY, DEFAULT_ROUTING), false) // 15 днів після оплати
+  // Правило власника 2026-10-17: відкрита, доки клієнт не отримав кораблик, і ще 14 днів після. Без даних про
+  // відправку — наближення з брифу: ≤ transitMaxDays (21) від оплати/завершення.
+  assert.equal(isOpen(paid, nowMs + 12 * DAY, DEFAULT_ROUTING), true) // 15 днів після оплати
+  assert.equal(isOpen(paid, nowMs + 19 * DAY, DEFAULT_ROUTING), false) // 22 дні після оплати
+  const delivered = { ...paid, status: 'done', returnTtn: '2045', returnDelivery: { ttn: '2045', shippedAt: new Date(nowMs - 2 * DAY).toISOString(), deliveredAt: new Date(nowMs).toISOString() } }
+  assert.equal(isOpen(delivered, nowMs + 14 * DAY, DEFAULT_ROUTING), true)
+  assert.equal(isOpen(delivered, nowMs + 15 * DAY, DEFAULT_ROUTING), false) // 15 днів після отримання
   // без часу завершення той самий ремонт уже закритий
   assert.equal(isOpen({ ...old, status: 'done' }, nowMs, DEFAULT_ROUTING), false)
 })
