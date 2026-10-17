@@ -13,25 +13,32 @@
 // потрібен рушій зі звуком до мозку (engine/sip-engine-ai, ready.audio) і агент ElevenLabs (ai-setup-elevenlabs.mjs).
 // VG_ANSWER_MODE=ai — ШІ бере трубку одразу (вступ 80, перша фраза за даними); VG_JOIN_ON_CALLBACK=1 — менеджер, що
 // передзвонив, приєднується до клієнта (міст або REFER); VG_HOLD_TONE=ringback — гудки замість 05-hold у нових гілках.
+// Черга B: VG_DS_SOURCE — гілка обговорення (фраза 13/14/15 і дзвінок ведучому, route.mjs), пропуски ведучих —
+// <data>/staff-state.json; VG_DS_EVENTS_URL — події для сервера режиму (типово вимкнено); VG_AI_COST_FETCH — фактична ціна
+// розмови з ШІ від ElevenLabs у фоні після її кінця (у файл розшифровки й консоль).
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
 import { Writable } from 'node:stream'
-import { loadConfig, extUri, isOff, NO_ANSWER_MODES, CLIENT_PROMPT_KEYS } from './config.mjs'
+import { loadConfig, extUri, isOff, NO_ANSWER_MODES, CLIENT_PROMPT_KEYS, DS_PROMPT_KEYS } from './config.mjs'
 import { startEngine } from './engine.mjs'
 import { createDispatcher, callerAllowed, managerCaller, externalCallbackOn, maskNumber } from './flow.mjs'
-import { makeCallbackStore, resolveManagers, isInternalKey, partyKey } from './callbacks.mjs'
+import { makeCallbackStore, resolveManagers, isInternalKey, partyKey, managerGroupOf, strictPhone } from './callbacks.mjs'
 import { buildCard } from './card.mjs'
 import { makeTts, readWavInfo, isTelephonyWav } from './tts.mjs'
 import { makeTokenSource, accessSecret } from './gcp.mjs'
 import { makeJournal } from './journal.mjs'
-import { ensurePrivateDir, makeDailyLog, pruneGatewayData, makeVoicemailPath, ensureBeep, ensureRingback, repairVoicemailHeaders, repairWavHeader, findGitRoot, saveAiTranscript } from './storage.mjs'
+import { ensurePrivateDir, makeDailyLog, pruneGatewayData, makeVoicemailPath, ensureBeep, ensureRingback, repairVoicemailHeaders, repairWavHeader, findGitRoot, saveAiTranscript, updateAiTranscript } from './storage.mjs'
 import { startAudioServer } from './audiosock.mjs'
 import { createAgent } from './agent.mjs'
 import { makeElevenLabsProvider } from './realtime-elevenlabs.mjs'
-import { buildInstructions, firstMessageFor, TOOL_DEFS } from './aiprompt.mjs'
+import { buildInstructions, firstMessageFor, toolsFor, speakable } from './aiprompt.mjs'
 import { hoursText } from './hours.mjs'
 import { makeAiCallStore } from './aicalls.mjs'
+import { makeStaffState } from './staffstate.mjs'
+import { makeRouteEvents } from './routeevents.mjs'
+import { fetchConversationCost, costLine } from './aicost.mjs'
+import { makeResendLink } from './resend.mjs'
 
 // ---------- аргументи ----------
 
@@ -52,7 +59,7 @@ const USAGE = `Использование:
   --no-answer MODE    менеджер не взял: busy (по умолчанию: «линия занята», перезвон), fallback (запасная, потом
                       голосовая почта), voicemail (сразу голосовая почта), ai (ИИ-собеседник; и в нерабочее время);
                       или env VG_NO_ANSWER_MODE
-  --managers LIST     номера/линии менеджеров через запятую (один человек — через «=»: 907=0676575085); их звонок
+  --managers LIST     номера/линии менеджеров через запятую (один человек — через «=»: 907=0500000007); их звонок
                       на шлюз — перезвон клиенту. Линия --manager входит всегда. Или env VG_MANAGERS
   --client-uri TPL    как набирать клиента при перезвоне: {national} {e164} {digits} {server}
                       (по умолчанию sip:{national}@{server};transport=udp; или env VG_CLIENT_URI)`
@@ -219,14 +226,23 @@ export function summary(e) {
     const res = { bridged: 'соединены мостом', connected: 'соединены переводом', connected_unconfirmed: 'соединены переводом', refer_failed_bridged: 'перевод не прошёл — мост', client_gone: 'клиент положил трубку', manager_gone: 'менеджер положил трубку' }[j.result] || j.result || 'не завершено'
     bits.push(`присоединение менеджера (из фазы ${j.fromPhase}, ${j.mode === 'refer' ? 'REFER' : 'мост'}): ${res}${j.ms != null ? ` за ${secs(j.ms)}` : ''}`)
   }
+  if (e.ds && (e.ds.kind || e.ds.why)) {
+    const d = e.ds
+    const res = d.result ? (d.result.why === 'client_hangup' ? ', клиент положил трубку — без пропуска' : d.result.miss ? `, пропуск ведущего${d.result.paused ? ' — пауза' : ''}` : ', ведущий занят (486) — не пропуск') : ''
+    bits.push(d.kind ? `обсуждение (${d.kind}, ${d.source}${d.ageH != null ? `, ${d.ageH} ч` : ''}): ${e.route?.branch || '—'}${e.route?.why ? ` (${e.route.why})` : ''}${d.served ? ', ведущий взял' : ''}${res}` : `обсуждения нет (${d.why})`)
+  }
   if (e.ai) {
     const a = e.ai
     const cost = (a.sessions || []).reduce((x, y) => x + (Number(y.costUsd) || 0), 0)
     const secsAi = (a.sessions || []).reduce((x, y) => x + (y.durationMs || 0), 0)
-    bits.push(`ИИ (${a.kind === 'after_hours' ? 'нерабочее время' : a.kind === 'first' ? 'сразу' : 'вместо «линия занята»'}): ${secs(secsAi)}, ≈$${cost.toFixed(3)}` +
+    const kindRu = { after_hours: 'нерабочее время', first: 'сразу', discussion_failed: 'после «не вдалося»', discussion_unavailable: 'ведущему не звонили', discussion_after_hours: 'обсуждение, нерабочее время' }[a.kind] || 'вместо «линия занята»'
+    // ≈$ — оценка шлюза только за голос (VG_AI_PRICE_PER_MIN); фактическая цена ElevenLabs — отдельной строкой позже
+    bits.push(`ИИ (${kindRu}): ${secs(secsAi)}, ≈$${cost.toFixed(3)} (оценка: только голос, без LLM)` +
       `${a.note ? `, вопрос записан${a.note.urgent ? ' (срочно)' : ''}${a.note.callback === false ? ', без перезвона' : ''}` : ''}` +
+      `${a.callbackRemoved ? `, снято перезвонов: ${a.callbackRemoved}` : ''}` +
       `${a.transfers ? `, передал менеджеру ${a.transfers} раз` : ''}${a.error ? `, ошибка ${a.error}` : ''}`)
   }
+  if (e.outcome === 'ds_callback') bits.push(e.callback?.stored ? 'ведущий не принял, ИИ недоступен — «вам передзвонять», перезвон ведущему сохранён' : 'ведущий не принял, ИИ недоступен — перезвон не сохранён')
   if (e.errors?.length) bits.push(`ошибок ${e.errors.length}`)
   return bits.join(', ')
 }
@@ -239,6 +255,11 @@ export function newModesLine(config, { aiReady = false, clientTrial = false, int
   if (config.joinOnCallback) m.push(`присоединение перезвонившего менеджера (${config.joinMode === 'refer' ? 'REFER, при сбое мост' : 'мост'})`)
   if (config.holdTone === 'ringback') m.push(`гудки${config.ringbackFile ? '' : ' (файла нет)'}`)
   if (config.clientSynth === 'trial') m.push(`пробный синтез клиентских фраз${clientTrial ? '' : ' — выключен: нет VG_ALLOWED_CALLERS'}`)
+  if (config.dsSource && config.dsSource !== 'off') {
+    const phr = ['dsTalked', 'dsCalled', 'dsGeneral', 'dsFailed', 'dsNoAi'].filter((k) => config.prompts?.[k] || config.prompts?.[`${k}Short`]).length
+    m.push(`обсуждение (${config.dsSource}${config.answerMode === 'ai' ? '' : ' — выключено: нужен VG_ANSWER_MODE=ai'}; ведущему ${config.dsRingSec ?? 20} с, ждём после фразы ${config.dsMaxWaitSec ?? 30} с; пауза после ${config.dsMissMax ?? 2} пропусков на ${config.dsPauseMin ?? 120} мин; фраз 13–17: ${phr}/5${config.clientSynth === 'trial' && clientTrial ? ', пробный синтез' : ''}; В19 ${config.dsExceptionTransfer === false ? 'выкл' : 'вкл'})`)
+  }
+  if (config.dsEventsUrl) m.push('события обсуждения на сервер (route-event)')
   return m.length ? `новые режимы: ${m.join('; ')}` : null
 }
 
@@ -366,7 +387,10 @@ async function main() {
   // Не вийшло — фразу пропускаємо (дзвінок іде далі); синтез пробуємо знову з наступним дзвінком, не частіше раз на хвилину.
   const PROMPT_LABELS = { confirm: 'вопрос менеджеру «1 / 2»', busy: '«линия занята» клиенту', cbConnecting: '«соединяем с клиентом» менеджеру', cbNone: '«нет ждущих клиентов» менеджеру', cbGreeting: 'приветствие клиенту при перезвоне', cbNoAnswer: '«клиент не отвечает» менеджеру', pin: '«введите пин-код» менеджеру', cbClientBusy: '«клиент говорит с ИИ, перезвоните» менеджеру',
     mgrJoin: '«клиент на линии с ИИ — соединяю» менеджеру', mgrJoinPlain: '«клиент на линии — соединяю» менеджеру', mgrJoinBusy: '«клиента уже соединяют» менеджеру', mgrJoinGone: '«клиент положил трубку» менеджеру',
-    intro: 'вступление 80 клиенту', joinClient: '«менеджер уже на линии» клиенту (81)', aiDown: '«соединяем с менеджером» клиенту (82)', aiDownNight: '«нерабочее время, менеджер перезвонит» клиенту (83)' }
+    mgrJoinTail: '«з’єдную» менеджеру (конец MGR-JOIN)',
+    intro: 'вступление 80 клиенту (полное)', introShort: 'вступление 80 клиенту (короткое)', joinClient: '«менеджер уже на линии» клиенту (81)', aiDown: '«соединяем с оператором» клиенту (82, полная)', aiDownShort: '«соединяем с оператором» клиенту (82, короткая)', aiDownNight: '«нерабочее время, вам перезвонят» клиенту (83)',
+    dsTalked: '«мы недавно разговаривали» (13, полная)', dsTalkedShort: '«мы недавно разговаривали» (13, короткая)', dsCalled: '«мы недавно звонили» (14, полная)', dsCalledShort: '«мы недавно звонили» (14, короткая)',
+    dsGeneral: '«соединяем с менеджером, который занимается обращением» (15, полная)', dsGeneralShort: '(15, короткая)', dsFailed: '«соединить не удалось» (16)', dsNoAi: '«вам перезвонят» (17, полная)', dsNoAiShort: '«вам перезвонят» (17, короткая)' }
   for (const [name, file] of [...Object.entries(config.promptFiles), ...Object.entries(config.aiFirstPromptFiles || {})]) {
     if (file) config.prompts[name] = checkPrompt(PROMPT_LABELS[name] || name, path.resolve(file), { required: false })
   }
@@ -376,13 +400,18 @@ async function main() {
   // (VG_ALLOWED_CALLERS непорожній) — правило власника «аудіо лише після погодження текстів»
   const clientTrial = config.clientSynth === 'trial' && config.allowedCallers.length > 0
   if (config.clientSynth === 'trial' && !clientTrial) warn('VG_CLIENT_SYNTH=trial без VG_ALLOWED_CALLERS — клиентские фразы 80–83 не синтезирую (проба — только на тестовых номерах)')
-  const promptText = (k) => config.promptTexts[k] ?? config.joinPromptTexts?.[k] ?? (CLIENT_PROMPT_KEYS.includes(k) ? config.clientTrialTexts?.[k] : null)
+  // «‖» у текстах черновика — пауза диктора; синтез отримує звичайні речення
+  const promptText = (k) => {
+    const t = config.promptTexts[k] ?? config.joinPromptTexts?.[k] ?? (CLIENT_PROMPT_KEYS.includes(k) ? config.clientTrialTexts?.[k] : null)
+    return t ? speakable(t) : null
+  }
+  const dsOn = config.answerMode === 'ai' && !!config.dsSource && config.dsSource !== 'off'
   // Фраза PIN потрібна лише з передзвоном із зовнішніх номерів; «клієнт говорить із ШІ» — лише в режимі ai; фрази
-  // приєднання — лише з VG_JOIN_ON_CALLBACK; клієнтські 80/82/83 — лише з VG_ANSWER_MODE=ai, 81 — з приєднанням, і всі —
-  // лише пробним синтезом
-  const promptNeeded = (k) => (k !== 'pin' || externalCallbackOn(config)) && (k !== 'cbClientBusy' || config.noAnswerMode === 'ai' || config.answerMode === 'ai') &&
+  // приєднання — лише з VG_JOIN_ON_CALLBACK; клієнтські 80/82/83 — лише з VG_ANSWER_MODE=ai, 81 — з приєднанням, 13–17 — з
+  // обговоренням, і всі — лише пробним синтезом
+  const promptNeeded = (k) => (!['busy', 'cbGreeting'].includes(k) || clientTrial) && (k !== 'pin' || externalCallbackOn(config)) && (k !== 'cbClientBusy' || config.noAnswerMode === 'ai' || config.answerMode === 'ai') &&
     (!(k in (config.joinPromptTexts || {})) || config.joinOnCallback === true) &&
-    (!CLIENT_PROMPT_KEYS.includes(k) || (clientTrial && (k === 'joinClient' ? config.joinOnCallback === true : config.answerMode === 'ai')))
+    (!CLIENT_PROMPT_KEYS.includes(k) || (clientTrial && (k === 'joinClient' ? config.joinOnCallback === true : DS_PROMPT_KEYS.includes(k) ? dsOn : config.answerMode === 'ai')))
   const allPromptKeys = [...Object.keys(config.promptTexts), ...Object.keys(config.joinPromptTexts || {}), ...CLIENT_PROMPT_KEYS]
   const missingPrompts = () => allPromptKeys.filter((k) => !config.prompts[k] && promptNeeded(k) && promptText(k))
   const synthPrompts = async (first = false) => {
@@ -406,15 +435,30 @@ async function main() {
   else if (missingPrompts().length) warn(`синтез выключен — нет фраз: ${missingPrompts().map((k) => PROMPT_LABELS[k] || k).join(', ')} (их WAV: VG_CONFIRM_WAV, VG_BUSY_WAV, VG_CB_*_WAV${config.joinOnCallback ? ', VG_MGR_JOIN*_WAV' : ''}); звонки идут без них`)
 
   let lookup = null
+  let appCalls = null
   if (config.lookupEnabled) {
     const { makeLookup } = await import('./lookup.mjs')
-    const l = makeLookup({ projectId: config.firebaseProject, budgetMs: config.lookupBudgetMs, log: warn })
+    const l = makeLookup({ projectId: config.firebaseProject, budgetMs: config.lookupBudgetMs, callsBudgetMs: config.dsCallsBudgetMs, termsField: config.termsField, log: warn })
     lookup = l.lookup
-    l.warm().then(() => status('Firestore: соединение готово'), (e) => warn(`Firestore: ${e.message} — карточка будет только с номером`))
+    // дзвінки заявки (лише читання) — лише коли гілка обговорення бере їх як джерело
+    if (dsOn && ['calls', 'auto'].includes(config.dsSource)) appCalls = l.recentAppCalls
+    l.warm().then(() => { config.dsRouting = l.routing()?.discussion; status('Firestore: соединение готово') }, (e) => warn(`Firestore: ${e.message} — карточка будет только с номером`))
   }
 
   // ШІ-співрозмовник: сокет звуку для рушія, провайдер (ElevenLabs Agents), фабрика сесій для сценарію. Не вийшло
   // підготувати — режим ai працює як busy («лінія зайнята»), шлюз про це пише.
+  const resendLink = config.aiResendUrl && config.aiResendSecret ? makeResendLink({
+    url: config.aiResendUrl, timeoutMs: config.aiResendTimeoutMs, log: warn,
+    getToken: () => accessSecret({ project: config.gcpProject, name: config.aiResendSecret, getAccessToken }),
+  }) : null
+  if (config.aiResendUrl && !config.aiResendSecret) warn('повторная ссылка: VG_AI_RESEND_SECRET не задан — инструмент выключен')
+  if (config.afterHoursUrgentTo && !managerGroupOf(config.afterHoursUrgentTo, config.managers)) warn('ночной дежурный отсутствует в VG_MANAGERS — срочное соединение выключено')
+  const costJobs = new Map()
+  const costAfterSession = (conversationId) => {
+    if (!config.aiCostFetch || !conversationId) return Promise.resolve(null)
+    if (!costJobs.has(conversationId)) costJobs.set(conversationId, fetchConversationCost({ conversationId, apiBase: config.aiElApi, getApiKey, log: warn }))
+    return costJobs.get(conversationId)
+  }
   let aiFactory = null
   let audioServer = null
   let aiStore = null
@@ -444,26 +488,43 @@ async function main() {
       })
       if (agentFile?.toolIds && agentFile.toolIdsOverride !== true) warn('ИИ: агент ElevenLabs без разрешения переопределять инструменты — «соединить с менеджером» модель видит всегда (откажет сценарий). Обновите агента: node voice-gateway/brain/ai-setup-elevenlabs.mjs --apply')
       const hours = hoursText(config.workHours)
-      const allTools = TOOL_DEFS.map((t) => t.name)
-      aiFactory = (o) => createAgent({
+
+      const resendReady = !!config.aiElUrl || (agentFile?.toolIdsOverride === true && !!agentFile?.toolIds?.resend_request_link && (!config.aiElAgent || config.aiElAgent === agentFile.agentId))
+      if (resendLink && !resendReady) warn('повторная ссылка: агент не подготовлен с инструментом resend_request_link — инструмент выключен')
+      aiFactory = (options) => {
+        const o = { ...options, resendAllowed: options.resendAllowed && resendReady }
+        let session
+        session = createAgent({
         call: o.call,
         server: audioServer,
         provider,
         connectOpts: {
           // v2 — режим «ШІ одразу»: нові перші фрази (за даними, з вступом 80 і без) і правила переводу (VG_AI_FIRST_TRANSFER)
           // failedBy — повторна сесія після менеджера, що приєднався й поклав (join), а не після недозвону (dial)
-          instructions: buildInstructions({ kind: o.kind, hoursText: hours, category: o.category, transferAllowed: o.transferAllowed, statusDetail: config.aiStatusDetail, note: o.note, v2: o.v2 === true, transferMode: config.aiFirstTransfer, failedBy: o.failedBy, afterHours: o.afterHours === true }),
-          firstMessage: firstMessageFor({ kind: o.kind, variant: o.variant, intro: o.intro === true, note: o.note, v2: o.v2 === true, failedBy: o.failedBy }),
+          // afterHours — повний варіант першої фрази й нічні правила; callbackTo / exceptionsOnly / secondLineConfirmed / dsWhy —
+          // гілки обговорення (черга B)
+          instructions: buildInstructions({ kind: o.kind, hoursText: hours, category: o.category, transferAllowed: o.transferAllowed, statusDetail: config.aiStatusDetail, note: o.note, v2: o.v2 === true, transferMode: config.aiFirstTransfer, failedBy: o.failedBy, afterHours: o.afterHours === true, callbackTo: o.callbackTo, exceptionsOnly: o.exceptionsOnly === true, secondLineConfirmed: o.secondLineConfirmed === true, dsWhy: o.dsWhy ?? null, needsTerms: o.needsTerms, urgentOnly: o.urgentOnly, resendAllowed: o.resendAllowed, callbackStored: o.callbackStored }),
+          firstMessage: firstMessageFor({ kind: o.kind, variant: o.variant, intro: o.intro === true, note: o.note, v2: o.v2 === true, failedBy: o.failedBy, afterHours: o.afterHours === true, category: o.category, needsTerms: o.needsTerms, announced: o.announced, callbackStored: o.callbackStored }),
           // Інструменти цієї сесії: без права з'єднати (неробочий час, ліміт з'єднань) модель transfer_to_manager не бачить
-          tools: o.transferAllowed ? allTools : allTools.filter((n) => n !== 'transfer_to_manager'),
+          tools: toolsFor({ transfer: o.transferAllowed, resend: o.resendAllowed }).map((t) => t.name),
         },
         onTool: o.onTool,
         onSpeaking: o.onSpeaking,
-        onEnd: o.onEnd,
+        onEnd: (info) => {
+          o.onEnd(info)
+          const id = session?.result()?.conversationId
+          if (id) void costAfterSession(id)
+        },
         clock: { now: Date.now, setTimeout, clearTimeout },
         log: status,
         limits: { maxSec: config.aiMaxSec, idleSec: config.aiIdleSec, wrapSec: config.aiWrapSec },
       })
+        return session
+      }
+      if (agentFile?.toolIds?.resend_request_link && agentFile.toolIdsOverride !== true) {
+        warn('ИИ: агент с resend_request_link не разрешает скрывать инструменты — сессии выключены до обновления настройки агента')
+        aiFactory = null
+      }
       if (config.aiSave === 'firestore') aiStore = makeAiCallStore({ projectId: config.firebaseProject, log: status })
       status(`ИИ-собеседник: ElevenLabs Agents ${config.aiElUrl ? `(локально ${config.aiElUrl})` : `агент ${agentId}`}, LLM ${agentFile?.llm || config.aiElLlm}; рабочее время ${hours || 'всегда'} (Киев)${config.aiAfterHours ? ', в нерабочее — сразу ИИ' : ''}; про заявку — ${config.aiStatusDetail === 'stage' ? 'есть/номер/этап' : 'есть/номер'}; до ${config.aiMaxSec} с; соединить с менеджером — до ${config.aiTransferMax} раз; разговоры — ${config.aiSave === 'firestore' ? 'в заявку (Firestore) и локально' : 'локально'}`)
     }
@@ -491,9 +552,9 @@ async function main() {
       warn(`сигнал перед записью: ${e.message} — запись без сигнала`)
     }
   }
-  // Гудки, поки шлюз дзвонить менеджеру в нових гілках (VG_HOLD_TONE=ringback): свій файл (VG_RINGBACK_WAV) або один раз
-  // згенерований тон 425 Гц (1 с звук / 4 с тиша) у кеші
-  if (config.holdTone === 'ringback') {
+  // Гудки, поки шлюз дзвонить менеджеру в нових гілках (VG_HOLD_TONE=ringback) і ведучому в обговоренні: свій файл
+  // (VG_RINGBACK_WAV) або один раз згенерований тон 425 Гц (1 с звук / 4 с тиша) у кеші
+  if (config.holdTone === 'ringback' || dsOn) {
     if (config.ringbackFile) config.ringbackFile = checkPrompt('гудки', path.resolve(config.ringbackFile), { required: false })
     if (!config.ringbackFile) {
       try {
@@ -510,9 +571,42 @@ async function main() {
     if (waiting) status(`ждут перезвона менеджера: ${waiting}`)
     // Записи під ключами, яких немає серед поточних менеджерів (VG_MANAGER / VG_MANAGERS змінили) — їх ніхто не побачить
     const orphans = callbacks.orphanKeys(config.managers)
-    if (orphans.length) warn(`в callbacks.json / last-clients.json есть записи менеджеров, которых нет среди текущих (${orphans.join(', ')}): их перезвоны недоступны. Добавьте этот номер в группу менеджера в VG_MANAGERS (например 907=0676575085)`)
+    if (orphans.length) warn(`в callbacks.json / last-clients.json есть записи менеджеров, которых нет среди текущих (${orphans.join(', ')}): их перезвоны недоступны. Добавьте этот номер в группу менеджера в VG_MANAGERS (например 907=0500000007)`)
   } catch (e) {
     warn(`передзвоны: ${e.message}`)
+  }
+  // Обговорення (черга B): перевірки при старті й пропуски ведучих (<data>/staff-state.json, 0600)
+  let staffState = null
+  let routeEvents = null
+  if (config.dsSource && config.dsSource !== 'off') {
+    if (config.answerMode !== 'ai') warn(`VG_DS_SOURCE=${config.dsSource} работает только с VG_ANSWER_MODE=ai — ветки обсуждения не будет`)
+    if (config.dsTestBad?.length) warn(`VG_DS_TEST: не разобраны ${config.dsTestBad.join(', ')} (нужно «номер=talked|called|general|pending»)`)
+    if (config.dsStaffBad?.length) warn(`VG_DS_STAFF: не разобраны ${config.dsStaffBad.join(', ')} (нужно «uid=ключ», ключ — внутренняя линия или номер)`)
+    // тестові обговорення — лише для дозволених тестових номерів
+    for (const [n] of [...(config.dsTest || new Map())]) {
+      if (!config.allowedCallers.map((x) => strictPhone(x)).includes(n)) {
+        config.dsTest.delete(n)
+        warn(`VG_DS_TEST: номер …${n.slice(-4)} не в VG_ALLOWED_CALLERS — тестовое обсуждение для него выключено`)
+      }
+    }
+    if (config.dsSource === 'test' && !config.dsTest?.size) warn('VG_DS_SOURCE=test, но VG_DS_TEST пуст — обсуждений не будет')
+    // ведучому дзвонимо лише якщо його ключ є серед менеджерів шлюзу (VG_MANAGERS веде власник)
+    for (const [uid, key] of Object.entries(config.dsStaff || {})) {
+      if (!managerGroupOf(key, config.managers)) warn(`VG_DS_STAFF: ключ ${isInternalKey(key) ? key : `…${key.slice(-4)}`} (uid ${uid.slice(0, 6)}…) не в VG_MANAGERS — этому ведущему шлюз звонить не будет (ИИ с перезвоном в общую группу)`)
+    }
+    if (dsOn && !aiFactory) warn('обсуждение: ИИ не готов — при неудаче звонка ведущему будет фраза 17 и отбой')
+    const phrases = ['dsGeneral', 'dsGeneralShort'].some((k) => config.prompts[k]) || (clientTrial && config.dsSource !== 'off')
+    if (dsOn && !phrases) warn('обсуждение: нет фраз 13–15 (VG_DS_*_WAV или VG_CLIENT_SYNTH=trial) — клиент услышит гудки без фразы (проверка механики)')
+    if (dsOn && config.dsSource !== 'test' && !config.lookupEnabled) warn(`обсуждение (${config.dsSource}) без поиска клиента (--no-lookup / VG_LOOKUP=0) — обсуждений не будет`)
+    staffState = makeStaffState({ dataDir: config.dataDir, missMax: config.dsMissMax, pauseMin: config.dsPauseMin, log: warn })
+    // Події для сервера режиму обговорення — лише з адресою; токен — секрет у Secret Manager (ім'я VG_DS_EVENTS_SECRET)
+    if (config.dsEventsUrl) {
+      if (!config.dsEventsSecret) warn('VG_DS_EVENTS_URL без VG_DS_EVENTS_SECRET — события выключены без токена')
+      const getToken = config.dsEventsSecret ? () => accessSecret({ project: config.gcpProject, name: config.dsEventsSecret, getAccessToken }) : null
+      routeEvents = makeRouteEvents({ url: config.dsEventsUrl, getToken, timeoutMs: config.dsEventsTimeoutMs, log: warn })
+    }
+    // Аварійний вимикач discussion.enabled / discussion.scope — зі знімка прогріву lookup на старті;
+    // додаткового читання system/binotelRouting на кожен дзвінок немає.
   }
   // Хто може передзвонювати: внутрішні лінії менеджерів — завжди; зовнішні номери — лише з VG_MANAGERS_EXTERNAL=1 і PIN
   const externalNums = config.managers.flat().filter((k) => !isInternalKey(k))
@@ -537,6 +631,27 @@ async function main() {
   setInterval(prune, 6 * 3600 * 1000).unref()
 
   const journal = makeJournal({ dataDir: config.dataDir, timeZone: config.timeZone })
+  // Фактична ціна розмов із ШІ (GET /v1/convai/conversations/{id}): у файл розшифровки (elevenlabsCost) і рядок «итог …»
+  // у консоль. Дзвінок і журнал цього не чекають; помилки — лише в консоль.
+  const fetchAiCost = (entry) => {
+    const ids = [...new Set((entry.ai?.sessions || []).filter((x) => x.provider === 'elevenlabs' && x.conversationId).map((x) => x.conversationId))]
+    if (!ids.length) return
+    const file = entry.ai.transcriptFile || null
+    const who = entry.number || 'без номера'
+    Promise.all(ids.map(costAfterSession)).then((list) => {
+      for (const id of ids) costJobs.delete(id)
+      const got = list.filter(Boolean)
+      if (!got.length) return warn(`итог ${who}: фактическая цена ElevenLabs не получена`)
+      if (file) {
+        try {
+          updateAiTranscript(file, { elevenlabsCost: got })
+        } catch (e) {
+          warn(`ИИ: цена не дописана в расшифровку: ${e.message}`)
+        }
+      }
+      status(`итог ${who}: фактическая цена ElevenLabs — ${got.map(costLine).join('; ')}`)
+    }, (e) => warn(`ИИ: цена ElevenLabs: ${e?.message || e}`))
+  }
   // Денні логи з ротацією за київською датою — спільні для всіх запусків рушія
   const engineLog = makeDailyLog({ dir: logDir, prefix: 'engine', timeZone: config.timeZone })
   const traceLog = config.trace ? makeDailyLog({ dir: logDir, prefix: 'brain', timeZone: config.timeZone }) : null
@@ -600,6 +715,10 @@ async function main() {
         ? Object.assign((o) => (config.audioSupported ? aiFactory(o) : null), { available: () => config.audioSupported === true })
         : null,
       log: status,
+      staffState,
+      appCalls,
+      resendLink,
+      routeEvent: routeEvents ? (e) => routeEvents.send(e) : null,
       onDone: (entry) => {
         // Розшифровка розмови з ШІ — особисті дані: окремим файлом 0600 (і в заявку, якщо VG_AI_SAVE=firestore), у журнал — ні
         const tr = entry.aiTranscript
@@ -610,6 +729,8 @@ async function main() {
           } catch (e) {
             warn(`ИИ: расшифровка не сохранена: ${e.message}`)
           }
+          // Фактична ціна розмови від ElevenLabs — у фоні, з повторами (≈60 с: її рахують після кінця розмови)
+          if (config.aiCostFetch) fetchAiCost(entry)
           if (aiStore) {
             aiStore.save({ ...entry, aiTranscript: tr }).then((r) => {
               if (r.skipped && r.skipped !== 'no_request') warn(`ИИ: в заявку не записано (${r.skipped})`)

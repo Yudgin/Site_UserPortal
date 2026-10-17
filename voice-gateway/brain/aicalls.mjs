@@ -11,6 +11,7 @@ import crypto from 'node:crypto'
 import { createRequire } from 'node:module'
 import { summaryText } from './aiprompt.mjs'
 import { strictPhone } from './callbacks.mjs'
+import { cleanAiTranscript } from './transcript.mjs'
 
 function openFirestore(projectId) {
   const req = createRequire(new URL('../../server/package.json', import.meta.url))
@@ -34,6 +35,7 @@ export const callbackPending = (entry) => !!entry?.callback?.stored && !(entry.p
 
 // Документ дзвінка з журнального запису шлюзу (entry) і розшифровки (entry.aiTranscript). Чиста функція — для тестів.
 export function buildAiCallDoc({ entry, transcript, sr = null, now = new Date() }) {
+  transcript = cleanAiTranscript(transcript)
   const startedAt = entry.startedAt
   const nowIso = now.toISOString()
   const callId = entry.gcid ? `ai-${String(entry.gcid).replace(/[^0-9A-Za-z_-]/g, '')}` : `ai-${Date.parse(startedAt).toString(36)}-${crypto.randomBytes(2).toString('hex')}`
@@ -98,6 +100,7 @@ export function buildAiCallDoc({ entry, transcript, sr = null, now = new Date() 
 
 // Картка для операторської дошки (callEvents/ai-<gcid>) — у тій самій формі, що дзеркало originate
 export function buildAiCallEvent({ entry, transcript, callId, sr = null, now = new Date() }) {
+  transcript = cleanAiTranscript(transcript)
   const nowIso = now.toISOString()
   const summary = summaryText({ note: transcript?.note || null, transferred: wasTransferred(entry), callbackStored: callbackPending(entry) }).replace(/\n/g, ' ')
   return {

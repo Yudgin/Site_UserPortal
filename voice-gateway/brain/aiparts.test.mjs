@@ -7,13 +7,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { parseHours, inHours, hoursText } from './hours.mjs'
-import { buildInstructions, FIRST_MESSAGES, TOOL_DEFS, requestStatusFor, summaryText, firstMessageFor, REQUEST_PAGE_TEXT, SECOND_LINE_TEXT } from './aiprompt.mjs'
+import { buildInstructions, AI_TEXTS, TOOL_DEFS, requestStatusFor, summaryText, firstMessageFor, REQUEST_PAGE_TEXT, SECOND_LINE_TEXT, speakable, CALLBACK_PROMISE, TERMS_REQUIRED, URGENT_CONNECTING, stripVoiceTags, toolsFor } from './aiprompt.mjs'
 import { loadConfig, parseBreaker, CLIENT_TRIAL_TEXTS, JOIN_PROMPT_TEXTS } from './config.mjs'
 import { ringbackWav, ensureRingback } from './storage.mjs'
 import { readWavInfo, isTelephonyWav } from './tts.mjs'
 import { summary, newModesLine } from './gateway.mjs'
 import { buildAiCallDoc, buildAiCallEvent, aiTalked, makeAiCallStore } from './aicalls.mjs'
-import { saveAiTranscript, pruneGatewayData } from './storage.mjs'
+import { saveAiTranscript, updateAiTranscript, pruneGatewayData } from './storage.mjs'
 import { toolConfig, agentBody } from './ai-setup-elevenlabs.mjs'
 
 test('робочий час: пн–пт 9–18 за Києвом, кілька проміжків, помилки розбору, текст для моделі', () => {
@@ -35,12 +35,16 @@ test('робочий час: пн–пт 9–18 за Києвом, кілька 
   assert.equal(inHours(h3, new Date('2026-10-18T08:30:00Z')), true) // нд 11:30
 })
 
-test('інструкції: українська, заборони приватності, з\'єднання — лише коли дозволено; перші фрази кажуть «штучний інтелект» і про запис', () => {
-  for (const k of ['busy', 'after_hours']) {
-    assert.match(FIRST_MESSAGES[k], /штучний інтелект/)
-    assert.match(FIRST_MESSAGES[k], /записується/)
+test('інструкції: українська, заборони приватності, з\'єднання — лише коли дозволено; перші фрази старого режиму — оголошення про запис з метою і «штучний інтелект»', () => {
+  // старий режим (VG_NO_ANSWER_MODE=ai): 80 перед ШІ не звучить — AI-FALLBACK-GREETING (запис з метою), потім «штучний інтелект»
+  for (const [k, afterHours] of [['busy', false], ['after_hours', true]]) {
+    const t = firstMessageFor({ kind: k, afterHours })
+    assert.match(t, /^Вітаємо! Це віртуальний помічник компанії Runferry\./)
+    assert.match(t, /записуємо розмову, щоб (точно )?опрацювати/)
+    assert.match(t, /штучний інтелект/)
+    assert.doesNotMatch(t, /Розмова записується|розмова записується|Вам відповідає/)
   }
-  assert.match(FIRST_MESSAGES.transfer_failed, /менеджер (вам )?передзвонить/)
+  assert.match(firstMessageFor({ kind: 'transfer_failed' }), /вам передзвонять/)
   const a = buildInstructions({ kind: 'busy', transferAllowed: true, category: 'openRequest' })
   assert.match(a, /завжди відповідай українською/)
   assert.match(a, /transfer_to_manager/)
@@ -49,10 +53,10 @@ test('інструкції: українська, заборони приват�
   assert.doesNotMatch(a, /етап \(за нашими/)
   const b = buildInstructions({ kind: 'after_hours', hoursText: "з понеділка до п'ятниці, з 09:00 до 18:00", transferAllowed: false, statusDetail: 'stage' })
   assert.match(b, /неробочий час: ми працюємо з понеділка/)
-  assert.match(b, /З'єднати з менеджером зараз не можна/)
+  assert.match(b, /З'єднати з людиною зараз не можна/)
   assert.match(b, /етап \(за нашими даними/)
   const c = buildInstructions({ kind: 'transfer_failed', note: { question: 'Де посилка?' } })
-  assert.match(c, /менеджер не відповів/)
+  assert.match(c, /ніхто не прийняв дзвінок/)
   assert.match(c, /«Де посилка\?»/)
   assert.deepEqual(TOOL_DEFS.map((t) => t.name), ['get_request_status', 'save_question_for_manager', 'transfer_to_manager', 'end_call'])
 })
@@ -201,19 +205,31 @@ test('ElevenLabs: дії після фрази — post_tool_speech, помил�
   assert.deepEqual(a.conversation_config.agent.prompt.tool_ids, ['t1'])
 })
 
-test('«ШІ одразу»: перші фрази з вступом 80 і без, transfer_failed у двох варіантах; без v2 — рівно старі тексти', () => {
-  assert.equal(firstMessageFor({ kind: 'first', variant: 'request', intro: true, v2: true }), 'Я віртуальний помічник, штучний інтелект, розмова записується. Бачу, що за вашим номером є відкрита заявка. Чим можу допомогти?')
-  assert.equal(firstMessageFor({ kind: 'first', variant: 'general', intro: false, v2: true }), 'Вітаю! Це віртуальний помічник Runferry, штучний інтелект, розмова записується. Підкажіть, будь ласка: ви щодо ремонту, покупки чи налаштування кораблика?')
-  assert.equal(firstMessageFor({ kind: 'first', variant: 'nodata', intro: true, v2: true }), 'Я віртуальний помічник, штучний інтелект, розмова записується. Чим можу допомогти?')
-  assert.match(firstMessageFor({ kind: 'after_hours', intro: true, v2: true }), /^Я віртуальний помічник, штучний інтелект, розмова записується\. Зараз неробочий час/)
-  assert.equal(firstMessageFor({ kind: 'transfer_failed', note: { question: 'Де?' }, v2: true }), 'На жаль, менеджер зараз не відповідає. Ваше питання я передам — він вам передзвонить. Чим ще можу допомогти?')
-  assert.equal(firstMessageFor({ kind: 'transfer_failed', note: null, v2: true }), 'На жаль, менеджер зараз не відповідає. Він побачить пропущений дзвінок і передзвонить вам. Що йому передати?')
-  for (const k of ['busy', 'after_hours', 'transfer_failed']) assert.equal(firstMessageFor({ kind: k, note: { question: 'x' } }), FIRST_MESSAGES[k])
-  // кожна перша фраза каже, що це ШІ і що розмова записується (крім transfer_failed — клієнт уже чув)
-  for (const variant of ['request', 'general', 'nodata']) for (const intro of [true, false]) {
-    const t = firstMessageFor({ kind: 'first', variant, intro, v2: true })
-    assert.match(t, /штучний інтелект/)
-    assert.match(t, /розмова записується/)
+test('«ШІ одразу»: перші фрази — дослівно черновик 5а (днём короткий, уночі повний); після 80 — без оголошення про запис, без 80 — AI-FALLBACK-GREETING і без повторного «Вам відповідає…»; transfer_failed у двох варіантах', () => {
+  assert.equal(firstMessageFor({ kind: 'first', variant: 'request', intro: true, v2: true }), 'Вам відповідає віртуальний помічник — штучний інтелект. За вашим номером є відкрита заявка — чим допомогти?')
+  assert.equal(firstMessageFor({ kind: 'first', variant: 'request', intro: true, v2: true, afterHours: true }), 'Вам відповідає віртуальний помічник — штучний інтелект. Бачу, що за вашим номером є відкрита заявка. Чим можу допомогти?')
+  assert.equal(firstMessageFor({ kind: 'first', variant: 'general', intro: false, v2: true, afterHours: true }), 'Вітаємо! Це віртуальний помічник компанії Runferry. Зверніть увагу: ми записуємо розмову, щоб точно опрацювати ваше звернення й контролювати якість обслуговування. Я — штучний інтелект. Ви телефонуєте щодо ремонту, купівлі чи налаштування кораблика?')
+  assert.equal(firstMessageFor({ kind: 'first', variant: 'nodata', intro: true, v2: true }), 'Вам відповідає віртуальний помічник — штучний інтелект. Чим можу допомогти?')
+  assert.equal(firstMessageFor({ kind: 'after_hours', intro: true, v2: true, afterHours: true }), `${speakable(AI_TEXTS.afterHours.full)} ${CALLBACK_PROMISE}`)
+  // ніч + відкрита невиконана заявка — новий AI-AFTER-HOURS-REQUEST
+  assert.equal(firstMessageFor({ kind: 'after_hours', intro: true, v2: true, afterHours: true, category: 'openRequest' }), `${speakable(AI_TEXTS.afterHoursRequest.full)} ${CALLBACK_PROMISE}`)
+  assert.equal(firstMessageFor({ kind: 'transfer_failed', note: { question: 'Де?' }, v2: true, announced: true }), `З’єднати не вдалося — я передам ваше запитання, і вам передзвонять. ${CALLBACK_PROMISE}`)
+  assert.equal(firstMessageFor({ kind: 'transfer_failed', note: null, v2: true, afterHours: true, announced: true }), `На жаль, з’єднати вас з оператором не вдалося. Ми вже повідомили про ваш дзвінок — вам передзвонять. Що передати? ${CALLBACK_PROMISE}`)
+  // обговорення
+  assert.equal(firstMessageFor({ kind: 'discussion_failed', intro: true, v2: true }), `${speakable(AI_TEXTS.dsFailed.short)} ${CALLBACK_PROMISE}`)
+  assert.equal(firstMessageFor({ kind: 'discussion_unavailable', intro: true, v2: true }), `${speakable(AI_TEXTS.dsUnavailable.short)} ${CALLBACK_PROMISE}`)
+  assert.equal(firstMessageFor({ kind: 'discussion_after_hours', intro: true, v2: true, afterHours: true }), `${speakable(AI_TEXTS.dsAfterHours.full)} ${CALLBACK_PROMISE}`)
+  // кожна перша фраза каже «штучний інтелект»; «розмова записується» без мети немає ніде; без 80 — оголошення з метою першим
+  const kinds = [['first', 'request'], ['first', 'general'], ['first', 'nodata'], ['after_hours'], ['discussion_failed'], ['discussion_unavailable'], ['discussion_after_hours'], ['busy']]
+  for (const [kind, variant] of kinds) for (const intro of [true, false]) for (const afterHours of [true, false]) {
+    const t = firstMessageFor({ kind, variant, intro, v2: true, afterHours })
+    assert.match(t, /штучний інтелект/, `${kind}/${variant}/${intro}`)
+    assert.doesNotMatch(t, /розмова записується|Розмова записується/)
+    if (!intro) {
+      assert.match(t, /^Вітаємо! Це віртуальний помічник компанії Runferry\. (Зверніть увагу: ми записуємо розмову, щоб точно опрацювати|Ми записуємо розмову, щоб опрацювати)/)
+      assert.doesNotMatch(t, /Вам відповідає/)
+      assert.equal(t.match(/віртуальний помічник/g).length, 1, 'після AI-FALLBACK-GREETING «віртуальний помічник» не повторюється')
+    } else assert.doesNotMatch(t, /записуємо/, 'після 80 про запис ШІ не каже')
   }
 })
 
@@ -221,23 +237,28 @@ test('«ШІ одразу»: правила переводу (рішення 20/
   const open = buildInstructions({ kind: 'first', category: 'openRequest', transferAllowed: true, v2: true })
   assert.match(open, /один раз скажи/)
   assert.ok(open.includes(REQUEST_PAGE_TEXT))
-  assert.match(open, /знову просить менеджера — з'єднай/)
+  assert.match(open, /знову просить людину — з'єднай/)
   assert.match(open, /претензія щодо якості, гарантійне питання, небезпечна ситуація/)
   assert.match(open, /ми не відповіли вчасно або клієнту складно користуватися посиланням/)
   assert.doesNotMatch(open, /кабінет/)
-  assert.ok(open.includes(SECOND_LINE_TEXT))
+  assert.match(open, /стежити за статусом заявки й замовити дзвінок майстра/)
+  assert.match(open, /Залишайтеся на лінії — з’єдную з оператором\./) // AI-CONNECTING (днём короткий)
+  // «друга лінія»: фраза AI-SECOND-LINE — лише коли шлюз знає про наш дзвінок клієнтові (pending_call)
+  assert.ok(!open.includes(SECOND_LINE_TEXT))
+  assert.match(open, /не стверджуй, що це наш співробітник/)
+  assert.ok(buildInstructions({ kind: 'first', category: 'openRequest', transferAllowed: true, v2: true, secondLineConfirmed: true }).includes(SECOND_LINE_TEXT))
   assert.match(open, /«запитання» — коли про щось питають/)
   assert.match(open, /безкоштовну розмову з майстром/)
   const none = buildInstructions({ kind: 'first', category: 'unknown', transferAllowed: true, v2: true })
-  assert.match(none, /Відкритої заявки за цим номером немає: клієнт просить менеджера — з'єднай одразу/)
+  assert.match(none, /Відкритої заявки за цим номером немає: клієнт просить людину — з'єднай з оператором одразу/)
   assert.doesNotMatch(none, /один раз скажи/)
   const nodata = buildInstructions({ kind: 'first', category: null, transferAllowed: true, v2: true })
   assert.match(nodata, /спершу перевір get_request_status/)
   const always = buildInstructions({ kind: 'first', category: 'openRequest', transferAllowed: true, v2: true, transferMode: 'always' })
-  assert.match(always, /з'єднай одразу: transfer_to_manager/)
+  assert.match(always, /з'єднай з оператором одразу: transfer_to_manager/)
   assert.doesNotMatch(always, /один раз скажи/)
   const night = buildInstructions({ kind: 'after_hours', category: 'openRequest', transferAllowed: false, v2: true })
-  assert.match(night, /З'єднати з менеджером зараз не можна/)
+  assert.match(night, /З'єднати з людиною зараз не можна/)
   assert.doesNotMatch(night, /transfer_to_manager\. За номером/)
   for (const t of [open, none, nodata, always, night]) assert.doesNotMatch(t, /0500000001|380\d{9}/)
   // стан заявки в новому режимі — «сторінка заявки», без особистих даних
@@ -252,8 +273,8 @@ test('config: нові змінні черги A — типово все вим�
   assert.deepEqual([c.answerMode, c.joinOnCallback, c.joinMode, c.holdTone, c.clientSynth, c.aiFirstTransfer, c.routeDecideGraceMs, c.ringbackFile],
     ['manager', false, 'bridge', 'phrase', 'off', 'ask', 1000, null])
   assert.deepEqual(c.aiBreaker, { fails: 3, windowMs: 600000, offMs: 1800000 })
-  assert.deepEqual(Object.values(c.aiFirstPromptFiles), [null, null, null, null, null, null, null, null])
-  assert.deepEqual(Object.keys(c.aiFirstPromptFiles).sort(), ['aiDown', 'aiDownNight', 'intro', 'joinClient', 'mgrJoin', 'mgrJoinBusy', 'mgrJoinGone', 'mgrJoinPlain'])
+  assert.ok(Object.values(c.aiFirstPromptFiles).every((v) => v === null))
+  assert.deepEqual(Object.keys(c.aiFirstPromptFiles).sort(), ['aiDown', 'aiDownNight', 'aiDownShort', 'dsCalled', 'dsCalledShort', 'dsFailed', 'dsGeneral', 'dsGeneralShort', 'dsNoAi', 'dsNoAiShort', 'dsTalked', 'dsTalkedShort', 'intro', 'introShort', 'joinClient', 'mgrJoin', 'mgrJoinBusy', 'mgrJoinGone', 'mgrJoinPlain', 'mgrJoinTail'])
   const c2 = loadConfig({ VG_ANSWER_MODE: ' AI ', VG_JOIN_ON_CALLBACK: '1', VG_JOIN_MODE: 'refer', VG_HOLD_TONE: 'ringback', VG_CLIENT_SYNTH: 'trial', VG_AI_FIRST_TRANSFER: 'always', VG_INTRO_WAV: '/w/80.wav', VG_JOIN_CLIENT_WAV: '/w/81.wav', VG_AI_DOWN_WAV: '/w/82.wav', VG_MGR_JOIN_WAV: '/w/mj.wav', VG_ROUTE_DECIDE_GRACE_MS: '700' })
   assert.deepEqual([c2.answerMode, c2.joinOnCallback, c2.joinMode, c2.holdTone, c2.clientSynth, c2.aiFirstTransfer, c2.routeDecideGraceMs], ['ai', true, 'refer', 'ringback', 'trial', 'always', 700])
   assert.deepEqual([c2.aiFirstPromptFiles.intro, c2.aiFirstPromptFiles.joinClient, c2.aiFirstPromptFiles.aiDown, c2.aiFirstPromptFiles.mgrJoin], ['/w/80.wav', '/w/81.wav', '/w/82.wav', '/w/mj.wav'])
@@ -263,14 +284,18 @@ test('config: нові змінні черги A — типово все вим�
   assert.equal(parseBreaker('0'), null)
   assert.equal(parseBreaker('off'), null)
   assert.deepEqual(parseBreaker('щось'), { fails: 3, windowMs: 600000, offMs: 1800000 })
-  assert.equal(CLIENT_TRIAL_TEXTS.intro, 'Вітаємо! Це багатоканальна лінія компанії Runferry.')
-  assert.doesNotMatch(CLIENT_TRIAL_TEXTS.intro, /запис/) // про запис скаже перша фраза ШІ
-  assert.equal(CLIENT_TRIAL_TEXTS.joinClient, "Менеджер уже на лінії — з'єдную вас.")
-  assert.equal(JOIN_PROMPT_TEXTS.mgrJoinBusy, "Клієнта вже з'єднують з менеджером.")
+  // 80 — дослівно черновик 5а: оголошення про запис З МЕТОЮ (Правила №761), повний і короткий
+  assert.equal(CLIENT_TRIAL_TEXTS.intro, 'Вітаємо! Це багатоканальна лінія компанії Runferry. ‖ Зверніть увагу: ми записуємо розмову, щоб точно опрацювати ваше звернення й контролювати якість обслуговування.')
+  assert.equal(CLIENT_TRIAL_TEXTS.introShort, 'Вітаємо! Це багатоканальна лінія компанії Runferry. ‖ Ми записуємо розмову, щоб опрацювати звернення й контролювати якість.')
+  assert.equal(CLIENT_TRIAL_TEXTS.joinClient, 'Менеджер уже на лінії — з’єдную вас.')
+  assert.equal(CLIENT_TRIAL_TEXTS.aiDownShort, 'Залишайтеся на лінії — з’єднуємо з оператором.')
+  assert.equal(CLIENT_TRIAL_TEXTS.dsFailed, 'На жаль, з’єднати вас не вдалося.')
+  assert.equal(JOIN_PROMPT_TEXTS.mgrJoinBusy, 'Клієнта вже з’єднують з колегою.')
+  assert.equal(JOIN_PROMPT_TEXTS.mgrJoin, 'Клієнт зараз говорить із віртуальним помічником.')
   // клієнт із ШІ не говорив — менеджеру без «віртуального помічника»; 83 (ніч, ШІ не піднявся) — без «зайнята»
   assert.equal(JOIN_PROMPT_TEXTS.mgrJoinPlain, "Клієнт на лінії — з'єдную.")
-  assert.doesNotMatch(CLIENT_TRIAL_TEXTS.aiDownNight, /зайнят|з'єдну/)
-  assert.match(CLIENT_TRIAL_TEXTS.aiDownNight, /неробочий час.*передзвонить вам у робочий час/)
+  assert.doesNotMatch(CLIENT_TRIAL_TEXTS.aiDownNight, /зайнят|з’єдну|з'єдну/)
+  assert.match(CLIENT_TRIAL_TEXTS.aiDownNight, /неробочий час.*вам передзвонять/)
   assert.ok(!('intro' in c.promptTexts) && !('mgrJoin' in c.promptTexts), 'старий набір фраз (і їх синтез при старті) не змінився')
 })
 
@@ -302,7 +327,7 @@ test('повторна сесія після приєднаного менедж
       const t = firstMessageFor({ kind: 'transfer_failed', v2, note, failedBy: 'join' })
       assert.doesNotMatch(t, /пропущений|не відповідає|Ваш дзвінок записано/)
       assert.match(t, /менеджер не зміг продовжити розмову/)
-      assert.match(t, /передзвонить/)
+      assert.match(t, /вам передзвонять/)
     }
     const ins = buildInstructions({ kind: 'transfer_failed', v2, failedBy: 'join', note: { question: 'Де посилка?' } })
     assert.match(ins, /приєднався до розмови, але поклав слухавку/)
@@ -311,10 +336,13 @@ test('повторна сесія після приєднаного менедж
     assert.doesNotMatch(ins, /неробочий час/)
     assert.match(buildInstructions({ kind: 'transfer_failed', v2, failedBy: 'join', afterHours: true, hoursText: "з понеділка до п'ятниці, з 09:00 до 18:00" }), /Зараз неробочий час: ми працюємо з понеділка/)
   }
-  // недозвон — рівно як раніше
-  assert.equal(firstMessageFor({ kind: 'transfer_failed', v2: false }), FIRST_MESSAGES.transfer_failed)
-  assert.match(firstMessageFor({ kind: 'transfer_failed', v2: true }), /побачить пропущений дзвінок/)
-  assert.match(buildInstructions({ kind: 'transfer_failed', v2: true }), /менеджер не відповів\. Про це клієнт щойно почув у першій фразі\./)
+  // недозвон — AI-TRANSFER-FAILED в обох режимах (без «Ваш дзвінок записано» і «пропущений дзвінок»)
+  assert.equal(firstMessageFor({ kind: 'transfer_failed', v2: false, announced: true }), `${speakable(AI_TEXTS.transferFailedNone.short)} ${CALLBACK_PROMISE}`)
+  assert.match(firstMessageFor({ kind: 'transfer_failed', v2: true, announced: true }), /^З’єднати не вдалося — вам передзвонять/)
+  const initial = firstMessageFor({ kind: 'transfer_failed', v2: true })
+  assert.match(initial, /^Вітаємо! Це віртуальний помічник компанії Runferry\. Ми записуємо розмову, щоб опрацювати/)
+  assert.match(initial, /штучний інтелект/)
+  assert.match(buildInstructions({ kind: 'transfer_failed', v2: true }), /ніхто не прийняв дзвінок\. Про це клієнт щойно почув у першій фразі\./)
 })
 
 test('документ і картка дошки: приєднаний менеджер (bridged_join / connected_join) і міст — «З\'єднано з менеджером», перезвін знято — не «Менеджер передзвонить»', () => {
@@ -349,4 +377,80 @@ test('консоль: «сначала менеджер» — лише якщо 
   assert.match(newModesLine({ ...c, prompts: { intro: '/w/80.wav' } }, { aiReady: true, clientTrial: true, introSynth: true }), /вступление есть/)
   assert.match(newModesLine(c, { aiReady: false }), /ИИ сразу \(ИИ не готов — по-старому\)/)
   assert.equal(newModesLine(loadConfig({})), null)
+})
+
+test('B6: латинські голосові теги забираємо при збереженні у файл, документ дзвінка й підсумок; слова клієнта та звичайні дужки лишаються', () => {
+  const ai = '[slow] Вітаю! [laughs] Заявка [12] та [текст] готова.'
+  const clean = 'Вітаю! Заявка [12] та [текст] готова.'
+  const client = 'Я написав [slow] та [12] у коментарі.'
+  assert.equal(stripVoiceTags(ai), clean)
+  assert.equal(stripVoiceTags('Текст [sighs softly], [a-tag] далі [A_B].'), 'Текст, далі.')
+  const transcript = { ...TRANSCRIPT, note: { question: '[slow] Де кораблик [12]?', callback: true }, turns: [{ speaker: 'ai', text: ai }, { speaker: 'client', text: client }] }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-ai-tags-'))
+  try {
+    const file = saveAiTranscript({ dataDir: dir, gcid: 'gcid-fictional', record: transcript })
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.equal(saved.turns[0].text, clean)
+    assert.equal(saved.turns[1].text, client)
+    const { doc } = buildAiCallDoc({ entry: ENTRY, transcript })
+    assert.equal(doc.transcript.turns[0].text, clean)
+    assert.equal(doc.transcript.turns[1].text, client)
+    assert.match(doc.transcript.text, /ШІ-помічник: Вітаю! Заявка \[12\] та \[текст\] готова\./)
+    assert.match(doc.summary.text, /^Суть: Де кораблик \[12\]\?/)
+    assert.match(buildAiCallEvent({ entry: ENTRY, transcript, callId: 'ai-fictional' }).summary, /^Суть: Де кораблик \[12\]\?/)
+    assert.equal(transcript.turns[0].text, ai, 'збереження не змінює вхідні дані')
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('C2/C3: перезвін — вісім робочих годин; нічний черговий лише safety, технічних порад немає навіть після невдалого переводу', () => {
+  assert.equal(CALLBACK_PROMISE, 'Вам передзвонять протягом восьми робочих годин.')
+  for (const kind of ['busy', 'after_hours', 'discussion_failed', 'discussion_unavailable', 'discussion_after_hours', 'transfer_failed']) assert.ok(firstMessageFor({ kind, v2: true, intro: true }).endsWith(CALLBACK_PROMISE), kind)
+  assert.doesNotMatch(firstMessageFor({ kind: 'first', v2: true, intro: true }), /восьми робочих годин/, 'до записаного перезвону строку не обіцяємо')
+  const active = buildInstructions({ kind: 'after_hours', afterHours: true, urgentOnly: true, transferAllowed: true, v2: true })
+  assert.ok(active.includes(URGENT_CONNECTING))
+  assert.match(active, /topic safety/)
+  assert.match(active, /лише.*небезпечн|Лише небезпечн/)
+  assert.match(active, /технічних порад не давай/)
+  assert.doesNotMatch(active, /З'єднати з людиною (зараз|вночі) не можна/)
+  const exhausted = buildInstructions({ kind: 'after_hours', afterHours: true, urgentOnly: true, transferAllowed: false, v2: true })
+  assert.match(exhausted, /технічних порад не давай/)
+  assert.match(exhausted, /сто дванадцять/)
+  assert.doesNotMatch(exhausted, /Лише небезпечна ситуація — transfer_to_manager/, 'ліміт переводу вичерпано — лише терміновий передзвін')
+  const off = buildInstructions({ kind: 'after_hours', afterHours: true, transferAllowed: false, v2: true })
+  assert.doesNotMatch(off, /з’єдную з черговим/)
+  assert.match(off, /сто дванадцять/)
+})
+
+test('B7: фактичну ціну дописуємо атомарно у розшифровку 0600; оцінка в підсумку явно лише за голос', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-ai-cost-file-'))
+  try {
+    const file = saveAiTranscript({ dataDir: dir, gcid: 'gcid-fictional', record: TRANSCRIPT })
+    const cost = [{ conversationId: 'conv-fictional', costCredits: 1300, callCharge: 1000, llmCharge: 300, llmPriceUsd: 0.06 }]
+    assert.equal(updateAiTranscript(file, { elevenlabsCost: cost }), true)
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+    assert.deepEqual(saved.elevenlabsCost, cost)
+    assert.deepEqual(saved.turns, TRANSCRIPT.turns)
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600)
+    assert.equal(fs.readdirSync(path.dirname(file)).some((f) => f.endsWith('.tmp')), false)
+    assert.match(summary({ ...ENTRY, ai: { ...ENTRY.ai, sessions: [{ durationMs: 30000, costUsd: 0.05 }] } }), /≈\$0\.050 \(оценка: только голос, без LLM\)/)
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('C4/C5: угода перед питанням про відкриту заявку; ознака без даних клієнта; повторне посилання лише за прапорцем', () => {
+  for (const intro of [false, true]) {
+    const text = firstMessageFor({ kind: 'first', variant: 'request', category: 'openRequest', intro, v2: true, needsTerms: true })
+    assert.ok(text.includes(TERMS_REQUIRED))
+    assert.ok(text.indexOf(TERMS_REQUIRED) < text.indexOf('чим допомогти?'))
+  }
+  const ordinary = firstMessageFor({ kind: 'first', variant: 'request', category: 'openRequest', intro: true, v2: true })
+  assert.equal(ordinary.includes(TERMS_REQUIRED), false)
+  const instructions = buildInstructions({ kind: 'discussion_unavailable', category: 'openRequest', needsTerms: true, v2: true })
+  assert.match(instructions, /Угоду не прийнято/)
+  assert.ok(instructions.includes(TERMS_REQUIRED))
+  assert.doesNotMatch(instructions, /на сторінку заявки клієнта не відсилай/)
+  assert.doesNotMatch(instructions, /clientAcceptedTerms|acceptedAt|agreement_at|380\d{9}/)
+  assert.equal(toolsFor().some((t) => t.name === 'resend_request_link'), false)
+  assert.equal(toolsFor({ resend: true }).some((t) => t.name === 'resend_request_link'), true)
+  assert.match(buildInstructions({ resendAllowed: true }), /Доставку не обіцяй/)
+  assert.match(buildInstructions({ resendAllowed: false }), /менеджер надішле посилання на сторінку заявки/)
 })

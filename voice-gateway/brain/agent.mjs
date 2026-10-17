@@ -6,7 +6,8 @@
 // Сценарій (flow.mjs) бачить лише:
 //   const s = createAgent({...}); const cmd = s.start()   — команда audio_start для рушія (сценарій її шле)
 //   s.stop(reason)          — кінець (клієнт поклав, помилка рушія, зупинка шлюзу); повторно — нічого
-//   s.result()              — розшифровка, інструменти, токени, вартість — для журналу і документа дзвінка
+//   s.result()              — розшифровка, інструменти, токени, вартість (оцінка — лише голос), conversationId провайдера
+//                             (за ним gateway.mjs після кінця читає фактичну ціну ElevenLabs) — для журналу і документа дзвінка
 // Колбеки: onSpeaking() — перший звук моделі пішов у дзвінок (сценарій зупиняє музику утримання);
 // onEnd({reason, action?}) — рівно один раз: action 'transfer' (модель попросила з'єднати з менеджером, фразу «з'єдную»
 // дограно — сесію закрито, щоб не платити за тишу під час набору) або 'end' (попрощалась, фразу дограно); без action —
@@ -14,6 +15,7 @@
 // Тиша — лише з боку співрозмовника: його репліки, події провайдера про його голос і власна проста VAD на звуку рушія.
 // Звук моделі тишу не перериває (ElevenLabs сам перепитує кожні кілька секунд — інакше дзвінок не скінчився б ніколи).
 import { Resampler, encodeG711, decodeG711, pcmMs, rms } from './pcm.mjs'
+import { cleanAiTranscript } from './transcript.mjs'
 
 // Інструменти, після яких модель більше не говорить: дію виконуємо, коли поточну фразу дограно
 const AFTER_SPEECH = { transfer_to_manager: 'transfer', end_call: 'end' }
@@ -421,7 +423,7 @@ export function createAgent({ call, server, provider, connectOpts, onTool, onSpe
   function result() {
     const durationMs = ended ? endInfo.at : now() // після кінця — застиглі тривалість і вартість
     const ordered = turns.filter((t) => t.text).sort((a, b) => a.start - b.start)
-    return {
+    return cleanAiTranscript({
       provider: provider.name,
       model: provider.model,
       startedAt: new Date(t0).toISOString(),
@@ -431,9 +433,10 @@ export function createAgent({ call, server, provider, connectOpts, onTool, onSpe
       toolCalls,
       usage,
       costUsd: provider.cost ? provider.cost(usage, durationMs) : null,
+      conversationId: p?.conversationId ?? null,
       wrapped,
       errors,
-    }
+    })
   }
 
   return {

@@ -15,7 +15,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { loadConfig } from './config.mjs'
 import { makeTokenSource, accessSecret } from './gcp.mjs'
-import { TOOL_DEFS, buildInstructions } from './aiprompt.mjs'
+import { toolsFor, buildInstructions } from './aiprompt.mjs'
 import { ensurePrivateDir, FILE_MODE } from './storage.mjs'
 
 const FORMAT = 'pcm_8000'
@@ -112,7 +112,7 @@ async function main() {
   const file = path.join(config.dataDir, 'ai-elevenlabs.json')
   let saved = null
   try { saved = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { /* ще не створено */ }
-  const tools = TOOL_DEFS.map(toolConfig)
+  const tools = toolsFor({ resend: !!config.aiResendUrl }).map(toolConfig)
 
   if (!has('--apply') && !has('--show')) {
     process.stdout.write(`План (нічого не змінюю; створити — з --apply):\n`)

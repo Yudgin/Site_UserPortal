@@ -1216,7 +1216,7 @@ test('менеджер натиснув «2» → його кладемо, кл�
   const e = h.journal[0]
   assert.equal(e.outcome, 'busy_callback')
   assert.equal(e.reason, 'manager_declined')
-  assert.deepEqual(e.callback, { managerKey: '907', stored: true, id: p[0].id })
+  assert.deepEqual(e.callback, { managerKey: '907', stored: true, id: p[0].id, until: new Date(p[0].until).toISOString() })
   assert.deepEqual(e.confirm, { manager: { plays: 1, digit: '2' } })
   assert.equal(e.lastClientFor, '907') // до картки дійшов — він і останній клієнт
   for (const k of ['notice', 'noticePlay', 'noticeDone', 'callbackStored']) assert.ok(e.t[k] != null, `немає мітки ${k}`)
@@ -1606,23 +1606,23 @@ test('менеджер поклав, поки набираємо клієнта 
 })
 
 test('менеджер ніколи не набирає сам себе: 907 — передзвін; зовнішній номер менеджера без VG_MANAGERS_EXTERNAL і PIN — 486 (не клієнт, не передзвін); 907 з GCID — це клієнт; номер — лише цілком', async () => {
-  const managers = resolveManagers('907=0676575085,905', MGR)
-  assert.deepEqual(managers, [['907', '+380676575085'], ['905']])
-  assert.deepEqual(resolveManagers('', 'sip:0676575085@sip14.binotel.com;transport=udp'), [['+380676575085']])
+  const managers = resolveManagers('907=0500000007,905', MGR)
+  assert.deepEqual(managers, [['907', '+380500000007'], ['905']])
+  assert.deepEqual(resolveManagers('', 'sip:0500000007@sip14.binotel.com;transport=udp'), [['+380500000007']])
   assert.deepEqual(resolveManagers('905', MGR), [['905'], ['907']]) // лінія менеджера — завжди
   assert.deepEqual(parseManagers(' , ;'), [])
   assert.equal(partyKey('sip:0500000002@127.0.0.1:5093'), '+380500000002')
   assert.equal(partyKey('anonymous'), null)
-  assert.equal(managerKeyOf('380676575085', managers), '907')
-  assert.equal(managerKeyOf('+380 67 657 50 85', managers), '907')
+  assert.equal(managerKeyOf('380500000007', managers), '907')
+  assert.equal(managerKeyOf('+380 50 000 00 07', managers), '907')
   assert.equal(managerKeyOf('0500000001', managers), null)
   // чужі іноземні номери з цифрами менеджера всередині — НЕ менеджер (раніше normPhone шукав підрядок 380XXXXXXXXX)
-  for (const n of ['+49380676575085', '4930380676575085', '+1380676575085', '00380676575085', '380676575085999', '67657508']) {
+  for (const n of ['+49380500000007', '4930380500000007', '+1380500000007', '00380500000007', '380500000007999', '50000000']) {
     assert.equal(partyKey(n), null, n)
     assert.equal(managerKeyOf(n, managers), null, n)
     assert.equal(isManagerCaller({ number: n, gcid: 'g' }, { managers }), false, n)
   }
-  assert.deepEqual(['0676575085', '380676575085', '+380676575085', '+38 (067) 657-50-85'].map(strictPhone), Array(4).fill('+380676575085'))
+  assert.deepEqual(['0500000007', '380500000007', '+380500000007', '+38 (050) 000-00-07'].map(strictPhone), Array(4).fill('+380500000007'))
   assert.equal(isAllowed('+49380500000001', ['+380500000001'], { gcid: 'g' }), false) // і білий список клієнтів — цілком
   assert.equal(isAllowed('380500000001', ['0500000001'], { gcid: 'g' }), true)
 
@@ -1639,13 +1639,13 @@ test('менеджер ніколи не набирає сам себе: 907 —
   // мобільний менеджера (будь-який формат) без VG_MANAGERS_EXTERNAL / PIN — 486: номер можна підробити, а клієнтом
   // його не вважаємо (інакше шлюз набрав би менеджера йому ж)
   for (const extra of [{}, { managersExternal: true }, { managerPin: '2468' }, { managersExternal: true, managerPin: '12' }]) {
-    for (const number of ['0676575085', '380676575085']) {
+    for (const number of ['0500000007', '380500000007']) {
       const h = harness({ config: { ...cfg, ...extra } })
       h.callbacks.addPending({ managerKey: '907', clientNumber: '0500000001', ts: h.clock.now() })
       await h.ev({ ...MGR_IN, number, from: `sip:${number}@sip14.binotel.com`, gcid: '6929148313' })
       assert.deepEqual(h.cmds, [{ cmd: 'hangup', call: 10, code: 486 }], `${number} ${JSON.stringify(extra)}`)
       const e = h.journal[0]
-      assert.deepEqual([e.kind, e.outcome, e.reason, e.number], ['callback', 'rejected', 'manager_external', '…5085'])
+      assert.deepEqual([e.kind, e.outcome, e.reason, e.number], ['callback', 'rejected', 'manager_external', '…0007'])
       assert.equal(h.callbacks.listPending().length, 1) // передзвін на місці
     }
   }
@@ -1653,7 +1653,7 @@ test('менеджер ніколи не набирає сам себе: 907 —
   const h = harness({ config: { ...cfg, managersExternal: true, managerPin: '2468' } })
   h.callbacks.addPending({ managerKey: '907', clientNumber: '0500000001', ts: h.clock.now() })
   h.callbacks.addPending({ managerKey: '905', clientNumber: '0500000003', ts: h.clock.now() + 1 })
-  await h.ev({ ...MGR_IN, number: '0676575085', gcid: 'g' })
+  await h.ev({ ...MGR_IN, number: '0500000007', gcid: 'g' })
   assert.deepEqual(h.cmds, [{ cmd: 'answer', call: 10, code: 200 }]) // спершу PIN, нікому не дзвонимо
   for (const d of '2468') await h.ev(dtmf(10, d))
   assert.deepEqual(h.cmds.at(-1), { cmd: 'dial', ref: 'cb-10-1', uri: CB_URI })
@@ -1667,7 +1667,7 @@ test('менеджер ніколи не набирає сам себе: 907 —
   // іноземний номер із цифрами менеджера — звичайний (чужий) клієнт: 486 not_allowed, передзвону немає
   const h3 = harness({ config: { ...cfg, managersExternal: true, managerPin: '2468' } })
   h3.callbacks.addPending({ managerKey: '907', clientNumber: '0500000001', ts: h3.clock.now() })
-  await h3.ev({ ...MGR_IN, number: '+49380676575085', from: 'sip:+49380676575085@sip14.binotel.com', gcid: 'g' })
+  await h3.ev({ ...MGR_IN, number: '+49380500000007', from: 'sip:+49380500000007@sip14.binotel.com', gcid: 'g' })
   assert.deepEqual(h3.cmds, [{ cmd: 'hangup', call: 10, code: 486 }])
   assert.deepEqual([h3.journal[0].kind, h3.journal[0].reason], ['client', 'not_allowed'])
   // а клієнтський дзвінок у такій конфігурації набирає менеджера як завжди
@@ -1992,18 +1992,18 @@ test('перезвон, поки клієнт ще на лінії шлюзу (�
 })
 
 test('ключ менеджера: записи шукаємо за всією групою — порядок у VG_MANAGERS не важливий; записи чужих ключів — orphanKeys', async () => {
-  // шлюз писав передзвони під ключем '907' (VG_MANAGERS=907=0676575085), потім його перезапустили з 0676575085=907
-  const h = harness({ config: { ...NEW, managerUri: 'sip:0676575085@sip14.binotel.com;transport=udp', managers: [['+380676575085', '907']] } })
+  // шлюз писав передзвони під ключем '907' (VG_MANAGERS=907=0500000007), потім його перезапустили з 0500000007=907
+  const h = harness({ config: { ...NEW, managerUri: 'sip:0500000007@sip14.binotel.com;transport=udp', managers: [['+380500000007', '907']] } })
   h.callbacks.addPending({ managerKey: '907', clientNumber: '0500000001', ts: h.clock.now() })
   h.callbacks.setLastClient('907', { number: '0500000005', ts: h.clock.now() })
   await h.ev(MGR_IN) // з 907
   assert.deepEqual(h.sent('dial').at(-1).uri, CB_URI)
-  assert.deepEqual(h.callbacks.listPending(['+380676575085', '907']).length, 1)
-  assert.equal(h.callbacks.getLastClient(['+380676575085', '907']).number, '+380500000005')
-  assert.deepEqual(h.callbacks.orphanKeys([['+380676575085', '907']]), [])
+  assert.deepEqual(h.callbacks.listPending(['+380500000007', '907']).length, 1)
+  assert.equal(h.callbacks.getLastClient(['+380500000007', '907']).number, '+380500000005')
+  assert.deepEqual(h.callbacks.orphanKeys([['+380500000007', '907']]), [])
   assert.deepEqual(h.callbacks.orphanKeys([['905']]).sort(), ['907'])
   // клієнтський дзвінок у цій конфігурації: передзвін — під першим ключем групи, клієнт з'єднався — знято за групою
-  const h2 = harness({ config: { ...NEW, managerUri: 'sip:0676575085@sip14.binotel.com;transport=udp', managers: [['+380676575085', '907']] } })
+  const h2 = harness({ config: { ...NEW, managerUri: 'sip:0500000007@sip14.binotel.com;transport=udp', managers: [['+380500000007', '907']] } })
   h2.callbacks.addPending({ managerKey: '907', clientNumber: '0500000001', ts: h2.clock.now() })
   await h2.ev(INCOMING)
   await h2.ev({ ev: 'media', call: 1, active: true })
@@ -2015,12 +2015,12 @@ test('ключ менеджера: записи шукаємо за всією �
   await h2.ev({ ev: 'xfer', call: 1, code: 200, final: true })
   assert.equal(h2.journal.length, 0)
   assert.equal(h2.callbacks.listPending().length, 0)
-  assert.equal(h2.callbacks.getLastClient('+380676575085').number, '+380500000001')
+  assert.equal(h2.callbacks.getLastClient('+380500000007').number, '+380500000001')
 })
 
 test('PIN зовнішнього менеджера: фраза → цифри (і під час фрази) → передзвін; невірний / немає за 10 с — відбій без набору; «*» — заново; цифр PIN немає ніде', async () => {
-  const cfg = { ...NEW, managers: [['907', '+380676575085']], managersExternal: true, managerPin: '2468', prompts: { ...PROMPTS, pin: '/p/pin.wav' } }
-  const MOB = { ...MGR_IN, number: '0676575085', from: 'sip:0676575085@sip14.binotel.com', gcid: '6929148313' }
+  const cfg = { ...NEW, managers: [['907', '+380500000007']], managersExternal: true, managerPin: '2468', prompts: { ...PROMPTS, pin: '/p/pin.wav' } }
+  const MOB = { ...MGR_IN, number: '0500000007', from: 'sip:0500000007@sip14.binotel.com', gcid: '6929148313' }
   const answeredMob = async (h) => {
     h.callbacks.addPending({ managerKey: '907', clientNumber: '0500000001', ts: h.clock.now() })
     await h.ev(MOB)

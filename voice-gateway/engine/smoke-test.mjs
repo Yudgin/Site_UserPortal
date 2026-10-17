@@ -252,13 +252,13 @@ await step('1a. сирий INVITE: X-BINOTEL-GCID (інший регістр), �
   const from = 'From: "RUN Call Petro" <sip:0500000001@127.0.0.1:5095>;tag=smk1'
   u.send([`INVITE ${GW} SIP/2.0`, via, 'Max-Forwards: 70', from, `To: <${GW}>`, `Call-ID: ${callId}`,
     'CSeq: 1 INVITE', 'Contact: <sip:0500000001@127.0.0.1:5095>', 'X-Binotel-Gcid: 6929148313',
-    'X-BINOTEL-SET-CALLER-ID: 0443338049', 'Content-Type: application/sdp', `Content-Length: ${Buffer.byteLength(sdp)}`, '', sdp].join('\r\n'), 5092)
+    'X-BINOTEL-SET-CALLER-ID: 0500000008', 'Content-Type: application/sdp', `Content-Length: ${Buffer.byteLength(sdp)}`, '', sdp].join('\r\n'), 5092)
   const inc = await eng.wait((e) => e.ev === 'incoming', 3000, 'incoming')
   assert(inc.gcid === '6929148313', `gcid=${inc.gcid}`)
   assert(inc.number === '0500000001', `number=${inc.number}`)
   assert(inc.name === 'RUN Call Petro', `name=${inc.name}`)
   assert(inc.from === 'sip:0500000001@127.0.0.1:5095', `from=${inc.from}`)
-  assert(inc.set_caller_id === '0443338049', `set_caller_id=${inc.set_caller_id}`)
+  assert(inc.set_caller_id === '0500000008', `set_caller_id=${inc.set_caller_id}`)
   eng.send({ cmd: 'hangup', call: inc.call, code: 486 })
   const resp = await u.wait((s) => /^SIP\/2\.0 486/.test(s), 3000, '486 у відповідь')
   const to = hdr(resp.s, 'To')

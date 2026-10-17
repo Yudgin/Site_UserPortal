@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { ymd } from './journal.mjs'
 import { toneWav, wavFromPcm16 } from './tts.mjs'
+import { cleanAiTranscript } from './transcript.mjs'
 
 export const DIR_MODE = 0o700
 export const FILE_MODE = 0o600
@@ -149,8 +150,25 @@ export function saveAiTranscript({ dataDir, gcid = null, number = null, record, 
   const base = `${g || hms(now, timeZone)}-${digits ? digits.slice(-4) : 'anon'}`
   let file = path.join(dir, `${base}.json`)
   for (let i = 2; fs.existsSync(file); i++) file = path.join(dir, `${base}-${i}.json`)
-  fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`, { mode: FILE_MODE, flag: 'wx' })
+  fs.writeFileSync(file, `${JSON.stringify(cleanAiTranscript(record), null, 2)}\n`, { mode: FILE_MODE, flag: 'wx' })
   return file
+}
+
+// Дописати в уже збережену розшифровку (фактична ціна ElevenLabs приходить за хвилину після кінця розмови): читаємо,
+// зливаємо поля, пишемо атомарно (тимчасовий файл поруч + rename), 0600. Повертає true, якщо записано.
+export function updateAiTranscript(file, patch) {
+  if (!file || !patch) return false
+  const cur = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const tmp = `${file}.${process.pid}.tmp`
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify(cleanAiTranscript({ ...cur, ...patch }), null, 2)}\n`, { mode: FILE_MODE })
+    fs.renameSync(tmp, file)
+  } catch (e) {
+    try { fs.unlinkSync(tmp) } catch { /* не створився */ }
+    throw e
+  }
+  try { fs.chmodSync(file, FILE_MODE) } catch { /* уже немає */ }
+  return true
 }
 
 // WAV голосового повідомлення після падіння рушія: pjmedia пише довжини в заголовок (RIFF і data) лише при

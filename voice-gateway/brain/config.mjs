@@ -3,7 +3,7 @@
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { resolveManagers } from './callbacks.mjs'
+import { resolveManagers, strictPhone, partyKey } from './callbacks.mjs'
 import { parseHours } from './hours.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -41,36 +41,78 @@ export const PROMPT_ENV = {
   cbClientBusy: 'VG_CB_CLIENT_BUSY_WAV',
 }
 // Режим «ШІ одразу» і приєднання менеджера, що передзвонив (записка runferry-briefs/telephony/
-// ai-first-discussion-join-2026-10-17.md, черга A). Фрази менеджеру — внутрішні: синтез дозволено, як у cb*. Окремий
-// словник, щоб без нових прапорців набір фраз (і їх синтез при старті) лишався рівно тим самим.
+// ai-first-discussion-join-2026-10-17.md, черги A і B). Фрази менеджеру — внутрішні: синтез дозволено, як у cb*. Окремий
+// словник, щоб без нових прапорців набір фраз (і їх синтез при старті) лишався рівно тим самим. Тексти — черновик сесії
+// «Голосові заглушки» (runferry-briefs segments-texts-draft 5а (fe08058)); «‖» — пауза диктора, синтез її прибирає.
 export const JOIN_PROMPT_TEXTS = {
-  mgrJoin: "Клієнт на лінії з віртуальним помічником — з'єдную.", // менеджеру, що передзвонив, перед мостом
-  // те саме, коли клієнт із ШІ не говорив (класичний набір, набір після 82): «з віртуальним помічником» було б неправдою
+  // MGR-JOIN, перша частина (далі — «Суть звернення: {резюме}. ‖ З’єдную.», синтез на льоту, або mgrJoinTail)
+  // источник: runferry-briefs segments-texts-draft 5а (fe08058)
+  mgrJoin: 'Клієнт зараз говорить із віртуальним помічником.',
+  // MGR-JOIN, кінець без резюме (ШІ ще нічого не записав або синтез не встиг) — источник: runferry-briefs segments-texts-draft 5а (fe08058)
+  mgrJoinTail: 'З’єдную.',
+  // клієнт із ШІ не говорив (класичний набір, набір після 82): «з віртуальним помічником» було б неправдою. У черновику
+  // такої фрази немає — внутрішній текст черги A
   mgrJoinPlain: "Клієнт на лінії — з'єдную.",
-  mgrJoinBusy: "Клієнта вже з'єднують з менеджером.", // другий дзвінок менеджера, поки клієнта вже з'єднують
-  mgrJoinGone: 'Клієнт поклав слухавку.', // клієнт поклав, поки менеджера приєднували
+  mgrJoinBusy: 'Клієнта вже з’єднують з колегою.', // MGR-JOIN-BUSY — источник: runferry-briefs segments-texts-draft 5а (fe08058)
+  mgrJoinGone: 'Клієнт поклав слухавку.', // MGR-JOIN-GONE — источник: runferry-briefs segments-texts-draft 5а (fe08058)
 }
-// Клієнтські фрази (80, 81, 82, 83) — ПРОБНІ тексти записки (розд. 4). Шлюз їх сам НЕ синтезує (правило власника «аудіо
-// лише після погодження текстів»): лише свій WAV (VG_*_WAV) або VG_CLIENT_SYNTH=trial за непорожнього
-// VG_ALLOWED_CALLERS (проба на тестових номерах). Немає файла — фразу пропускаємо.
+// Клієнтські фрази (80–83, 13–17) — ПРОБНІ тексти черновика 5а. Шлюз їх сам НЕ синтезує (правило власника «аудіо лише
+// після погодження текстів»): лише свій WAV (VG_*_WAV) або VG_CLIENT_SYNTH=trial за непорожнього VG_ALLOWED_CALLERS (проба
+// на тестових номерах). Немає файла — фразу пропускаємо. Повний варіант (ключ без Short) — уночі, короткий (…Short) —
+// днём, як у 00; є лише один — граємо його.
 export const CLIENT_TRIAL_TEXTS = {
-  intro: 'Вітаємо! Це багатоканальна лінія компанії Runferry.', // 80: перша фраза дзвінка в режимі ai (про запис — ні)
-  joinClient: "Менеджер уже на лінії — з'єдную вас.", // 81: менеджер передзвонив, поки клієнт із ШІ
-  aiDown: "Залишайтеся, будь ласка, на лінії — з'єднуємо вас із менеджером.", // 82: ШІ не піднявся, менеджеру ще не дзвонили
-  // 83: уночі ШІ не піднявся — менеджеру не дзвонимо, «лінія зайнята» була б неправдою; перезвін after_hours уже стоїть.
-  // Слова — з пробної першої фрази ШІ в неробочий час (AI-AFTER-HOURS); новий текст — на погодження власнику
-  aiDownNight: "Зараз неробочий час: ми працюємо з понеділка до п'ятниці, з дев'ятої до вісімнадцятої. Менеджер передзвонить вам у робочий час.",
+  // 80-line-intro, повний — источник: runferry-briefs segments-texts-draft 5а (fe08058). Перша фраза ВСІХ гілок режиму ai;
+  // оголошення про запис з метою — тут (Правила №761)
+  intro: 'Вітаємо! Це багатоканальна лінія компанії Runferry. ‖ Зверніть увагу: ми записуємо розмову, щоб точно опрацювати ваше звернення й контролювати якість обслуговування.',
+  // 80-line-intro, короткий — источник: runferry-briefs segments-texts-draft 5а (fe08058)
+  introShort: 'Вітаємо! Це багатоканальна лінія компанії Runferry. ‖ Ми записуємо розмову, щоб опрацювати звернення й контролювати якість.',
+  joinClient: 'Менеджер уже на лінії — з’єдную вас.', // 81-join-client — источник: runferry-briefs segments-texts-draft 5а (fe08058)
+  // 82-ai-down-connect, повний / короткий — источник: runferry-briefs segments-texts-draft 5а (fe08058). ШІ не піднявся
+  // (або запобіжник): після 80 — набір загальної групи
+  aiDown: 'Залишайтеся, будь ласка, на лінії — з’єднуємо вас з оператором.',
+  aiDownShort: 'Залишайтеся на лінії — з’єднуємо з оператором.',
+  // 83: уночі ШІ не піднявся — менеджеру не дзвонимо, «лінія зайнята» була б неправдою; перезвін уже стоїть. У черновику
+  // такої фрази немає: складено з AI-AFTER-HOURS і 17-ds-no-ai — на погодження власнику
+  // 83-ai-down-night — источник: runferry-briefs segments-texts-draft 5а (fe08058), textsNeedingOwner.
+  aiDownNight: 'Зараз неробочий час: ми працюємо з понеділка до п’ятниці, з дев’ятої до вісімнадцятої. ‖ Ми вже повідомили про ваш дзвінок — вам передзвонять. ‖ Дякуємо, що зателефонували!',
+  // 13-ds-talked — источник: runferry-briefs segments-texts-draft 5а (fe08058)
+  dsTalked: 'Ми з вами нещодавно розмовляли. ‖ Залишайтеся, будь ласка, на лінії — з’єднуємо вас із менеджером, який займається вашим зверненням.',
+  dsTalkedShort: 'Ми з вами нещодавно розмовляли. ‖ Залишайтеся на лінії — з’єднуємо вас із менеджером.',
+  // 14-ds-called — источник: runferry-briefs segments-texts-draft 5а (fe08058)
+  dsCalled: 'Ми нещодавно вам телефонували. ‖ Залишайтеся, будь ласка, на лінії — з’єднуємо вас із менеджером, який займається вашим зверненням.',
+  dsCalledShort: 'Ми нещодавно вам телефонували. ‖ Залишайтеся на лінії — з’єднуємо вас із менеджером.',
+  // 15-ds-general — источник: runferry-briefs segments-texts-draft 5а (fe08058)
+  dsGeneral: 'Залишайтеся, будь ласка, на лінії — з’єднуємо вас із менеджером, який займається вашим зверненням.',
+  dsGeneralShort: 'Залишайтеся на лінії — з’єднуємо вас із менеджером, який займається вашим зверненням.',
+  dsFailed: 'На жаль, з’єднати вас не вдалося.', // 16-ds-failed (повний = короткий) — источник: runferry-briefs segments-texts-draft 5а (fe08058)
+  // 17-ds-no-ai — источник: runferry-briefs segments-texts-draft 5а (fe08058)
+  dsNoAi: 'Ми вже повідомили про ваш дзвінок — вам передзвонять. ‖ Дякуємо, що зателефонували!',
+  dsNoAiShort: 'Вам передзвонять. ‖ Дякуємо, що зателефонували!',
 }
 export const AI_FIRST_PROMPT_ENV = {
   mgrJoin: 'VG_MGR_JOIN_WAV',
+  mgrJoinTail: 'VG_MGR_JOIN_TAIL_WAV',
   mgrJoinPlain: 'VG_MGR_JOIN_PLAIN_WAV',
   mgrJoinBusy: 'VG_MGR_JOIN_BUSY_WAV',
   mgrJoinGone: 'VG_MGR_JOIN_GONE_WAV',
   intro: 'VG_INTRO_WAV',
+  introShort: 'VG_INTRO_SHORT_WAV',
   joinClient: 'VG_JOIN_CLIENT_WAV',
   aiDown: 'VG_AI_DOWN_WAV',
+  aiDownShort: 'VG_AI_DOWN_SHORT_WAV',
   aiDownNight: 'VG_AI_DOWN_NIGHT_WAV',
+  dsTalked: 'VG_DS_TALKED_WAV',
+  dsTalkedShort: 'VG_DS_TALKED_SHORT_WAV',
+  dsCalled: 'VG_DS_CALLED_WAV',
+  dsCalledShort: 'VG_DS_CALLED_SHORT_WAV',
+  dsGeneral: 'VG_DS_GENERAL_WAV',
+  dsGeneralShort: 'VG_DS_GENERAL_SHORT_WAV',
+  dsFailed: 'VG_DS_FAILED_WAV',
+  dsNoAi: 'VG_DS_NO_AI_WAV',
+  dsNoAiShort: 'VG_DS_NO_AI_SHORT_WAV',
 }
+// Фрази гілки обговорення (13–17) — потрібні лише з VG_DS_SOURCE (синтез і перевірка WAV)
+export const DS_PROMPT_KEYS = ['dsTalked', 'dsTalkedShort', 'dsCalled', 'dsCalledShort', 'dsGeneral', 'dsGeneralShort', 'dsFailed', 'dsNoAi', 'dsNoAiShort']
 export const CLIENT_PROMPT_KEYS = Object.keys(CLIENT_TRIAL_TEXTS)
 
 // Запобіжник ШІ (лише VG_ANSWER_MODE=ai): «сбоїв/за хвилин/вимкнено хвилин», типово 3/10/30 — 3 збої ШІ за 10 хв →
@@ -84,6 +126,38 @@ export function parseBreaker(v) {
 }
 
 export const NO_ANSWER_MODES = ['busy', 'fallback', 'voicemail', 'ai']
+
+// Обговорення (route.mjs): звідки воно і які види бувають
+export const DS_SOURCES = ['off', 'test', 'calls', 'field', 'auto']
+export const DS_KINDS = ['talked', 'called', 'general', 'pending']
+// Номер у попередженнях — лише останні 4 цифри (репозиторій і консоль не для чужих номерів)
+const maskDigits = (s) => String(s ?? '').replace(/\d(?=(?:\D*\d){4})/g, '•')
+// VG_DS_TEST: «+380500000001=talked,0500000002=called» → {map: Map(E.164 → вид), bad: [замасковані хибні частини]}
+export function parseDsTest(spec) {
+  const map = new Map()
+  const bad = []
+  for (const part of String(spec ?? '').split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean)) {
+    const m = part.match(/^([^=]+)=([A-Za-z]+)$/)
+    const phone = m ? strictPhone(m[1]) : null
+    const kind = m ? m[2].toLowerCase() : null
+    if (!phone || !DS_KINDS.includes(kind)) bad.push(maskDigits(part))
+    else map.set(phone, kind)
+  }
+  return { map, bad }
+}
+// VG_DS_STAFF: «uid=907,uid2=0500000003» → {map: {uid: ключ}, bad}. Ключ — внутрішня лінія або телефон (partyKey).
+// uid «test» — ведучий тестових обговорень VG_DS_TEST (без нього — лінія менеджера VG_MANAGER).
+export function parseDsStaff(spec) {
+  const map = {}
+  const bad = []
+  for (const part of String(spec ?? '').split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean)) {
+    const m = part.match(/^([A-Za-z0-9_.:-]{1,128})=(.+)$/)
+    const key = m ? partyKey(m[2]) : null
+    if (!key) bad.push(maskDigits(part))
+    else map[m[1]] = key
+  }
+  return { map, bad }
+}
 // PIN менеджера для передзвону із зовнішнього номера: 4–8 цифр; інше — PIN не задано (зовнішні номери отримують 486)
 export const validPin = (v) => /^\d{4,8}$/.test(String(v ?? '').trim())
 
@@ -120,6 +194,9 @@ export function loadConfig(env = process.env) {
   const allowed = list(env.VG_ALLOWED_CALLERS)
   const managerUri = extUri(env.VG_MANAGER || '907', sipServer)
   const noAnswer = String(env.VG_NO_ANSWER_MODE || '').trim().toLowerCase()
+  const dsSource = String(env.VG_DS_SOURCE || '').trim().toLowerCase()
+  const dsTest = parseDsTest(env.VG_DS_TEST)
+  const dsStaff = parseDsStaff(env.VG_DS_STAFF)
   return {
     sipServer,
     sipExpires: num(env.VG_SIP_EXPIRES, 120), // Binotel приймав перереєстрацію кожні 120 с
@@ -242,6 +319,14 @@ export function loadConfig(env = process.env) {
     aiTransferMax: num(env.VG_AI_TRANSFER_MAX, 1),
     // Що ШІ каже про заявку: minimal — є/немає, скільки, номер; stage — ще й етап (рішення власника)
     aiStatusDetail: String(env.VG_AI_STATUS_DETAIL || '').trim().toLowerCase() === 'stage' ? 'stage' : 'minimal',
+    // Черга C: нічний черговий — лише ключ зі списку власника VG_MANAGERS; порожньо — вимкнено.
+    afterHoursUrgentTo: partyKey(env.VG_AFTER_HOURS_URGENT_TO) || null,
+    // Відмітка угоди: явний шлях у заявці або onec/snapshot.raw.*; без прапорця додаткових читань немає.
+    termsField: String(env.VG_TERMS_FIELD || '').trim(),
+    // Попередній контракт повторного посилання (адаптер resend.mjs); типово інструмента немає.
+    aiResendUrl: env.VG_AI_RESEND_URL || null,
+    aiResendSecret: env.VG_AI_RESEND_SECRET || null,
+    aiResendTimeoutMs: num(env.VG_AI_RESEND_TIMEOUT_MS, 3000),
     // Куди зберігати розшифровку й підсумок: local — <data>/ai/<дата>/*.json (0600); firestore — ще й
     // serviceRequests/{id}/calls/ai-<gcid> (kind 'ai'), якщо заявку знайдено (формат погоджується з конвеєром дзвінків)
     aiSave: String(env.VG_AI_SAVE || '').trim().toLowerCase() === 'firestore' ? 'firestore' : 'local',
@@ -266,7 +351,7 @@ export function loadConfig(env = process.env) {
     // ringback — гудки 425 Гц (1 с звук / 4 с тиша), gateway.mjs генерує cache/ringback-425hz.wav (або VG_RINGBACK_WAV)
     holdTone: String(env.VG_HOLD_TONE || '').trim().toLowerCase() === 'ringback' ? 'ringback' : 'phrase',
     ringbackFile: env.VG_RINGBACK_WAV || null,
-    // Клієнтські фрази 80–83: off — лише свої WAV; trial — пробний синтез CLIENT_TRIAL_TEXTS (лише з VG_ALLOWED_CALLERS)
+    // Клієнтські фрази 80–83 і 13–17: off — лише свої WAV; trial — пробний синтез CLIENT_TRIAL_TEXTS (лише з VG_ALLOWED_CALLERS)
     clientSynth: String(env.VG_CLIENT_SYNTH || '').trim().toLowerCase() === 'trial' ? 'trial' : 'off',
     // Менеджер передзвонив на 901, поки клієнт чекає саме його (із ШІ з перезвоном у його групі або шлюз зараз йому
     // дзвонить), — приєднуємо: ШІ стоп, клієнту 81, менеджеру «Клієнт на лінії…», далі міст (bridge) або REFER клієнта з
@@ -276,6 +361,36 @@ export function loadConfig(env = process.env) {
     joinPromptTexts: { ...JOIN_PROMPT_TEXTS },
     clientTrialTexts: { ...CLIENT_TRIAL_TEXTS },
     aiFirstPromptFiles: Object.fromEntries(Object.entries(AI_FIRST_PROMPT_ENV).map(([k, v]) => [k, env[v] || null])),
+    // Обговорення (черга B записки 2026-10-17, розд. 3, 6, 11; усе типово вимкнено). Звідки воно: off | test | calls |
+    // field | auto (route.mjs). Ведучому дзвонимо лише якщо його ключ є в VG_MANAGERS; пропуски й пауза — по співробітнику
+    // (staff-state.json). Фрази 13–17 — VG_DS_*_WAV або пробний синтез; немає — гудки (механіка без тексту).
+    dsSource: DS_SOURCES.includes(dsSource) ? dsSource : 'off',
+    dsTest: dsTest.map, // VG_DS_TEST «номер=talked|called|general|pending» — лише локальний env, номери з VG_ALLOWED_CALLERS
+    dsTestBad: dsTest.bad,
+    dsStaff: dsStaff.map, // VG_DS_STAFF «uid=ключ» — ведучий за uid (у т. ч. test=ключ для VG_DS_TEST)
+    dsStaffBad: dsStaff.bad,
+    dsTalkedH: num(env.VG_DS_TALKED_H, 24), // 13 «нещодавно розмовляли» — розмова не старша
+    dsCalledH: num(env.VG_DS_CALLED_H, 48), // 14 «нещодавно телефонували» — недодзвін не старший (строк обговорення — ще й до 18:00 2-го робочого дня)
+    dsPendingMin: num(env.VG_DS_PENDING_MIN, 30), // дзвінок із застосунку почато не раніше — ведучий зайнятий (pending_call)
+    dsCallsBudgetMs: num(env.VG_DS_CALLS_BUDGET_MS, 600), // скільки чекаємо дзвінки заявки; не встигли — «обговорення немає»
+    dsRingSec: num(env.VG_DS_RING_SEC, 20), // скільки дзвонимо ведучому (звичайному менеджеру — VG_MANAGER_TIMEOUT_SEC)
+    dsMaxWaitSec: num(env.VG_DS_MAX_WAIT_SEC, 30), // клієнт після фрази чекає ведучого не довше — далі «не вдалося»
+    dsXferWaitMs: 6000, // «1» натиснуто, а фраза 13/14/15 ще грає: REFER — після неї, але не пізніше
+    dsMissMax: num(env.VG_DS_MISS_MAX, 2), // пропусків поспіль → пауза (0 — без паузи)
+    dsPauseMin: num(env.VG_DS_PAUSE_MIN, 120),
+    dsAiTransfer: num(env.VG_DS_AI_TRANSFER, 0), // ШІ після «не вдалося» з'єднує ще раз (з оператором) — типово ні
+    // В19: ведучому не дзвонили (пауза, ключа немає, зайнятий) — ШІ може з'єднати з оператором лише при претензії,
+    // гарантії чи небезпеці (типово так; 0 — ні)
+    dsExceptionTransfer: bool(env.VG_DS_EXCEPTION_TRANSFER, true),
+    // Як набирати ведучого-мобільного (ключ не лінія менеджера): {national} {e164} {digits} {server}; лінія — sip:NNN@сервер
+    dsLeadUriTemplate: env.VG_DS_LEAD_URI || 'sip:{national}@{server};transport=udp',
+    // Події для сервера режиму (routeevents.mjs): адреса й ім'я секрету токена в Secret Manager; типово вимкнено
+    dsEventsUrl: env.VG_DS_EVENTS_URL || null,
+    dsEventsSecret: env.VG_DS_EVENTS_SECRET || null,
+    dsEventsTimeoutMs: num(env.VG_DS_EVENTS_TIMEOUT_MS, 3000),
+    // Фактична ціна розмови з ШІ (GET /v1/convai/conversations/{id}) після її кінця, у фоні; типово так, якщо ШІ
+    // увімкнено. З локальним підробленим ElevenLabs (VG_AI_EL_URL) — лише з явним VG_AI_EL_API: справжній API не чіпаємо
+    aiCostFetch: bool(env.VG_AI_COST_FETCH, true) && (!env.VG_AI_EL_URL || !!env.VG_AI_EL_API),
     recordSupported: null, // чи вміє рушій record: gateway.mjs ставить за подією ready (false — пошти немає)
     xferClearMs: 4000, // після вдалого переведення АТС сама гасить обидві ноги; жива нога після цього — кладемо
     bridgeMaxMin: num(env.VG_BRIDGE_MAX_MIN, 60), // розмова через локальний міст — не довше (BYE міг загубитися)

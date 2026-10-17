@@ -136,7 +136,7 @@ test('engine: JSON-рядки в обидва боки, stderr лише у фа�
       const c = JSON.parse(l)
       if (c.cmd === 'register') {
         out({ ev: 'reg', code: 200, reason: 'OK', active: true, user: c.user })
-        out({ ev: 'incoming', call: 1, from: 'sip:0631234567@45.91.130.64', number: '0631234567', name: 'Петренко Іван', gcid: '6929148313', to: 'sip:901@x', set_caller_id: '0443338049', src: '45.91.130.64:5060' })
+        out({ ev: 'incoming', call: 1, from: 'sip:0631234567@45.91.130.64', number: '0631234567', name: 'Петренко Іван', gcid: '6929148313', to: 'sip:901@x', set_caller_id: '0500000008', src: '45.91.130.64:5060' })
       }
       if (c.cmd === 'quit') process.exit(0)
     })
@@ -166,7 +166,7 @@ test('engine: JSON-рядки в обидва боки, stderr лише у фа�
   assert.ok(!trace.includes('S3cret!'))
   // у трасі вхідний — без імені й URI, номер маскою
   assert.ok(!trace.includes('631234567') && !trace.includes('Петренко'))
-  assert.match(trace, /<< \{"ev":"incoming","call":1,"gcid":"6929148313","to":"sip:901@x","set_caller_id":"0443338049","src":"45\.91\.130\.64:5060","number":"…4567"\}/)
+  assert.match(trace, /<< \{"ev":"incoming","call":1,"gcid":"6929148313","to":"sip:901@x","set_caller_id":"0500000008","src":"45\.91\.130\.64:5060","number":"…4567"\}/)
   assert.deepEqual(redactEvent({ ev: 'state', call: 1 }), { ev: 'state', call: 1 })
   assert.equal((fs.statSync(traceFile).mode & 0o777), 0o600)
   assert.equal((fs.statSync(path.dirname(traceFile)).mode & 0o777), 0o700)
@@ -297,8 +297,8 @@ test('config: типово «лінія зайнята» + передзвін, �
   }
   assert.deepEqual(c.prompts, {})
   for (const [m, want] of [['fallback', 'fallback'], [' VoiceMail ', 'voicemail'], ['busy', 'busy'], ['what', 'busy']]) assert.equal(loadConfig({ VG_NO_ANSWER_MODE: m }).noAnswerMode, want, m)
-  const c2 = loadConfig({ VG_MANAGERS: '907=0676575085, 905', VG_MANAGER: '0676575085', VG_CONFIRM: '0', VG_CONFIRM_TIMEOUT_SEC: '5', VG_CONFIRM_REPEATS: '0', VG_CALLBACK_TTL_HOURS: '12', VG_LAST_CLIENT_DAYS: '7', VG_CALLBACK_DIAL_TIMEOUT_SEC: '20', VG_CLIENT_URI: 'sip:{e164}@{server}', VG_CARD_SPEAK_NUMBER: '1', [PROMPT_ENV.confirm]: '/w/confirm.wav', VG_CB_NONE_WAV: '/w/none.wav' })
-  assert.deepEqual(c2.managers, [['907', '+380676575085'], ['905']])
+  const c2 = loadConfig({ VG_MANAGERS: '907=0500000007, 905', VG_MANAGER: '0500000007', VG_CONFIRM: '0', VG_CONFIRM_TIMEOUT_SEC: '5', VG_CONFIRM_REPEATS: '0', VG_CALLBACK_TTL_HOURS: '12', VG_LAST_CLIENT_DAYS: '7', VG_CALLBACK_DIAL_TIMEOUT_SEC: '20', VG_CLIENT_URI: 'sip:{e164}@{server}', VG_CARD_SPEAK_NUMBER: '1', [PROMPT_ENV.confirm]: '/w/confirm.wav', VG_CB_NONE_WAV: '/w/none.wav' })
+  assert.deepEqual(c2.managers, [['907', '+380500000007'], ['905']])
   assert.deepEqual([c2.confirmEnabled, c2.confirmTimeoutSec, c2.confirmRepeats, c2.callbackTtlHours, c2.lastClientTtlDays, c2.callbackDialTimeoutSec, c2.clientUriTemplate, c2.cardSpeakNumber],
     [false, 5, 0, 12, 7, 20, 'sip:{e164}@{server}', true])
   assert.deepEqual([c2.promptFiles.confirm, c2.promptFiles.cbNone, c2.promptFiles.busy], ['/w/confirm.wav', '/w/none.wav', null])
@@ -306,8 +306,8 @@ test('config: типово «лінія зайнята» + передзвін, �
 })
 
 test('gateway: прапорці --no-answer, --managers, --client-uri', () => {
-  const o = parseArgs(['--local', '--manager', 'sip:0500000002@127.0.0.1:5093', '--no-answer', ' Fallback ', '--managers', '907=0676575085', '--client-uri', 'sip:{national}@127.0.0.1:5091'])
-  assert.deepEqual([o.local, o.manager, o.noAnswer, o.managers, o.clientUri], [true, 'sip:0500000002@127.0.0.1:5093', 'fallback', '907=0676575085', 'sip:{national}@127.0.0.1:5091'])
+  const o = parseArgs(['--local', '--manager', 'sip:0500000002@127.0.0.1:5093', '--no-answer', ' Fallback ', '--managers', '907=0500000007', '--client-uri', 'sip:{national}@127.0.0.1:5091'])
+  assert.deepEqual([o.local, o.manager, o.noAnswer, o.managers, o.clientUri], [true, 'sip:0500000002@127.0.0.1:5093', 'fallback', '907=0500000007', 'sip:{national}@127.0.0.1:5091'])
   assert.throws(() => parseArgs(['--no-answer']), /требует значение/)
 })
 
@@ -365,20 +365,20 @@ test('storage: шлях голосової пошти (київська дата
   const data = path.join(dir, 'data')
   const now = new Date('2026-10-16T21:53:01Z') // у Києві 17.10, 00:53:01
   const day = path.join(data, 'voicemail', '2026-10-17')
-  const f1 = makeVoicemailPath({ dataDir: data, gcid: '6929308233', number: '+380671230255', now })
-  assert.equal(f1, path.join(day, '6929308233-0255.wav'))
+  const f1 = makeVoicemailPath({ dataDir: data, gcid: '6929308233', number: '+380500000009', now })
+  assert.equal(f1, path.join(day, '6929308233-0009.wav'))
   assert.equal(fs.statSync(path.join(data, 'voicemail')).mode & 0o777, 0o700)
   assert.equal(fs.statSync(day).mode & 0o777, 0o700)
   assert.equal(fs.existsSync(f1), false) // файл створює рушій
   fs.writeFileSync(f1, 'x')
-  assert.equal(makeVoicemailPath({ dataDir: data, gcid: '6929308233', number: '+380671230255', now }), path.join(day, '6929308233-0255-2.wav'))
+  assert.equal(makeVoicemailPath({ dataDir: data, gcid: '6929308233', number: '+380500000009', now }), path.join(day, '6929308233-0009-2.wav'))
   assert.equal(makeVoicemailPath({ dataDir: data, gcid: null, number: '907', now }), path.join(day, '005301-907.wav'))
   assert.equal(makeVoicemailPath({ dataDir: data, gcid: '../../etc/x', number: null, now }), path.join(day, 'etcx-anon.wav')) // GCID із SIP — без «..» і «/»
   // відносна тека даних → усе одно абсолютний шлях (рушій приймає лише такий)
   const relData = path.relative(process.cwd(), data)
-  const f3 = makeVoicemailPath({ dataDir: relData, gcid: 'g1', number: '+380671230255', now })
+  const f3 = makeVoicemailPath({ dataDir: relData, gcid: 'g1', number: '+380500000009', now })
   assert.ok(path.isAbsolute(f3), f3)
-  assert.equal(f3, path.join(day, 'g1-0255.wav'))
+  assert.equal(f3, path.join(day, 'g1-0009.wav'))
 
   const cache = path.join(dir, 'cache')
   const beep = ensureBeep({ cacheDir: cache })
@@ -415,10 +415,10 @@ test('storage: заголовок WAV після падіння рушія (до
   const broken = Buffer.from(good)
   broken.writeUInt32LE(0, 4) // так pjmedia лишає заголовок до закриття файла
   broken.writeUInt32LE(0, 40)
-  const fBroken = path.join(day, 'g1-0255.wav')
-  const fGood = path.join(day, 'g2-0255.wav')
-  const fOdd = path.join(day, 'g3-0255.wav')
-  const fEmpty = path.join(day, 'g4-0255.wav')
+  const fBroken = path.join(day, 'g1-0009.wav')
+  const fGood = path.join(day, 'g2-0009.wav')
+  const fOdd = path.join(day, 'g3-0009.wav')
+  const fEmpty = path.join(day, 'g4-0009.wav')
   fs.writeFileSync(fBroken, broken)
   fs.writeFileSync(fGood, good)
   fs.writeFileSync(fOdd, Buffer.concat([broken, Buffer.from([1])])) // обірваний посеред відліку
@@ -709,7 +709,7 @@ test('gateway: клієнтські фрази 80–83 потрапляють у
     const t = setTimeout(() => gw.kill('SIGTERM'), 1500)
     gw.on('exit', (code) => { clearTimeout(t); resolve({ code, out, missing: (out.match(/синтез выключен — нет фраз: ([^\n]*)/) || [])[1] || '' }) })
   })
-  const CLIENT = [/вступление 80/, /\(81\)/, /\(82\)/, /\(83\)/]
+  const CLIENT = [/вступление 80/, /\(81\)/, /\(82[,)]/, /\(83\)/]
   const a = await run({ VG_ALLOWED_CALLERS: '+380500000001' })
   assert.equal(a.code, 0, a.out)
   assert.match(a.missing, /«клиент на линии с ИИ — соединяю» менеджеру/, a.out)

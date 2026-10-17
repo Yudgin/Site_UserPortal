@@ -3,8 +3,10 @@
 // тека 0700, файли 0600, запис атомарний (тимчасовий файл поруч + rename), прострочене відкидається при кожному
 // зверненні; тимчасові файли, що лишились після падіння процесу між записом і rename, прибирає prune().
 //   <dataDir>/callbacks.json     {v:1, pending:[{id, managerKey, clientNumber, gcid, serviceRequestId, card, ts,
-//                                  attempts?, lastTriedAt?, missed?, note?}], dials:{<E.164>:[ts…]}}
+//                                  attempts?, lastTriedAt?, missed?, note?, until?, afterHoursUrgent?, ownerUid?}], dials:{<E.164>:[ts…]}}
 //                                — note: питання клієнта, записане ШІ-співрозмовником ({question, topic, urgent})
+//                                — until: мс, до яких запис живе й після TTL (не менше восьми робочих годин; уночі —
+//                                  також до 18:00 наступного робочого дня; рахує hours.mjs)
 //                                — pending: клієнт не дочекався менеджера («лінія зайнята, передзвонить») або поклав
 //                                  трубку, поки менеджеру дзвонили (missed); TTL callbackTtlHours (24). attempts /
 //                                  lastTriedAt — невдалі передзвони (клієнт не взяв); після maxAttempts запис знімається.
@@ -12,7 +14,7 @@
 //   <dataDir>/last-clients.json  {v:1, managers:{<managerKey>:{number, gcid, srId, ts}}}
 //                                — останній клієнт, якого менеджеру пропонували (дзвінок дійшов до картки); TTL 30 діб
 // Ключ менеджера — перший номер його групи з VG_MANAGERS, але шукаємо записи за ВСІЄЮ групою: переставили номери
-// («907=0676575085» ↔ «0676575085=907») — записи не губляться.
+// («907=0500000007» ↔ «0500000007=907») — записи не губляться.
 // Без dataDir (тести) — те саме в пам'яті.
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -24,6 +26,7 @@ export const LAST_CLIENTS_FILE = 'last-clients.json'
 const TMP_RE = /^(callbacks|last-clients)\.json\.\d+\.[0-9a-f]+\.tmp$/
 const TMP_MAX_AGE_MS = 5 * 60000 // тимчасовий файл старший — його запис точно не йде
 const DAY_MS = 86400000
+const ownerId = (value) => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value.trim()) ? value.trim() : null
 
 // user-частина SIP URI: «sip:907@sip14.binotel.com;transport=udp» → «907»; не URI — як є
 export function uriUser(v) {
@@ -33,8 +36,8 @@ export function uriUser(v) {
 }
 
 // Український номер ЦІЛКОМ — +380XXXXXXXXX, 380XXXXXXXXX або 0XXXXXXXXX (пробіли, дужки, дефіси, крапки
-// дозволені) → «+380XXXXXXXXX»; інакше null. Без пошуку підрядка, як у normPhone: «+49 30 380676575085» чи
-// «+1380676575085» — НЕ +380676575085 (інакше чужий іноземний номер із цими цифрами всередині пройшов би за
+// дозволені) → «+380XXXXXXXXX»; інакше null. Без пошуку підрядка, як у normPhone: «+49 30 380500000007» чи
+// «+1380500000007» — НЕ +380500000007 (інакше чужий іноземний номер із цими цифрами всередині пройшов би за
 // менеджера чи за дозволеного клієнта).
 export function strictPhone(v) {
   const s = String(v ?? '').trim().replace(/[\s().-]/g, '')
@@ -47,7 +50,7 @@ export function strictPhone(v) {
 export const isInternalKey = (k) => /^\d{3,4}$/.test(String(k ?? ''))
 
 // Ключ абонента для порівняння: внутрішня лінія (3–4 цифри) — як є, інакше телефон у E.164 (strictPhone); не номер —
-// null. «0676575085», «380676575085», «sip:0676575085@sip14…» → «+380676575085».
+// null. «0500000007», «380500000007», «sip:0500000007@sip14…» → «+380500000007».
 export function partyKey(v) {
   const s = uriUser(v).trim()
   if (isInternalKey(s)) return s
@@ -55,7 +58,7 @@ export function partyKey(v) {
 }
 
 // VG_MANAGERS: менеджери через кому; номери однієї людини (внутрішня лінія й мобільний) — через «=»:
-// «907=0676575085,905» → [['907', '+380676575085'], ['905']]. Ключ менеджера — перший номер його групи.
+// «907=0500000007,905» → [['907', '+380500000007'], ['905']]. Ключ менеджера — перший номер його групи.
 export function parseManagers(spec) {
   return String(spec ?? '')
     .split(/[,;\s]+/)
@@ -110,6 +113,8 @@ export function makeCallbackStore({ dataDir = null, callbackTtlHours = 24, lastC
   const pendingTtl = () => ttl(callbackTtlHours, 3600000)
   const lastTtl = () => ttl(lastClientTtlDays, DAY_MS)
   const fresh = (ts, ttlMs) => Number.isFinite(Number(ts)) && now() - Number(ts) < ttlMs
+  // Передзвін живий: молодший за TTL або ще не настав його until (нічний перезвін — до 18:00 наступного робочого дня)
+  const pendingLive = (x) => fresh(x.ts, pendingTtl()) || (Number.isFinite(Number(x.until)) && now() < Number(x.until))
   const limit = (v) => (Number(v) > 0 ? Number(v) : Infinity)
 
   const emptyOf = (kind) => (kind === 'pending' ? { pending: [], dials: {} } : {})
@@ -164,7 +169,7 @@ export function makeCallbackStore({ dataDir = null, callbackTtlHours = 24, lastC
   // Відкладені передзвони й історія наборів без простроченого (прострочене одразу прибираємо і з диска)
   function livePending() {
     const all = read('pending')
-    const pending = all.pending.filter((x) => fresh(x.ts, pendingTtl()))
+    const pending = all.pending.filter(pendingLive)
     const dials = {}
     let dropped = pending.length !== all.pending.length
     for (const [n, list] of Object.entries(all.dials)) {
@@ -201,19 +206,23 @@ export function makeCallbackStore({ dataDir = null, callbackTtlHours = 24, lastC
 
   const store = {
     // Новий відкладений передзвін. Той самий клієнт у того самого менеджера — лише один запис, найсвіжіший (і лічильник
-    // невдалих спроб — з нуля: клієнт подзвонив знову).
-    addPending({ managerKey, clientNumber, gcid = null, serviceRequestId = null, card = null, missed = false, note = null, ts = now() }) {
+    // невдалих спроб — з нуля: клієнт подзвонив знову). until — не прострочувати раніше (обіцянка «у робочий час»); у
+    // заміненого запису until пізніший — лишаємо його (обіцянку вже дано).
+    addPending({ managerKey, clientNumber, gcid = null, serviceRequestId = null, card = null, missed = false, note = null, until = null, afterHoursUrgent = false, ownerUid = null, ts = now() }) {
       const number = strictPhone(clientNumber)
       if (!managerKey || !number) throw new Error('callback: need managerKey and E.164 clientNumber')
-      const entry = { id: `${Number(ts).toString(36)}-${crypto.randomBytes(3).toString('hex')}`, managerKey, clientNumber: number, gcid: gcid ?? null, serviceRequestId: serviceRequestId ?? null, card: card ?? null, ts: Number(ts), ...(missed ? { missed: true } : {}), ...(note ? { note } : {}) }
       const live = livePending()
+      const prev = live.pending.find((x) => x.managerKey === managerKey && x.clientNumber === number)
+      const keep = Math.max(Number(until) || 0, Number(prev?.until) || 0)
+      const uid = ownerId(ownerUid) || ownerId(prev?.ownerUid)
+      const entry = { id: `${Number(ts).toString(36)}-${crypto.randomBytes(3).toString('hex')}`, managerKey, clientNumber: number, gcid: gcid ?? null, serviceRequestId: serviceRequestId ?? null, card: card ?? null, ts: Number(ts), ...(missed ? { missed: true } : {}), ...(note ? { note } : {}), ...(keep > Number(ts) ? { until: keep } : {}), ...(afterHoursUrgent || prev?.afterHoursUrgent ? { afterHoursUrgent: true } : {}), ...(uid ? { ownerUid: uid } : {}) }
       live.pending = live.pending.filter((x) => !(x.managerKey === managerKey && x.clientNumber === number))
       live.pending.push(entry)
       write('pending', live)
       return entry
     },
     // Дописати те, що стало відомо пізніше (пошук клієнта закінчився вже після рішення «лінія зайнята»)
-    updatePending(id, { gcid, serviceRequestId, card, note } = {}) {
+    updatePending(id, { gcid, serviceRequestId, card, note, afterHoursUrgent, ownerUid } = {}) {
       const live = livePending()
       const e = live.pending.find((x) => x.id === id)
       if (!e) return false
@@ -221,6 +230,12 @@ export function makeCallbackStore({ dataDir = null, callbackTtlHours = 24, lastC
       if (serviceRequestId !== undefined) e.serviceRequestId = serviceRequestId
       if (card !== undefined) e.card = card
       if (note !== undefined) e.note = note
+      if (afterHoursUrgent === true) e.afterHoursUrgent = true
+      if (ownerUid !== undefined) {
+        const uid = ownerId(ownerUid)
+        if (uid) e.ownerUid = uid
+        else delete e.ownerUid
+      }
       write('pending', live)
       return true
     },
@@ -263,11 +278,12 @@ export function makeCallbackStore({ dataDir = null, callbackTtlHours = 24, lastC
       const inGroup = keyTest(keys)
       return livePending().pending.filter((x) => inGroup(x.managerKey)).sort(queueOrder)
     },
-    setLastClient(managerKey, { number, gcid = null, srId = null, ts = now() } = {}) {
+    setLastClient(managerKey, { number, gcid = null, srId = null, ownerUid = null, ts = now() } = {}) {
       const n = strictPhone(number)
       if (!managerKey || !n) return false
       const all = liveLast()
-      all[managerKey] = { number: n, gcid: gcid ?? null, srId: srId ?? null, ts: Number(ts) }
+      const uid = ownerId(ownerUid)
+      all[managerKey] = { number: n, gcid: gcid ?? null, srId: srId ?? null, ts: Number(ts), ...(uid ? { ownerUid: uid } : {}) }
       write('last', all)
       return true
     },
@@ -298,9 +314,9 @@ export function makeCallbackStore({ dataDir = null, callbackTtlHours = 24, lastC
     pickTarget(keys, { skip = null } = {}) {
       const ok = (n) => !skip || !skip(n)
       const p = store.listPending(keys).find((x) => ok(x.clientNumber))
-      if (p) return { source: 'pending', id: p.id, number: p.clientNumber, gcid: p.gcid ?? null, serviceRequestId: p.serviceRequestId ?? null, ts: p.ts, attempts: Number(p.attempts) || 0 }
+      if (p) return { source: 'pending', id: p.id, number: p.clientNumber, gcid: p.gcid ?? null, serviceRequestId: p.serviceRequestId ?? null, ts: p.ts, attempts: Number(p.attempts) || 0, ...(ownerId(p.ownerUid) ? { ownerUid: ownerId(p.ownerUid) } : {}) }
       const l = store.getLastClient(keys)
-      if (l && ok(l.number)) return { source: 'last', id: null, number: l.number, gcid: l.gcid ?? null, serviceRequestId: l.srId ?? null, ts: l.ts, attempts: 0 }
+      if (l && ok(l.number)) return { source: 'last', id: null, number: l.number, gcid: l.gcid ?? null, serviceRequestId: l.srId ?? null, ts: l.ts, attempts: 0, ...(ownerId(l.ownerUid) ? { ownerUid: ownerId(l.ownerUid) } : {}) }
       return null
     },
     // Ключі менеджерів у файлах, яких немає серед поточних груп (VG_MANAGER / VG_MANAGERS змінили): шлюз попереджає

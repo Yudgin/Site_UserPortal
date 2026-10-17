@@ -87,6 +87,27 @@
 // диспетчера): VG_AI_BREAKER збоїв ШІ за вікно → на час шлюз по-старому. Немає фабрики ШІ або рушій без звуку — старий
 // режим.
 //
+// ВСТУП 80 І ЗАПИС (черга B, черновик сегментів 5а): 80 — перша фраза в УСІХ гілках answerMode ai (обговорення, ШІ, ШІ
+// не піднявся, запобіжник: там 80, потім 82 замість старого 04-short), уночі повний варіант (prompts.intro), днём короткий
+// (prompts.introShort), як у 00; у ньому оголошення про запис з метою. Поки 80 не догра — ні з'єднання з людиною (REFER
+// чекає його кінця, фаза xferWait), ні мови ШІ. Не прозвучав — перші слова ШІ AI-FALLBACK-GREETING (aiprompt.mjs).
+//
+// ОБГОВОРЕННЯ (черга B, VG_DS_SOURCE; route.mjs). Після 80 фаза route чекає ще й обговорення: test — VG_DS_TEST; calls —
+// останні дзвінки головної відкритої заявки (appCalls, бюджет dsCallsBudgetMs, не встигли — «обговорення немає»); field /
+// auto — поле discussion заявки. routeFor: ніч з обговоренням — ШІ discussion_after_hours (перезвін ведучому, до 18:00
+// наступного робочого дня); pending_call / пауза ведучого (staffState) / ведучий зайнятий іншим дзвінком шлюзу (staffBusy) /
+// ключа немає в VG_MANAGERS — ШІ discussion_unavailable (ведучому не дзвонимо, пропуск не рахуємо, перезвін ведучому, а без
+// ключа — у групу VG_MANAGER; В19: з'єднати з оператором — лише при претензії, гарантії чи небезпеці); інакше — гілка
+// discussion: фраза 13/14/15 (тег 'ds'; немає 13/14 — 15; немає жодної — одразу гудки) і ОДНОЧАСНО набір ведучого
+// (dsRingSec, повтори при 503, картка MGR-DS-CARD, «1»). Після фрази — гудки; клієнт чекає не довше dsMaxWaitSec. «1» під
+// час фрази — REFER після її кінця (не пізніше dsXferWaitMs). Ведучий узяв — пропуски з нуля, перезвони знято, подія
+// answered. Не взяв / «2» / без «1» / клієнт чекав довше — пропуск +1 (486 — ні), перезвін у групу ведучого, фраза 16
+// (тег 'dsFailed', без відбою) → ШІ discussion_failed (повторно не з'єднує, VG_DS_AI_TRANSFER=0); ШІ недоступний — 17 і
+// відбій (ds_callback). missMax пропусків поспіль — пауза pauseMin хв (далі discussion_unavailable з why paused). Клієнт
+// поклав під час фрази чи гудків — пропущений перезвін ведучому, без пропуску. Ведучий передзвонив на 901, поки клієнт із
+// ШІ чи поки шлюз дзвонить йому, — приєднання (як нижче). Події для сервера режиму — routeEvent (routeevents.mjs, типово
+// вимкнено). Перезвін, поставлений у неробочий час, живе щонайменше до 18:00 наступного робочого дня (і в старому режимі).
+//
 // ПРИЄДНАННЯ МЕНЕДЖЕРА, що передзвонив (joinOnCallback, VG_JOIN_ON_CALLBACK=1). Менеджер (managerCaller без PIN)
 // дзвонить на шлюз, а клієнт «чекає саме його» (рішення 16): фаза ai і перезвін у групі менеджера (цього дзвінка або ще
 // з попереднього — у callbacks.json), або шлюз зараз набирає цього менеджера для нього. Двоє таких — той, кого цьому
@@ -123,9 +144,10 @@
 // (callback_cancelled).
 import { clientDialUri, isInternalKey, managerGroupOf, managerKeyOf, partyKey, resolveManagers, strictPhone } from './callbacks.mjs'
 import { validPin } from './config.mjs'
-import { requestStatusFor } from './aiprompt.mjs'
-import { inHours } from './hours.mjs'
-import { hidePhones } from './card.mjs'
+import { requestStatusFor, stripVoiceTags, speakable, CALLBACK_PROMISE, LINK_MANAGER, LINK_ACCEPTED } from './aiprompt.mjs'
+import { inHours, callbackUntilMs } from './hours.mjs'
+import { hidePhones, dsCardText } from './card.mjs'
+import { discussionFor, dsRequestFor, dsNeedsCalls, resolveLead, routeFor, dsJournal } from './route.mjs'
 
 const ok2xx = (c) => Number(c) >= 200 && Number(c) < 300
 const NO_ANSWER_MODES = ['busy', 'fallback', 'voicemail', 'ai']
@@ -206,6 +228,20 @@ const JOIN_ACK_MS = 8000 // приєднання: нога менеджера п
 const JOIN_CAP_MS = 20000 // приєднання: фрази не скінчились за стільки — з'єднуємо все одно
 const JOIN_Q_WAIT_MS = 2000 // питання клієнта менеджеру — лише якщо синтез готовий за стільки від приєднання
 const JOIN_TIMERS = ['joinAck', 'joinCap', 'joinGrace', 'joinClient', 'joinMgr', 'joinQ', 'joinGreeting']
+const INTRO_XFER_WAIT_MS = 15000 // «1» під час вступу 80 (запобіжник): REFER після нього, але не пізніше
+const SUMMARY_MAX = 150 // резюме для менеджера, що приєднується (MGR-JOIN), — коротке, без телефонів
+const TIMEOUT = Symbol('timeout')
+const AI_KINDS = ['first', 'after_hours', 'discussion_failed', 'discussion_unavailable', 'discussion_after_hours']
+// Резюме звернення для MGR-JOIN: без телефонів, ≤ SUMMARY_MAX знаків по межі слова, без розділового знака в кінці
+export const joinSummary = (q) => {
+  let t = hidePhones(String(q ?? '')).replace(/\s+/g, ' ').trim()
+  if (t.length > SUMMARY_MAX) {
+    t = t.slice(0, SUMMARY_MAX)
+    const i = t.lastIndexOf(' ')
+    if (i > SUMMARY_MAX / 2) t = t.slice(0, i)
+  }
+  return t.replace(/[\s.,;:!?…—–-]+$/, '')
+}
 
 // Запобіжник ШІ (режим «ШІ одразу»): fails збоїв за windowMs → offMs шлюз працює по-старому (спершу менеджер). Спільний
 // для всіх дзвінків — його тримає диспетчер.
@@ -228,7 +264,10 @@ export function makeBreaker(spec, clock, log = () => {}) {
   }
 }
 
-export function createFlow({ incoming, config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, callbacks = null, partyBusy = null, ai = null, log = () => {}, onDone = () => {}, onExtra = () => {}, rejectReason = null, breaker = null, joinBusy = false }) {
+// Черга B: staffState — пропуски й пауза ведучих (staffstate.mjs); staffBusy(group) — чи ведучий зараз на іншому дзвінку
+// шлюзу (дає диспетчер); appCalls(srId) → дзвінки заявки | null (lookup.mjs recentAppCalls); routeEvent(e) — подія для
+// сервера режиму обговорення (routeevents.mjs; null — вимкнено)
+export function createFlow({ incoming, config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, callbacks = null, partyBusy = null, ai = null, log = () => {}, onDone = () => {}, onExtra = () => {}, rejectReason = null, breaker = null, joinBusy = false, staffState = null, staffBusy = null, appCalls = null, routeEvent = null, resendLink = null }) {
   const A = incoming.call
   const number = String(incoming.number ?? '').trim()
   const gcid = incoming.gcid ?? null
@@ -258,9 +297,12 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // повідомить — тоді «не підтвердив», а не переведення наосліп (gateway.mjs з таким рушієм і не стартує).
   const confirmOn = !callback && config.confirmEnabled !== false
   const prompt = (name) => config.prompts?.[name] || null
-  // Під цим ключем — відкладені передзвони і «останній клієнт» менеджера, якому дзвонимо; шукаємо — за всією групою
-  const mgrKey = managerKeyOf(config.managerUri, managers) || partyKey(config.managerUri)
-  const mgrGroup = managerGroupOf(config.managerUri, managers) || (mgrKey ? [mgrKey] : [])
+  // Під цим ключем — відкладені передзвони і «останній клієнт» менеджера, якому дзвонимо; шукаємо — за всією групою.
+  // Типово — лінія менеджера (загальна група, «оператор»); у гілці обговорення — ведучий (setTarget)
+  const opKey = managerKeyOf(config.managerUri, managers) || partyKey(config.managerUri)
+  const opGroup = managerGroupOf(config.managerUri, managers) || (opKey ? [opKey] : [])
+  let mgrKey = opKey
+  let mgrGroup = opGroup
   const referOnClient = callback && config.callbackReferOn === 'client'
   const targets = {
     manager: { uri: config.managerUri, timeoutSec: config.managerTimeoutSec, prefix: 'mgr', retry: true },
@@ -336,6 +378,9 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   let aiInfo = null
   let aiS = null
   let aiRound = 0
+  let afterHoursUrgent = false
+  let resendP = null
+  let resendAccepted = false
   // «ШІ одразу»: v2 — цей дзвінок іде в новому режимі (вирішується на старті: answerMode ai, ШІ доступний, запобіжник
   // закритий); route — рішення фази route (у журнал); intro — вступ 80: none | wait | playing | done | failed (рушій не
   // зіграв); aiDownRound — набір менеджера після 82 (ШІ не піднявся); aiDownPlay — фраза 82: playing | done
@@ -348,6 +393,27 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // result, client, mgr, q, qFile, entryDone, marks}; joinsCount — скільки разів приєднували за дзвінок
   let join = null
   let joinsCount = 0
+  // Черга B. ds — обговорення (route.mjs) з ведучим ds.lead; dsWhy — чому його немає / чому ведучому не дзвонили; dsDone —
+  // дані обговорення готові (або не потрібні); dsLate — рішення вже без них; dsRound — зараз дзвонимо ведучому; dsPlay —
+  // фраза 13/14/15 на A: wait | playing | done; dsPhrase — яка (dsTalked | dsCalled | dsGeneral | none); dsResult — {miss,
+  // why, misses, paused}; dsServed — ведучий узяв (пропуски скинуто); xferGate — «1» натиснуто, REFER чекає кінця фрази;
+  // pre — проміжна фраза без відбою {name, then, state}; greetIntro — замість 04-short грає 80 (запобіжник); classicDown — після
+  // 80 прозвучала 82; routeSent — надіслані події route-event
+  const dsOn = config.answerMode === 'ai' && !!config.dsSource && config.dsSource !== 'off'
+  let ds = null
+  let dsWhy = null
+  let dsDone = !dsOn
+  let dsLate = false
+  let dsRound = false
+  let dsPlay = null
+  let dsPhrase = null
+  let dsResult = null
+  let dsServed = false
+  let xferGate = null
+  let pre = null
+  let greetIntro = false
+  let classicDown = false
+  const routeSent = []
   const tm = {} // іменовані таймери
 
   const mark = (k) => { if (marks[k] == null) marks[k] = clock.now() - t0 }
@@ -383,10 +449,22 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   const legReady = (leg) => leg.confirmed && (leg.media || leg.grace)
   // На A вже не граємо привітання/утримання: розмова, пошта, остання фраза або дзвінок скінчився
   const clientBusy = () => phase === 'bridged' || phase === 'connected' || phase === 'voicemail' || phase === 'notice' || phase === 'ai' || phase === 'done' ||
-    phase === 'route' || phase === 'joining' || phase === 'joinGone'
-  // Що грати клієнту, поки дзвонимо менеджеру: гудки (VG_HOLD_TONE=ringback) — у нових гілках (набір на прохання ШІ і
-  // після 82), інакше — звичне утримання
-  const holdFileNow = () => (config.holdTone === 'ringback' && config.ringbackFile && (aiRound > 0 || aiDownRound) ? config.ringbackFile : config.holdFile)
+    phase === 'route' || phase === 'joining' || phase === 'joinGone' || phase === 'prelude' || phase === 'xferWait'
+  // Що грати клієнту, поки дзвонимо менеджеру: гудки (VG_HOLD_TONE=ringback) — у нових гілках (набір на прохання ШІ, після
+  // 82, у тому числі після 80 + 82 запобіжника), інакше — звичне утримання. Ведучому в обговоренні — завжди гудки, якщо файл є
+  const holdFileNow = () => (config.ringbackFile && (dsRound || (config.holdTone === 'ringback' && (aiRound > 0 || aiDownRound || classicDown))) ? config.ringbackFile : config.holdFile)
+  // Неробочий час за розкладом (для варіанта фраз: уночі повний, днём короткий — як у 00)
+  const nightNow = () => !!config.workHours?.length && !inHours(config.workHours, new Date(clock.now()), config.timeZone || 'Europe/Kyiv')
+  // Клієнтська фраза з двома варіантами: name — повний (уночі), nameShort — короткий (днём); є лише один — граємо його
+  const pickVariant = (name) => (name ? (nightNow() ? prompt(name) || prompt(`${name}Short`) : prompt(`${name}Short`) || prompt(name)) : null)
+  // Ціль набору: ведучий обговорення (setTarget) або знову загальна група (setOperator)
+  const setTarget = ({ uri, key, group, timeoutSec }) => {
+    targets.manager.uri = uri
+    targets.manager.timeoutSec = timeoutSec ?? config.managerTimeoutSec
+    mgrKey = key
+    mgrGroup = group
+  }
+  const setOperator = () => setTarget({ uri: config.managerUri, key: opKey, group: opGroup, timeoutSec: config.managerTimeoutSec })
   // Клієнт прямо відмовився від передзвону (save_question_for_manager callback:false), і передзвону зараз немає
   const callbackRefused = () => !pendingCb?.stored && (!!pendingCb?.removed || aiInfo?.note?.callback === false)
 
@@ -413,7 +491,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       say('менеджер перезванивает, а клиента уже соединяют — сообщаю и кладу трубку')
       return notice('mgrJoinBusy', 'callback_join_busy')
     }
-    if (!callback && firstOn()) {
+    if (!callback && config.answerMode === 'ai') {
       v2 = true
       return startRoute()
     }
@@ -451,17 +529,50 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     say('принят, режим «ИИ сразу»')
     cardP = prepareCard({ synth: false }) // картку синтезуємо, лише коли справді дзвонитимемо менеджеру
     infoP.then(() => maybeDecide())
-    intro = prompt('intro') ? 'wait' : 'none'
-    if (intro === 'none') later('routeData', AI_INFO_WAIT_MS, () => decide('timeout'))
-    later('routeCap', ROUTE_CAP_MS, () => decide('cap'))
+    loadDiscussion()
+    intro = pickVariant('intro') ? 'wait' : 'none'
+    // без вступу дані чекаємо AI_INFO_WAIT_MS від відповіді (з дзвінками заявки — ще їх бюджет)
+    if (intro === 'none') later('routeData', AI_INFO_WAIT_MS + (dsOn && ['calls', 'auto'].includes(config.dsSource) ? Math.max(0, Number(config.dsCallsBudgetMs ?? 600) || 0) : 0), () => decide('timeout'))
+    later('routeCap', ROUTE_CAP_MS, () => (intro === 'playing' || intro === 'wait' ? introFailedClosed() : decide('cap')))
     maybeIntro()
   }
 
   function maybeIntro() {
     if (phase !== 'route' || intro !== 'wait' || legA.down || !legReady(legA)) return
     intro = 'playing'
-    send({ cmd: 'play', call: A, file: prompt('intro'), loop: false, tag: 'intro' })
+    send({ cmd: 'play', call: A, file: pickVariant('intro'), loop: false, tag: 'intro' })
     mark('intro')
+  }
+
+  // Обговорення (VG_DS_SOURCE): після пошуку клієнта — дзвінки головної відкритої заявки (лише calls / auto без поля),
+  // не довше dsCallsBudgetMs; далі route.mjs. Рішення вже прийняте без них (dsLate) — результат ігноруємо.
+  function loadDiscussion() {
+    if (!dsOn) return
+    infoP.then(async () => {
+      const sr = dsRequestFor(lookupState === 'ok' ? lookupRes : null, clock.now())
+      let calls = null
+      if (dsNeedsCalls(config, sr) && appCalls) {
+        const budget = Math.max(0, Number(config.dsCallsBudgetMs ?? 600) || 0)
+        calls = await Promise.race([
+          Promise.resolve().then(() => appCalls(sr.id)).catch((e) => { err('ds_calls', e?.message); return null }),
+          new Promise((resolve) => { later('dsCalls', budget, () => resolve(TIMEOUT)) }),
+        ])
+        cancel('dsCalls')
+        if (calls === TIMEOUT) {
+          calls = null
+          err('ds_calls', `timeout ${budget} ms`)
+        }
+        mark('dsCallsDone')
+      }
+      if (done || dsLate) return
+      const r = discussionFor({ lookup: lookupState === 'ok' ? lookupRes : null, appCalls: calls, phone, nowMs: clock.now(), config })
+      ds = r.ds
+      dsWhy = r.why
+      if (ds) ds.lead = resolveLead({ ds, config, managers })
+      dsDone = true
+      mark('dsDone')
+      maybeDecide()
+    })
   }
 
   // failed — рушій не зміг зіграти вступ (файл пошкоджений / недоступний): клієнт його не чув, тож ШІ почне з «Вітаю! Це
@@ -470,26 +581,71 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     if (phase !== 'route' || intro !== 'playing') return
     intro = failed ? 'failed' : 'done'
     mark(failed ? 'introFailed' : 'introDone')
-    if (infoDone) return decide('data')
+    if (infoDone && dsDone) return decide('data')
     later('routeData', Math.max(0, Number(config.routeDecideGraceMs ?? 1000) || 0), () => decide('timeout'))
   }
 
   function maybeDecide() {
-    if (phase !== 'route' || intro === 'wait' || intro === 'playing') return
+    if (phase !== 'route' || intro === 'wait' || intro === 'playing' || !infoDone || !dsDone) return
     decide('data')
   }
 
-  // Гілка (рішення 2 і п. 3 записки): неробочий час — after_hours; інакше ШІ first із першою фразою за даними
+  // Гілка (рішення 2 і п. 3 записки; route.mjs routeFor): неробочий час — after_hours (з обговоренням —
+  // discussion_after_hours); обговорення — discussion або discussion_unavailable; інакше ШІ first із першою фразою за даними
   function decide(by) {
     if (phase !== 'route' || done) return
     cancel('routeData')
     cancel('routeCap')
+    cancel('dsCalls')
     route.decidedBy = by
     route.dataMs = infoDone ? marks.lookupDone ?? null : null
-    if (aiAfterHours()) {
+    if (!dsDone) {
+      // дзвінки заявки не встигли до рішення — «обговорення немає» (п. 3: дані не встигли)
+      dsDone = true
+      dsLate = true
+      ds = null
+      dsWhy = 'timeout'
+    }
+    const lead = ds?.lead ?? null
+    // Запобіжник і відсутній провайдер теж проходять 80; уночі людям не дзвонимо.
+    if (!firstOn() && (!ds || breaker?.open)) {
+      route.branch = 'classic'
+      route.why = breaker?.open && aiReady() ? 'breaker' : 'no_ai'
+      if (intro !== 'done') return introFailedClosed()
+      if (nightNow() && config.aiAfterHours !== false) {
+        if (ds) dsCallbackTarget()
+        savePending()
+        return notice(pendingCb?.stored ? 'aiDownNight' : null, 'ai_failed_callback')
+      }
+      return aiDownConnect(route.why)
+    }
+    // Без 80 клієнт спершу має почути AI-FALLBACK-GREETING; прямий набір ведучого не починаємо.
+    if (ds && intro !== 'done') {
+      route.branch = nightNow() ? 'discussion_after_hours' : 'discussion_unavailable'
+      route.why = 'recording_notice_missing'
+      dsCallbackTarget()
+      return startAi(route.branch)
+    }
+    const paused = !!lead?.key && (isPaused(lead.key) || (ds.suspendedUntil != null && ds.suspendedUntil > clock.now()))
+    const busy = !!lead?.group && !!staffBusy?.(lead.group)
+    const r = routeFor({ afterHours: aiAfterHours(), ds, lead, paused, busy })
+    if (r.branch === 'after_hours') {
       route.branch = 'after_hours'
       say('нерабочее время — отвечает ИИ')
       return startAi('after_hours')
+    }
+    if (r.branch === 'discussion_after_hours' || r.branch === 'discussion_unavailable') {
+      route.branch = r.branch
+      route.why = r.why
+      dsCallbackTarget()
+      say(r.branch === 'discussion_after_hours'
+        ? `обсуждение, нерабочее время — отвечает ИИ, перезвон ${lead?.group ? 'ведущему' : 'в общую группу'}`
+        : `обсуждение, ведущему не звоню (${{ pending_call: 'он сейчас звонит клиенту из приложения', paused: 'пауза после пропусков', owner_busy: 'он на другом звонке шлюза', no_key: 'неизвестно, кому звонить', not_in_managers: 'его нет в VG_MANAGERS', bad_uri: 'номер непригоден для набора' }[r.why] || r.why}) — отвечает ИИ`)
+      return startAi(r.branch)
+    }
+    if (r.branch === 'discussion') {
+      route.branch = 'discussion'
+      return startDiscussion(r.opener)
     }
     // Даних немає: пошук не встиг, вимкнений або впав. lookup.mjs на тайм-аут і помилку відповідає null, а «номера немає в
     // базі» — це об'єкт із порожніми списками, тож null (lookupState 'none') — теж «даних немає», а не «заявки немає»
@@ -500,6 +656,246 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     if (variant === 'nodata') route.why = !infoDone ? 'timeout' : 'no_data'
     startAi('first', { variant })
   }
+
+  // ---------- обговорення: фраза 13/14/15 і дзвінок ведучому (черга B) ----------
+
+  const isPaused = (key) => {
+    try {
+      return !!staffState?.isPaused?.(key, { uid: ds?.lead?.uid ?? null })
+    } catch (e) {
+      err('staff', e?.message)
+      return false
+    }
+  }
+  // Перезвін у гілках ШІ з обговоренням — ведучому (ключ є в VG_MANAGERS), інакше загальній групі VG_MANAGER
+  const dsCallbackTarget = () => (ds?.lead?.group ? setTarget({ uri: ds.lead.uri || config.managerUri, key: ds.lead.key, group: ds.lead.group, timeoutSec: config.managerTimeoutSec }) : setOperator())
+  // Куди піде перезвін (для інструкцій ШІ): ведучому — 'lead', загальній групі — 'group' (тоді «я передам йому» — неправда)
+  const callbackTo = () => (ds?.lead?.group && (pendingCb?.stored ? ds.lead.group.includes(pendingCb.managerKey) : ds.lead.group.includes(mgrKey)) ? 'lead' : 'group')
+  // Фраза гілки: 13 talked / 14 called / 15 general; немає 13 чи 14 — 15; немає жодної — null (гудки)
+  function dsPhraseFile(kind) {
+    const name = { talked: 'dsTalked', called: 'dsCalled' }[kind] || 'dsGeneral'
+    const f = pickVariant(name)
+    if (f) return { name, file: f }
+    const g = name !== 'dsGeneral' ? pickVariant('dsGeneral') : null
+    return g ? { name: 'dsGeneral', file: g } : null
+  }
+
+  function startDiscussion(kind) {
+    const lead = ds.lead
+    setTarget({ uri: lead.uri, key: lead.key, group: lead.group, timeoutSec: Math.max(1, Number(config.dsRingSec) || 20) })
+    dsRound = true
+    target = 'manager'
+    phase = 'dialing'
+    stageAt = null
+    legB = null
+    cardStarted = false
+    cardPlaying = false
+    xferAccepted = false
+    xferWaits = 0
+    confirm = null
+    mark('ds')
+    cardP = prepareDsCard(kind)
+    const f = dsPhraseFile(kind)
+    dsPhrase = f?.name || 'none'
+    dsPlay = f ? 'wait' : 'done'
+    say(`обсуждение (${kind}${ds.source ? `, ${ds.source}` : ''}): ${f ? `фраза ${{ dsTalked: '13', dsCalled: '14', dsGeneral: '15' }[f.name]} и ` : 'фразы нет — гудки, '}звоню ведущему (${config.dsRingSec ?? 20} с)`)
+    emitRoute('route')
+    if (f) maybeDsPhrase()
+    else {
+      startHold()
+      dsWaitStart()
+    }
+    dial() // одразу, одночасно з фразою (рішення 12): REFER — лише після її кінця
+  }
+
+  function maybeDsPhrase() {
+    if (dsPlay !== 'wait' || legA.down || !legReady(legA)) return
+    const f = dsPhraseFile(ds?.kind)
+    if (!f) {
+      dsPlay = 'done'
+      return onDsPlayed(true)
+    }
+    dsPlay = 'playing'
+    send({ cmd: 'play', call: A, file: f.file, loop: false, tag: 'ds' })
+    mark('dsPhrase')
+    later('dsPlay', PROMPT_MAX_MS, () => onDsPlayed())
+  }
+
+  // Фразу 13/14/15 дограно: «1» чекало — REFER; ведучий уже відмовив — 16; інакше гудки й відлік очікування клієнта
+  function onDsPlayed(force = false) {
+    if (!force && dsPlay !== 'playing') return
+    dsPlay = 'done'
+    cancel('dsPlay')
+    mark('dsPhraseDone')
+    if (xferGate?.gate === 'ds') return releaseXferGate()
+    if (phase === 'prelude') return maybePre()
+    if (phase === 'joining') return maybeJoinClient()
+    if (dsRound && ['dialing', 'card', 'confirm'].includes(phase)) {
+      startHold()
+      dsWaitStart()
+    }
+  }
+
+  // Клієнт після фрази чекає ведучого не довше dsMaxWaitSec — далі «не вдалося» (пропуск)
+  function dsWaitStart() {
+    if (!dsRound || tm.dsWait != null) return
+    const sec = Math.max(1, Number(config.dsMaxWaitSec) || 30)
+    later('dsWait', sec * 1000, () => {
+      if (!dsRound || !['dialing', 'card', 'confirm'].includes(phase)) return
+      say(`клиент ждёт ведущего после фразы дольше ${sec} с`)
+      stageFailed('manager_ds_wait')
+    })
+  }
+
+  // Картка ведучому: MGR-DS-CARD за причиною + «Заявка {номер}, {ім'я}» + brief.voice (поле обговорення)
+  function prepareDsCard(kind) {
+    return infoP.then(() => {
+      const text = dsCardText({ kind, lookup: lookupRes, srId: ds?.srId || serviceRequestId, voice: ds?.voice })
+      if (!tts || !text || done) return null
+      return Promise.resolve().then(() => tts(text)).then((r) => (r && r.file ? r : null), (e) => {
+        err('tts', e?.message)
+        return null
+      })
+    })
+  }
+
+  // Ведучий не прийняв дзвінок: пропуск (крім 486 — зайнятий), перезвін у його групу, фраза 16 без відбою → ШІ
+  // discussion_failed; ШІ недоступний — 17 і відбій. noMiss — ведучий приєднався й поклав (не пропуск).
+  function dsFailed(why, { noMiss = false } = {}) {
+    dsRound = false
+    cancel('dsWait')
+    // ведучий натиснув «1», а переведення технічно не вдалося, — він узяв, це не пропуск
+    const confirmed = confirms.manager?.digit === String(config.confirmDigit ?? '1')
+    const miss = !noMiss && !confirmed && !/_486$/.test(String(why))
+    let st = null
+    if (miss && staffState && ds?.lead?.key) {
+      try {
+        st = staffState.miss(ds.lead.key, { uid: ds.lead.uid ?? null })
+      } catch (e) {
+        err('staff', e?.message)
+      }
+    }
+    dsResult = { miss, why, ...(st ? { misses: st.misses } : {}), ...(st?.paused ? { paused: true, pausedUntil: new Date(st.pausedUntil).toISOString() } : {}) }
+    if (miss) emitRoute('fallback')
+    if (!pendingCb?.stored && !callbackRefused()) savePending()
+    say(`ведущий не принял звонок (${why})${miss ? ` — пропуск${st?.paused ? `, ${config.dsMissMax ?? 2} подряд: пауза ${config.dsPauseMin ?? 120} мин` : ''}` : noMiss ? '' : ' — занят, не пропуск'}${pendingCb?.stored ? ', перезвон ведущему сохранён' : ''}`)
+    if (holdOn) {
+      holdOn = false
+      send({ cmd: 'stop', call: A })
+    }
+    prelude('dsFailed', () => (aiReady() ? startAi('discussion_failed') : notice(pendingCb?.stored ? 'dsNoAi' : null, 'ds_callback')))
+  }
+
+  // ---------- проміжна фраза без відбою (16 перед ШІ) ----------
+
+  function prelude(name, then) {
+    phase = 'prelude'
+    pre = { name, then, state: 'wait' }
+    mark('prelude')
+    later('preCap', NOTICE_CAP_MS, preDone)
+    maybePre()
+  }
+
+  function maybePre() {
+    if (phase !== 'prelude' || pre?.state !== 'wait' || legA.down || !legReady(legA)) return
+    if (dsPlay === 'playing') return // фразу 13/14/15 не обриваємо: onDsPlayed покличе знову
+    if (holdOn) {
+      holdOn = false
+      send({ cmd: 'stop', call: A })
+    }
+    const f = pickVariant(pre.name)
+    if (!f) return preDone()
+    pre.state = 'playing'
+    send({ cmd: 'play', call: A, file: f, loop: false, tag: pre.name })
+    mark('preludePlay')
+    later('pre', PROMPT_MAX_MS, preDone)
+  }
+
+  function preDone() {
+    if (phase !== 'prelude' || !pre || pre.state === 'done') return
+    pre.state = 'done'
+    cancel('pre')
+    cancel('preCap')
+    mark('preludeDone')
+    pre.then()
+  }
+
+  // ---------- REFER лише після фрази на A (80 / 13–15 / 82) ----------
+
+  // Яка фраза на A зараз не дає з'єднати: фраза обговорення, вступ 80 замість привітання (запобіжник), 82
+  const gateNow = () => (dsPlay === 'playing' ? 'ds' : greeting === 'playing' && greetIntro ? 'intro' : aiDownPlay === 'playing' ? 'aiDown' : null)
+
+  function releaseXferGate() {
+    if (!xferGate) return
+    const why = xferGate.why
+    xferGate = null
+    cancel('xferGate')
+    if (phase !== 'xferWait') return
+    // межа очікування вийшла, а фраза ще грає (play_done загубився?) — зупиняємо її: далі REFER
+    const still = gateNow()
+    if (still === 'intro') return introFailedClosed()
+    if (still) {
+      if (still === 'ds') {
+        dsPlay = 'done'
+        cancel('dsPlay')
+      } else if (still === 'aiDown') {
+        aiDownPlay = 'done'
+        cancel('aiDownPlay')
+      } else greeting = 'done'
+      if (!legA.down && !legA.gone) send({ cmd: 'stop', call: A })
+    }
+    phase = 'confirm'
+    transfer(why, { force: true })
+  }
+
+  // Немає підтвердження, що 80 дограв: не починаємо записану розмову з людиною.
+  function introFailedClosed() {
+    outcome = 'intro_failed'
+    reason = 'recording_notice_missing'
+    say('вступление о записи не прозвучало полностью — завершаю звонок')
+    if (pendingRef) { abandoned.add(pendingRef); pendingRef = null }
+    clearLegs()
+  }
+
+  // ---------- події для сервера режиму обговорення (routeevents.mjs) ----------
+
+  function emitRoute(event, o = {}) {
+    if (!routeEvent) return
+    const srId = o.srId !== undefined ? o.srId : ds?.srId ?? null
+    if (!srId) return
+    routeSent.push(event)
+    try {
+      routeEvent({ serviceRequestId: srId, generalCallID: gcid, event, ownerUid: o.ownerUid !== undefined ? o.ownerUid : ds?.lead?.uid ?? ds?.ownerUid ?? null, at: new Date(clock.now()).toISOString() })
+    } catch (e) {
+      err('route_event', e?.message)
+    }
+  }
+
+  // Ведучий говорить із клієнтом (з'єднано чи приєднався): пропуски з нуля, подія answered / joined
+  function leadServed() {
+    if (dsServed || !ds?.lead?.group) return
+    const grp = legB?.join && join ? join.group : mgrGroup
+    if (!grp?.some((k) => ds.lead.group.includes(k))) return
+    dsServed = true
+    try {
+      staffState?.answered?.(ds.lead.key, { uid: ds.lead.uid ?? null })
+    } catch (e) {
+      err('staff', e?.message)
+    }
+    emitRoute(legB?.join ? 'joined' : 'answered')
+  }
+
+  // uid співробітника за ключем менеджера (зворотний VG_DS_STAFF) — для події callback_connected
+  const uidOfGroup = (group) => Object.entries(config.dsStaff || {}).find(([, k]) => group?.includes(k))?.[0] ?? null
+  // UID стосується того, кому справді набираємо. Передзвін оператору / черговому не скидає паузу ведучого обговорення.
+  const ownerUidForTarget = (key) => {
+    if (!key) return null
+    const group = managerGroupOf(key, managers) || [key]
+    return ds?.lead?.group?.some((k) => group.includes(k)) ? ds.lead.uid ?? ds.ownerUid ?? null : uidOfGroup(group)
+  }
+
+  // Перезвін, поставлений у неробочий час (і з обіцянкою «у робочий час»), живе щонайменше до 18:00 наступного робочого дня
+  const callbackUntil = () => callbackUntilMs(config.workHours, clock.now(), config.timeZone || 'Europe/Kyiv')
 
   // ---------- PIN менеджера, що передзвонює із зовнішнього номера ----------
   // Фраза prompts.pin (немає — мовчки) → цифри DTMF на нозі A; набрано стільки цифр, скільки в PIN, або «#» —
@@ -617,7 +1013,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       return
     }
     cbWaitNumber = null
-    cb = { managerKey: callerManager, source: t?.source ?? null, id: t?.id ?? null, number: t?.number ?? null, gcid: t?.gcid ?? null, serviceRequestId: t?.serviceRequestId ?? null, removed: false, attempts: t?.attempts ?? null, dropped: false, waitedMs: cbWaitFrom != null ? clock.now() - cbWaitFrom : null }
+    cb = { managerKey: callerManager, source: t?.source ?? null, id: t?.id ?? null, number: t?.number ?? null, gcid: t?.gcid ?? null, serviceRequestId: t?.serviceRequestId ?? null, ownerUid: t?.ownerUid ?? null, removed: false, attempts: t?.attempts ?? null, dropped: false, waitedMs: cbWaitFrom != null ? clock.now() - cbWaitFrom : null }
     serviceRequestId = cb.serviceRequestId
     const uri = t ? clientDialUri(t.number, config.clientUriTemplate, config.sipServer) : null
     if (!uri) {
@@ -627,7 +1023,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       else if (busy(top.number) === 'ai') reason = 'client_with_ai'
       else if (!capOk(top.number)) reason = 'dial_cap'
       else reason = 'target_busy'
-      if (!t && top) cb = { ...cb, source: top.source, id: top.id, number: top.number, gcid: top.gcid ?? null, serviceRequestId: top.serviceRequestId ?? null }
+      if (!t && top) cb = { ...cb, source: top.source, id: top.id, number: top.number, gcid: top.gcid ?? null, serviceRequestId: top.serviceRequestId ?? null, ownerUid: top.ownerUid ?? null }
       say({
         bad_number: 'менеджер перезванивает, но номер клиента непригоден — сообщаю и кладу трубку',
         no_target: 'менеджер перезванивает, но ждущих клиентов нет — сообщаю и кладу трубку',
@@ -697,7 +1093,10 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
 
   function maybeGreeting() {
     if (phase === 'pin' || greeting !== 'none' || legA.down || !legReady(legA) || clientBusy()) return
-    const file = callback ? prompt('cbConnecting') : config.greetingFile
+    // «ШІ одразу» по-старому (запобіжник / ШІ не готовий): перша фраза — теж 80 (оголошення про запис з метою), потім 82
+    const intro80 = !callback && config.answerMode === 'ai' && route?.branch === 'classic' ? pickVariant('intro') : null
+    if (intro80) greetIntro = true
+    const file = callback ? prompt('cbConnecting') : intro80 || config.greetingFile
     if (!file) {
       greeting = 'done'
       return startHold()
@@ -711,6 +1110,16 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     if (greeting === 'done') return
     greeting = 'done'
     mark('greetingDone')
+    if (xferGate?.gate === 'intro') {
+      classicDownPhrase()
+      if (aiDownPlay === 'playing') {
+        xferGate.gate = 'aiDown'
+        later('xferGate', PROMPT_MAX_MS, releaseXferGate)
+        return
+      }
+      return releaseXferGate()
+    }
+    if (greetIntro) classicDownPhrase() // після 80 — 82 «з'єднуємо вас з оператором» (набір справді йде)
     startHold() // на голосовій пошті й останній фразі утримання вже не вмикається (clientBusy)
     maybeVoicemail() // пошта чекала, поки привітання догра
     maybeNotice() // остання фраза — теж
@@ -718,9 +1127,20 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     maybeJoinClient() // 81 менеджера, що приєднався під час привітання, — теж
   }
 
+  // Запобіжник із 80: одразу після вступу — 82 (тег aiDown; утримання / гудки — після неї)
+  function classicDownPhrase() {
+    if (aiDownPlay || legA.down || !['dialing', 'card', 'confirm', 'xferWait'].includes(phase)) return
+    const f = pickVariant('aiDown')
+    if (!f) return
+    aiDownPlay = 'playing'
+    classicDown = true
+    send({ cmd: 'play', call: A, file: f, loop: false, tag: 'aiDown' })
+    later('aiDownPlay', PROMPT_MAX_MS, onAiDownPlayed)
+  }
+
   function startHold() {
     const file = holdFileNow()
-    if (holdOn || legA.down || !file || clientBusy() || aiDownPlay === 'playing') return
+    if (holdOn || legA.down || !file || clientBusy() || aiDownPlay === 'playing' || dsPlay === 'playing' || dsPlay === 'wait') return
     holdOn = true
     send({ cmd: 'play', call: A, file, loop: true, tag: 'hold' })
     mark('hold')
@@ -831,11 +1251,11 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // немає). Заявку, якщо пошук ще йде, допишемо, коли він закінчиться.
   function rememberLastClient() {
     if (callback || !callbacks || !phone) return
-    const key = managerKeyOf(targets[target].uri, managers)
+    const key = target === 'manager' ? mgrKey : managerKeyOf(targets[target].uri, managers)
     if (!key) return
     const save = () => {
       try {
-        if (callbacks.setLastClient(key, { number: phone, gcid, srId: serviceRequestId, ts: clock.now() })) lastClientFor = key
+        if (callbacks.setLastClient(key, { number: phone, gcid, srId: serviceRequestId, ownerUid: ownerUidForTarget(key), ts: clock.now() })) lastClientFor = key
       } catch (e) {
         err('callbacks', e?.message)
       }
@@ -959,10 +1379,25 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // ---------- переведення ----------
 
   let xferWaits = 0
-  function transfer(why) {
+  function transfer(why, { force = false } = {}) {
     if (phase !== 'card' && phase !== 'confirm') return
     if (legA.down) return clientGone()
     if (!bAlive()) return stageFailed(`${target}_hangup`)
+    // Фраза на A ще грає (80 / 13–15 / 82): з'єднуємо після неї (рішення 12), але не пізніше dsXferWaitMs (80 — INTRO_XFER_WAIT_MS)
+    const gate = force ? null : gateNow()
+    if (gate) {
+      phase = 'xferWait'
+      cancel('cardCap')
+      cancel('afterCard')
+      cancel('confirm')
+      cancel('dsWait')
+      const ms = gate === 'intro' ? INTRO_XFER_WAIT_MS : Math.max(0, Number(config.dsXferWaitMs ?? 6000) || 0)
+      xferGate = { why, gate, at: clock.now() }
+      mark('xferGate')
+      say(`${W().name} подтвердил — соединю, когда клиент дослушает фразу (не дольше ${Math.round(ms / 1000)} с)`)
+      later('xferGate', ms, releaseXferGate)
+      return
+    }
     // REFER — лише в підтвердженому діалозі A. На передзвоні клієнт міг узяти раніше, ніж дійшов ACK менеджера:
     // чекаємо CONFIRMED ноги A по 200 мс, але не довше ~5 с (далі пробуємо все одно — помилка REFER → міст)
     if (!legA.confirmed && xferWaits < 25) {
@@ -1081,8 +1516,16 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     if (servedDone) return
     servedDone = true
     const n = callback ? cb?.number : phone
-    // приєднаний менеджер — і його група (рішення: served() за об'єднанням груп)
-    const keys = callback ? callerGroup : legB?.join && join ? [...new Set([...mgrGroup, ...join.group])] : mgrGroup
+    if (!callback) leadServed()
+    else if (cb?.serviceRequestId) {
+      const ownerUid = cb.ownerUid || uidOfGroup(callerGroup)
+      try { staffState?.answered?.(callerManager, { uid: ownerUid }) } catch (e) { err('staff', e?.message) }
+      emitRoute('callback_connected', { srId: cb.serviceRequestId, ownerUid })
+    }
+    // приєднаний менеджер — і його група (рішення: served() за об'єднанням груп); перезвін ведучому, якщо клієнта з'єднали з
+    // оператором (обіцянку «вам передзвонять» виконано)
+    const pendGroup = pendingCb?.stored && pendingCb.managerKey ? managerGroupOf(pendingCb.managerKey, managers) || [pendingCb.managerKey] : []
+    const keys = callback ? callerGroup : [...new Set([...mgrGroup, ...(legB?.join && join ? join.group : []), ...pendGroup])]
     if (!n || !callbacks?.removePendingFor || !keys?.length) return
     try {
       pendingRemoved = callbacks.removePendingFor(keys, n) || 0
@@ -1131,6 +1574,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
 
   // Менеджер не взяв / не з'єднались: далі за режимом (ШІ, «лінія зайнята», запасна, пошта)
   function noManager(why) {
+    if (target === 'manager' && dsRound) return dsFailed(why) // ведучий у режимі обговорення не прийняв дзвінок
     if (target === 'manager' && aiRound > 0) return aiTransferFailed(why) // ШІ передав клієнта, а менеджер не взяв
     if (target === 'manager' && aiDownRound && callbackRefused()) {
       // ШІ не піднявся, набір після 82 не вдався, а клієнт раніше відмовився від передзвону: «передзвонить» було б
@@ -1158,11 +1602,12 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   }
 
   function savePending({ missed = false, note = null } = {}) {
-    pendingCb = { managerKey: mgrKey, stored: false, id: null, ...(missed ? { missed: true } : {}) }
+    const until = phone ? callbackUntil() : null // уночі — щонайменше до 18:00 наступного робочого дня (обіцянка «у робочий час»)
+    pendingCb = { managerKey: mgrKey, stored: false, id: null, ...(afterHoursUrgent ? { afterHoursUrgent: true } : {}), ...(missed ? { missed: true } : {}), ...(until ? { until: new Date(until).toISOString() } : {}) }
     if (!phone) { pendingCb.why = 'no_number'; return } // внутрішній / без номера — передзвонювати нікуди
     if (!callbacks) { pendingCb.why = 'no_store'; return }
     try {
-      const e = callbacks.addPending({ managerKey: mgrKey, clientNumber: phone, gcid, serviceRequestId, card: cardText, missed, note, ts: clock.now() })
+      const e = callbacks.addPending({ managerKey: mgrKey, clientNumber: phone, gcid, serviceRequestId, card: cardText, missed, note, until, afterHoursUrgent, ownerUid: ownerUidForTarget(mgrKey), ts: clock.now() })
       pendingCb.stored = true
       pendingCb.id = e?.id ?? null
       mark('callbackStored')
@@ -1255,16 +1700,21 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // як у busy: менеджер пропустив дзвінок (ШІ потім допише в нього питання клієнта).
   // «ШІ одразу» (kind first): перезвін на старті НЕ ставимо (рішення 18) — його поставлять питання для менеджера, невдале
   // з'єднання або відбій під час набору; пошук клієнта фаза route уже чекала.
+  // Обговорення (черга B): discussion_failed — після 16 (перезвін ведучому вже стоїть), discussion_unavailable — ведучому не
+  // дзвонили, discussion_after_hours — ніч; перезвін — ведучому або загальній групі (dsCallbackTarget).
   function startAi(why, { variant = null } = {}) {
     phase = 'ai'
-    const kind = why === 'after_hours' ? 'after_hours' : why === 'first' ? 'first' : 'busy'
+    const kind = AI_KINDS.includes(why) ? why : 'busy'
     aiInfo = { kind, why, state: 'wait', sessionKind: kind, note: null, transfers: 0, joins: 0, sessions: [], endReason: null, failed: false, error: null, transferReason: null, variant }
-    if (kind === 'after_hours') reason = 'after_hours'
+    if (kind === 'after_hours' || kind === 'discussion_after_hours') reason = 'after_hours'
+    if (kind === 'discussion_unavailable') reason = `ds_${route?.why || 'unavailable'}`
     mark('ai')
     if (kind !== 'first' && !pendingCb?.stored && !pendingCb?.removed) savePending()
     say(kind === 'first'
       ? `отвечает ИИ (${{ request: 'есть открытая заявка', general: 'открытой заявки нет', nodata: 'данных о номере нет' }[variant] || variant})`
-      : `${kind === 'after_hours' ? 'нерабочее время' : `${W().noAnswer} (${why})`} — отвечает ИИ${pendingCb?.stored ? ', перезвон сохранён' : ''}`)
+      : kind.startsWith('discussion_')
+        ? `отвечает ИИ (${{ discussion_failed: 'ведущий не принял звонок', discussion_unavailable: 'ведущему не звонили', discussion_after_hours: 'обсуждение, нерабочее время' }[kind]})${pendingCb?.stored ? `, перезвон ${callbackTo() === 'lead' ? 'ведущему' : 'в общую группу'} сохранён` : ''}`
+        : `${kind === 'after_hours' ? 'нерабочее время' : `${W().noAnswer} (${why})`} — отвечает ИИ${pendingCb?.stored ? ', перезвон сохранён' : ''}`)
     if (!infoDone && !v2) {
       later('aiInfo', AI_INFO_WAIT_MS, maybeAi)
       infoP.then(() => maybeAi())
@@ -1283,8 +1733,17 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // З'єднати з менеджером: із першої сесії (busy) і з повторної після невдалого з'єднання (transfer_failed), поки не
   // вичерпано aiTransferMax за дзвінок; у неробочий час — ніколи
   // (і з першої сесії режиму «ШІ одразу»; спроба приєднання менеджера, що передзвонив, теж рахується в межу)
-  const aiTransferAllowed = () => (aiInfo?.sessionKind === 'busy' || aiInfo?.sessionKind === 'transfer_failed' || aiInfo?.sessionKind === 'first') &&
-    aiInfo.transfers + (aiInfo.joins || 0) < Math.max(0, Number(config.aiTransferMax ?? 1) || 0) && !!config.managerUri && !aiAfterHours()
+  // Обговорення: після «не вдалося» — лише з VG_DS_AI_TRANSFER > 0; ведучому не дзвонили — В19 (з оператором у винятках:
+  // претензія, гарантія, небезпека — правило в інструкціях моделі); уночі — ніколи
+  const aiKindTransfers = (k) => k === 'busy' || k === 'transfer_failed' || k === 'first' ||
+    (k === 'discussion_failed' && Number(config.dsAiTransfer) > 0) ||
+    (k === 'discussion_unavailable' && (Number(config.dsAiTransfer) > 0 || config.dsExceptionTransfer !== false))
+  const urgentLead = () => config.afterHoursUrgentTo ? resolveLead({ ds: { snapshotKey: config.afterHoursUrgentTo }, config, managers }) : null
+  const aiUrgentOnly = () => nightNow() && !!urgentLead()?.uri && !!urgentLead()?.group
+  const aiTransferAllowed = () => (aiUrgentOnly() || aiKindTransfers(aiInfo?.sessionKind)) &&
+    aiInfo.transfers + (aiInfo.joins || 0) < Math.max(0, Number(config.aiTransferMax ?? 1) || 0) && !!config.managerUri && (!aiAfterHours() || aiUrgentOnly()) && (!v2 || intro === 'done')
+  // В19: у discussion_unavailable без VG_DS_AI_TRANSFER — з'єднати лише у винятках
+  const aiExceptionsOnly = () => aiInfo?.sessionKind === 'discussion_unavailable' && !(Number(config.dsAiTransfer) > 0)
 
   // Сесія ШІ: привітання, якщо ще грає, догрує; пошук клієнта — не довше AI_INFO_WAIT_MS
   function maybeAi() {
@@ -1307,13 +1766,23 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         category,
         transferAllowed: aiTransferAllowed(),
         note: aiInfo.note,
-        // «ШІ одразу»: нові тексти й правила (v2), варіант першої фрази і чи прозвучав вступ 80
-        ...(v2 ? { v2: true, variant: aiInfo.variant ?? null, intro: intro === 'done' } : {}),
-        // повторна сесія: чому не з'єднали — dial (менеджер не взяв: у нього пропущений) чи join (менеджер, що передзвонив,
-        // поклав до з'єднання: «не відповідає» й «пропущений дзвінок» були б неправдою); afterHours — неробочий час
-        ...(kind === 'transfer_failed' ? { failedBy: aiInfo.failedBy || 'dial', afterHours: aiAfterHours() } : {}),
+        callbackStored: !!pendingCb?.stored,
+        // неробочий час: повний варіант першої фрази, нічні правила (і в старому режимі)
+        afterHours: nightNow(),
+        urgentOnly: aiUrgentOnly(),
+        needsTerms: category === 'openRequest' && lookupRes?.termsAccepted === false,
+        resendAllowed: !!config.aiResendUrl && !!resendLink && category === 'openRequest',
+        announced: intro === 'done' || (aiInfo.sessions || []).some((x) => x.spoke),
+        // «ШІ одразу»: нові тексти й правила (v2), варіант першої фрази, чи прозвучав вступ 80; черга B — куди перезвін (lead |
+        // group), В19 (з'єднати лише у винятках), «друга лінія» підтверджена (pending_call), чому ведучому не дзвонили
+        ...(v2 ? { v2: true, variant: aiInfo.variant ?? null, intro: intro === 'done', callbackTo: callbackTo(), exceptionsOnly: aiExceptionsOnly(), secondLineConfirmed: ds?.kind === 'pending', dsWhy: route?.why ?? null } : {}),
+        // повторна сесія: чому не з'єднали — dial (ніхто не взяв) чи join (менеджер, що передзвонив, поклав до з'єднання:
+        // «з'єднати не вдалося» й «пропущений дзвінок» були б неправдою)
+        ...(kind === 'transfer_failed' ? { failedBy: aiInfo.failedBy || 'dial' } : {}),
         onTool: aiTool,
         onSpeaking: () => {
+          const rec = aiInfo?.sessions.find((x) => x.s === sess)
+          if (rec) rec.spoke = true
           if (holdOn && phase === 'ai' && aiS === sess) {
             holdOn = false
             send({ cmd: 'stop', call: A })
@@ -1346,13 +1815,27 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
           nowMs: clock.now(),
           ...(v2 ? { v2: true } : {}),
         })
+      case 'resend_request_link':
+        return aiResendLink()
       case 'save_question_for_manager':
         return aiSaveQuestion(args)
       case 'transfer_to_manager':
         if (!aiTransferAllowed()) {
-          return { ok: false, reason: aiInfo.sessionKind === 'after_hours' ? 'after_hours' : 'not_available', note: "З'єднати з менеджером зараз не можна. Запропонуй записати питання — менеджер передзвонить." }
+          return { ok: false, reason: aiInfo.sessionKind === 'after_hours' || aiInfo.sessionKind === 'discussion_after_hours' ? 'after_hours' : 'not_available', note: "З'єднати з людиною зараз не можна. Запропонуй записати питання — вам передзвонять." }
         }
+        if (aiUrgentOnly() && (args?.topic || aiInfo.note?.topic) !== 'safety') return { ok: false, reason: 'urgent_only', note: 'Уночі черговий приймає лише небезпечні ситуації. Запропонуй записати питання.' }
+        if (!aiUrgentOnly() && aiExceptionsOnly() && !['complaint', 'warranty', 'safety'].includes(args?.topic || aiInfo.note?.topic)) return { ok: false, reason: 'exceptions_only', note: 'Оператор доступний лише при претензії, гарантії чи небезпеці. Запиши питання.' }
         aiInfo.transferReason = String(args?.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 200) || null
+        if (aiUrgentOnly()) {
+          afterHoursUrgent = true
+          const lead = urgentLead()
+          setTarget({ ...lead, timeoutSec: config.managerTimeoutSec })
+          aiInfo.note = { ...aiInfo.note, question: aiInfo.note?.question || aiInfo.transferReason || 'Небезпечна ситуація, потрібен черговий.', topic: 'safety', urgent: true, callback: true }
+          if (pendingCb?.stored) callbacks?.updatePending?.(pendingCb.id, { note: aiInfo.note, afterHoursUrgent: true })
+          else savePending({ note: aiInfo.note })
+          if (pendingCb) pendingCb.afterHoursUrgent = true
+          say('ночное срочное обращение — пробую соединить с дежурным')
+        }
         return { ok: true }
       case 'end_call':
         return { ok: true }
@@ -1361,25 +1844,47 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     }
   }
 
+  async function aiResendLink() {
+    if (!config.aiResendUrl || !resendLink) return { ok: false, error: 'disabled', note: LINK_MANAGER }
+    if (!infoDone) await infoP
+    if (done || phase !== 'ai') return { ok: false, error: 'call_over' }
+    if (!serviceRequestId || category !== 'openRequest') return { ok: false, error: 'no_request', note: LINK_MANAGER }
+    if (resendAccepted) return { ok: true, accepted: true, note: LINK_ACCEPTED }
+    resendP ||= Promise.resolve().then(() => resendLink({ serviceRequestId, gcid })).catch(() => ({ ok: false, error: 'unavailable' }))
+    const result = await resendP
+    resendP = null
+    resendAccepted = result?.ok === true
+    return { ok: resendAccepted, ...(resendAccepted ? { accepted: true } : { error: result?.error || 'unavailable' }), note: resendAccepted ? LINK_ACCEPTED : LINK_MANAGER }
+  }
+
   const NOTE_TOPICS = ['repair', 'purchase', 'warranty', 'delivery', 'complaint', 'safety', 'other']
   function aiSaveQuestion(args) {
-    const question = String(args?.question ?? '').replace(/\s+/g, ' ').trim().slice(0, AI_NOTE_MAX)
+    const question = stripVoiceTags(args?.question).replace(/\s+/g, ' ').trim().slice(0, AI_NOTE_MAX)
     if (!question) return { ok: false, error: 'empty_question', note: "Спершу з'ясуй суть питання." }
-    const note = { question, topic: NOTE_TOPICS.includes(args?.topic) ? args.topic : 'other', urgent: args?.urgent === true, callback: args?.callback !== false }
+    const note = { question, topic: NOTE_TOPICS.includes(args?.topic) ? args.topic : 'other', urgent: afterHoursUrgent || args?.urgent === true, callback: args?.callback !== false }
     aiInfo.note = note
     mark('aiNote')
     if (!phone) return { ok: true, saved: false, note: 'Номер не визначився, передзвонити не вийде. Скажи, що питання записано і менеджер його побачить.' }
     const stored = { question: note.question, topic: note.topic, urgent: note.urgent }
     try {
       if (!note.callback) {
+        // Воля клієнта: знімаємо і перезвін цього дзвінка, і той, що лишився з попереднього в цій групі (callbacks.json)
+        let removed = 0
+        const groups = [...new Set([...mgrGroup, ...(pendingCb?.managerKey ? managerGroupOf(pendingCb.managerKey, managers) || [pendingCb.managerKey] : [])])]
         if (pendingCb?.stored && pendingCb.id && callbacks?.removePending) {
-          callbacks.removePending(pendingCb.id)
+          if (callbacks.removePending(pendingCb.id)) removed++
           pendingCb.stored = false
           pendingCb.removed = true
         }
+        if (callbacks?.removePendingFor && groups.length) removed += callbacks.removePendingFor(groups, phone) || 0
+        if (removed) {
+          aiInfo.callbackRemoved = (aiInfo.callbackRemoved || 0) + removed
+          if (!pendingCb) pendingCb = { managerKey: mgrKey, stored: false, id: null, ...(afterHoursUrgent ? { afterHoursUrgent: true } : {}), removed: true }
+          say(`клиент отказался от перезвона — снято ожиданий перезвона: ${removed}`)
+        }
         return { ok: true, saved: true, callback: false, note: 'Записано, передзвонювати не будемо.' }
       }
-      if (pendingCb?.stored && pendingCb.id) callbacks.updatePending(pendingCb.id, { note: stored })
+      if (pendingCb?.stored && pendingCb.id) callbacks.updatePending(pendingCb.id, { note: stored, afterHoursUrgent })
       else savePending({ note: stored })
     } catch (e) {
       err('callbacks', e?.message)
@@ -1387,9 +1892,10 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     if (!pendingCb?.stored) {
       // «пропущений дзвінок» — лише якщо менеджеру справді дзвонили (у «ШІ одразу» до прохання клієнта — ні)
       const missed = dials.some((d) => d.to === 'manager')
-      return { ok: true, saved: false, note: missed ? 'Записати передзвін не вдалося. Скажи, що менеджер побачить пропущений дзвінок.' : 'Записати передзвін не вдалося. Чесно скажи, що зараз записати не вийшло, і попроси передзвонити трохи пізніше.' }
+      return { ok: true, saved: false, note: missed ? 'Записати передзвін не вдалося. Скажи, що співробітник побачить пропущений дзвінок.' : 'Записати передзвін не вдалося. Чесно скажи, що зараз записати не вийшло, і попроси передзвонити трохи пізніше.' }
     }
-    return { ok: true, saved: true, callback: true, note: aiInfo.kind === 'after_hours' ? 'Записано. Менеджер передзвонить у робочий час.' : 'Записано. Менеджер передзвонить.' }
+    // «вам передзвонять» без імені й строку (черновик 5а); уночі — «у робочі години»
+    return { ok: true, saved: true, callback: true, note: `Записано. ${CALLBACK_PROMISE}` }
   }
 
   function onAiEnd(sess, info) {
@@ -1440,6 +1946,11 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     aiS = null
     if (sess && !sess.ended) sess.stop('failed')
     if (v2) breaker?.fail(why)
+    // Обговорення: ведучий щойно не прийняв, після 16 ШІ не піднявся — 17 («вам передзвонять», перезвін уже стоїть) і відбій
+    if (aiInfo.kind === 'discussion_failed' && !legA.down && !legA.gone) {
+      say(`ИИ недоступен (${why}) после «не вдалося» — ${pendingCb?.stored ? '«вам передзвонять» и ' : ''}отбой`)
+      return notice(pendingCb?.stored ? 'dsNoAi' : null, 'ds_callback')
+    }
     // «ШІ одразу»: менеджеру в цьому дзвінку ще не дзвонили — «лінія зайнята» була б неправдою: 82 і звичний набір
     if (v2 && !dials.some((d) => d.to === 'manager') && config.managerUri && !aiAfterHours() && !legA.down && !legA.gone) return aiDownConnect(why)
     if (!pendingCb?.stored && (pendingCb?.removed || aiInfo.note?.callback === false)) {
@@ -1464,9 +1975,14 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // менеджера (повтори, картка з питанням клієнта, якщо записане, «1», REFER); поки дзвонимо — утримання / гудки. Не
   // взяв — далі за режимом (busy: «лінія зайнята» — тепер правда, бо набір був).
   function aiDownConnect(why) {
+    // Перший шматок аудіо ШІ не доводить, що мета запису вже прозвучала повністю.
+    if (v2 && intro !== 'done') return introFailedClosed()
     say(`ИИ недоступен (${why}) — менеджеру ещё не звонили: «соединяем» и набор менеджера`)
     mark('aiDownConnect')
     aiDownRound = true
+    // 82 обіцяє оператора — загальна група VG_MANAGER (у discussion_unavailable ведучому дзвонити не можна; перезвін
+    // ведучому, якщо вже стоїть, лишається)
+    setOperator()
     target = 'manager'
     phase = 'dialing'
     stageAt = null
@@ -1477,7 +1993,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     xferWaits = 0
     confirm = null
     cardP = prepareDownCard()
-    const f = prompt('aiDown')
+    const f = pickVariant('aiDown')
     if (f) {
       holdOn = false
       aiDownPlay = 'playing'
@@ -1491,6 +2007,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     if (aiDownPlay !== 'playing') return
     aiDownPlay = 'done'
     cancel('aiDownPlay')
+    if (xferGate?.gate === 'aiDown') return releaseXferGate()
     if (phase === 'dialing') startHold()
     if (phase === 'joining' && join?.client === 'done') joinHold() // менеджер приєднався, 81 немає — після 82 не тиша
     maybeNotice() // менеджер уже відмовив, поки грала 82: «лінія зайнята» / пошта — після неї
@@ -1514,6 +2031,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // набір із повторами, утримання, картка з питанням клієнта, «1», REFER/Replaces. Не вийшло — aiTransferFailed.
   function aiTransfer() {
     if (legA.down || legA.gone) return aiClientGone() // клієнт уже поклав — менеджеру не дзвонимо
+    if (v2 && intro !== 'done') return introFailedClosed()
     aiInfo.transfers++
     aiInfo.state = 'done'
     // підтвердження першого раунду — лише раз (наступні з'єднання на запит ШІ його не затирають)
@@ -1533,6 +2051,10 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     reason = null
     aiS = null
     aiRound++
+    // ШІ з'єднує з оператором (загальна група VG_MANAGER, AI-CONNECTING) — і з гілок обговорення теж
+    if (afterHoursUrgent) setTarget({ ...urgentLead(), timeoutSec: config.managerTimeoutSec })
+    else setOperator()
+    dsRound = false
     target = 'manager'
     phase = 'dialing'
     stageAt = null
@@ -1553,7 +2075,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   function prepareAiCard() {
     const q = aiInfo?.note?.question
     const extra = q ? `Питання клієнта: ${q}` : aiInfo?.transferReason ? `Клієнт просить менеджера: ${aiInfo.transferReason}` : "Клієнт просить з'єднати з менеджером."
-    const text = hidePhones(`${cardText || 'Дзвонить клієнт.'} ${extra}`).slice(0, 300)
+    const text = hidePhones(`${afterHoursUrgent ? 'Термінове звернення в неробочий час. ' : ''}${cardText || 'Дзвонить клієнт.'} ${extra}`).slice(0, 300)
     if (!tts) return Promise.resolve(null)
     return Promise.resolve().then(() => tts(text)).then((r) => (r && r.file ? r : null), (e) => {
       err('tts', e?.message)
@@ -1609,14 +2131,16 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // «1», REFER, міст) або приєднання триває; null — ні те, ні те.
   function joinableFor(group) {
     if (done || callback || !group?.length || legA.down || legA.gone) return null
+    if (v2 && intro !== 'done') return null
     const inGroup = (k) => group.includes(k)
     const mine = mgrGroup.some(inGroup)
     if (join && !join.result) return join.group.some(inGroup) || mine ? { status: 'busy' } : null
-    if (['card', 'confirm', 'transferring', 'bridged'].includes(phase) && (legB?.join ? !!join?.group.some(inGroup) : target === 'manager' && mine)) return { status: 'busy' }
+    if (['card', 'confirm', 'xferWait', 'transferring', 'bridged'].includes(phase) && (legB?.join ? !!join?.group.some(inGroup) : target === 'manager' && mine)) return { status: 'busy' }
     const lastDial = [...dials].reverse().find((d) => d.to === 'manager')
     const st = { status: 'joinable', lastDialedAt: lastDial ? t0 + lastDial.at : null, since: t0 }
     if (phase === 'dialing' && target === 'manager' && mine) return st
-    if (phase === 'ai' && waitsFor(group)) return st
+    // ai — розмова з ШІ; prelude — фраза 16 перед ШІ (ведучий щойно не взяв і вже передзвонює)
+    if ((phase === 'ai' || phase === 'prelude') && waitsFor(group)) return st
     return null
   }
 
@@ -1644,7 +2168,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     join = {
       call: ev.call, key: mc.key, group: mc.group, gcid: ev.gcid ?? null, number: strictPhone(ev.number) || String(ev.number ?? '').trim() || null,
       internal: !mc.external, fromPhase, at: clock.now(), mode: config.joinMode === 'refer' ? 'refer' : 'bridge',
-      state: 'answer', result: null, ms: null, client: 'none', mgr: 'none', q: 'none', qFile: null, entryDone: false, marks: {},
+      state: 'answer', result: null, ms: null, client: 'none', mgr: 'none', q: 'none', qFile: null, tail: false, entryDone: false, marks: {},
+      withAi: fromPhase === 'ai' || aiRound > 0, // клієнт говорив із ШІ (з фази ai або набір на прохання ШІ)
     }
     mark('join')
     if (fromPhase === 'dialing') {
@@ -1655,6 +2180,15 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         pendingRef = null
       }
       if (bAlive()) hangup(legB.call)
+      // ведучий у режимі обговорення сам передзвонив, поки шлюз дзвонив йому: це не пропуск
+      dsRound = false
+      cancel('dsWait')
+    }
+    if (fromPhase === 'prelude') {
+      // фраза 16 перед ШІ: далі не ШІ, а приєднання (81 замінить 16)
+      cancel('pre')
+      cancel('preCap')
+      pre = null
     }
     if (fromPhase === 'ai') {
       cancel('aiDown')
@@ -1679,8 +2213,10 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     send({ cmd: 'answer', call: ev.call, code: 200 })
     later('joinAck', JOIN_ACK_MS, () => joinManagerGone('join_no_ack'))
     later('joinCap', JOIN_CAP_MS, () => joinConnect('cap'))
-    // Питання клієнта менеджеру — лише якщо синтез устигне за JOIN_Q_WAIT_MS (менеджер уже на лінії, клієнт чекає)
-    const q = aiInfo?.note?.question
+    // Резюме для менеджера (MGR-JOIN: «Суть звернення: {резюме}. ‖ З’єдную.») — лише якщо синтез устигне за JOIN_Q_WAIT_MS
+    // источник: runferry-briefs segments-texts-draft 5а (fe08058)
+    // (менеджер уже на лінії, клієнт чекає); резюме коротке, без телефонів
+    const q = join.withAi ? joinSummary(aiInfo?.note?.question) : ''
     if (q && tts) {
       const j = join
       j.q = 'pending'
@@ -1689,7 +2225,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         j.q = 'late'
         maybeJoinQ()
       })
-      Promise.resolve().then(() => tts(hidePhones(`Питання клієнта: ${q}`).slice(0, 300))).then((r) => {
+      Promise.resolve().then(() => tts(speakable(`Суть звернення: ${q}. ‖ ${config.joinPromptTexts?.mgrJoinTail || 'З’єдную.'}`))).then((r) => {
         if (join !== j || j.q !== 'pending') return
         j.q = r?.file ? 'ready' : 'none'
         j.qFile = r?.file || null
@@ -1723,14 +2259,14 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     maybeJoinGone()
   }
 
-  // У нозі менеджера є звук: клієнту 81, менеджеру «Клієнт на лінії з віртуальним помічником — з'єдную.» — одночасно.
-  // Клієнт із ШІ не говорив (класичний набір, набір після 82) — менеджеру «Клієнт на лінії — з'єдную.» (mgrJoinPlain)
+  // У нозі менеджера є звук: клієнту 81, менеджеру MGR-JOIN — одночасно: «Клієнт зараз говорить із віртуальним
+  // помічником.», далі «Суть звернення: {резюме}. ‖ З’єдную.» (синтез) або «З’єдную.» (mgrJoinTail). Клієнт із ШІ не говорив
+  // (класичний набір, набір після 82, обговорення) — менеджеру «Клієнт на лінії — з'єдную.» (mgrJoinPlain)
   function maybeJoinPlay() {
     if (phase !== 'joining' || !join || join.state !== 'answer' || !bAlive() || !legReady(legB)) return
     join.state = 'phrases'
     join.marks.ready = clock.now() - join.at
-    const withAi = join.fromPhase === 'ai' || aiRound > 0 // з фази ai або набір на прохання ШІ
-    const mf = prompt(withAi ? 'mgrJoin' : 'mgrJoinPlain')
+    const mf = prompt(join.withAi ? 'mgrJoin' : 'mgrJoinPlain')
     if (mf) {
       join.mgr = 'playing'
       send({ cmd: 'play', call: legB.call, file: mf, loop: false, tag: 'mgrJoin' })
@@ -1742,6 +2278,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
 
   function maybeJoinClient() {
     if (phase !== 'joining' || !join || join.state !== 'phrases' || join.client !== 'none' || legA.down || legA.gone) return
+    if (dsPlay === 'playing') return // фразу 13/14/15 не обриваємо: onDsPlayed покличе знову
     if (greeting === 'playing') {
       // привітання (класичний набір) не обриваємо — 81 після нього (onGreetingDone покличе знову)
       if (tm.joinGreeting == null) later('joinGreeting', PROMPT_MAX_MS, () => { greeting = 'done'; maybeJoinClient() })
@@ -1778,7 +2315,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // Приєднання: клієнт чекає, поки менеджер дослухає фрази, — гудки (holdTone ringback), інакше утримання (після 81 —
   // лише гудки: «з'єдную вас» уже прозвучало). Не поверх привітання, 82 чи утримання, що вже грає.
   function joinHold({ ringbackOnly = false } = {}) {
-    if (phase !== 'joining' || !join || join.mgr === 'finished' || holdOn || legA.down || legA.gone || greeting === 'playing' || aiDownPlay === 'playing') return
+    if (phase !== 'joining' || !join || join.mgr === 'finished' || holdOn || legA.down || legA.gone || greeting === 'playing' || aiDownPlay === 'playing' || dsPlay === 'playing') return
     const file = config.holdTone === 'ringback' && config.ringbackFile ? config.ringbackFile : ringbackOnly ? null : config.holdFile
     if (!file) return
     holdOn = true
@@ -1792,7 +2329,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     maybeJoinQ()
   }
 
-  // Після «з'єдную» — питання клієнта, якщо синтез готовий (чекаємо не довше JOIN_Q_WAIT_MS від приєднання)
+  // Після першої частини MGR-JOIN — «Суть звернення: {резюме}. ‖ З’єдную.», якщо синтез готовий (чекаємо не довше
+  // JOIN_Q_WAIT_MS від приєднання), інакше «З’єдную.» (mgrJoinTail; клієнт говорив із ШІ)
   function maybeJoinQ() {
     if (phase !== 'joining' || !join || join.mgr !== 'done' || join.q === 'pending') return
     if (join.q === 'ready' && bAlive()) {
@@ -1802,13 +2340,21 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       later('joinMgr', PROMPT_MAX_MS, onJoinQDone)
       return
     }
+    const tail = join.withAi && !join.tail ? prompt('mgrJoinTail') : null
+    if (tail && bAlive()) {
+      join.tail = true
+      join.mgr = 'question'
+      send({ cmd: 'play', call: legB.call, file: tail, loop: false, tag: 'mgrJoinQ' })
+      later('joinMgr', PROMPT_MAX_MS, onJoinQDone)
+      return
+    }
     join.mgr = 'finished'
     maybeJoinConnect()
   }
 
   function onJoinQDone() {
     if (!join || join.mgr !== 'question') return
-    join.q = 'played'
+    if (join.q === 'playing') join.q = 'played'
     join.mgr = 'finished'
     cancel('joinMgr')
     maybeJoinConnect()
@@ -1824,6 +2370,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     for (const k of JOIN_TIMERS) cancel(k)
     if (legA.down) return joinClientGone()
     if (!bAlive()) return joinManagerGone('join_hangup')
+    if ((v2 && intro !== 'done') || (greetIntro && greeting !== 'done')) return introFailedClosed()
     if (by === 'cap') err('join', 'phrases cap')
     join.state = 'connecting'
     if (join.mode === 'refer' && legA.confirmed && legB.confirmed) {
@@ -1871,6 +2418,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       send({ cmd: 'stop', call: A })
     }
     if (aiInfo && aiReady()) return aiTransferFailed(why, { joined: true })
+    // обговорення: ведучий приєднався, поки шлюз йому дзвонив, і поклав до з'єднання — 16 і ШІ (не пропуск: він передзвонив)
+    if (!aiInfo && ds?.lead && v2 && route?.branch === 'discussion') return dsFailed(why, { noMiss: true })
     return noManager(why)
   }
 
@@ -1951,7 +2500,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
 
   function maybeNotice() {
     if (phase !== 'notice' || !ntc || ntc.state !== 'wait' || legA.down || !legReady(legA)) return
-    if (aiDownPlay === 'playing') return // фразу 82 не обриваємо: onAiDownPlayed покличе знову
+    if (aiDownPlay === 'playing' || dsPlay === 'playing') return // фразу 82 / 13–15 не обриваємо: покличуть знову
     if (greeting === 'playing') {
       if (tm.ntcGreeting == null) later('ntcGreeting', PROMPT_MAX_MS, () => { greeting = 'done'; maybeNotice() })
       return
@@ -1961,7 +2510,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       holdOn = false
       send({ cmd: 'stop', call: A })
     }
-    const file = prompt(ntc.name)
+    const file = pickVariant(ntc.name) // клієнтські фрази з повним і коротким варіантом (17, 83…); решта — як є
     if (!file) return noticeDone()
     ntc.state = 'playing'
     send({ cmd: 'play', call: A, file, loop: false, tag: ntc.name })
@@ -2107,6 +2656,12 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     const dialingNow = phase === 'dialing'
     const before = phase
     outcome = callback ? 'callback_cancelled' : 'client_hangup'
+    // обговорення: клієнт поклав під час фрази чи гудків — пропущений перезвін ведучому (нижче), пропуску немає
+    if (dsRound) {
+      dsRound = false
+      dsResult = { miss: false, why: 'client_hangup' }
+      emitRoute('client_hangup')
+    }
     if (pendingRef) {
       abandoned.add(pendingRef)
       pendingRef = null
@@ -2120,7 +2675,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     // пропущений у групу того, кому дзвонили (якщо перезвону ще немає і клієнт від нього не відмовлявся)
     const missedNow = v2 ? !pendingCb?.stored && !callbackRefused() : missedMode && !pendingCb
     const missed = !callback && missedNow && config.callbackOnHangup !== false && target === 'manager' &&
-      ['dialing', 'card', 'confirm', 'transferring'].includes(before) && dials.some((d) => d.to === 'manager')
+      ['dialing', 'card', 'confirm', 'xferWait', 'transferring'].includes(before) && dials.some((d) => d.to === 'manager')
     if (missed) savePending({ missed: true })
     say(callback ? `менеджер положил трубку${dialingNow ? ' — отменяю звонок клиенту' : ''}` : `клиент положил трубку${missed && pendingCb?.stored ? ' — перезвон сохранён (у менеджера пропущенный)' : ''}`)
     finish()
@@ -2138,7 +2693,13 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       case 'dialing':
       case 'card':
       case 'confirm':
+      case 'xferWait':
         return clientGone()
+      case 'prelude':
+        // поклав під час фрази 16 — перезвін ведучому вже стоїть
+        outcome = 'client_hangup'
+        say(`клиент положил трубку${pendingCb?.stored ? ' — перезвон ведущему сохранён' : ''}`)
+        return finish()
       case 'joining':
         return joinClientGone()
       case 'transferring':
@@ -2191,6 +2752,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         return dialFailed(code, 'hangup')
       case 'card':
       case 'confirm':
+      case 'xferWait':
         markT('down')
         say(`${W().down} до перевода`)
         return stageFailed(`${target}_hangup`)
@@ -2220,7 +2782,9 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         }
         return
       case 'play':
-        if (ev.call === A && phase === 'route' && intro === 'playing') onIntroDone(true)
+        if (ev.call === A && dsPlay === 'playing') onDsPlayed() // фраза 13/14/15 не зіграла — далі як дограна
+        else if (ev.call === A && phase === 'prelude' && pre?.state === 'playing') preDone()
+        else if (ev.call === A && phase === 'route' && intro === 'playing') onIntroDone(true)
         else if (ev.call === A && aiDownPlay === 'playing') onAiDownPlayed()
         else if (ev.call === A && phase === 'joining' && join?.client === 'playing') onJoinClientDone()
         else if (legB?.join && ev.call === legB.call && phase === 'joining' && join?.mgr === 'playing') onJoinMgrDone()
@@ -2231,7 +2795,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
           else vmRecord()
         } else if (ev.call === A && phase === 'notice' && ntc?.state === 'playing') noticeDone()
         else if (ev.call === A && phase === 'pin' && pin?.state === 'prompt') pinWait()
-        else if (ev.call === A && greeting === 'playing') onGreetingDone() // пошта / остання фраза, що чекали привітання, підуть далі
+        else if (ev.call === A && greeting === 'playing') (greetIntro ? introFailedClosed() : onGreetingDone())
         else if (legB && ev.call === legB.call && phase === 'confirm' && confirm?.state === 'prompt') confirmWait()
         else if (legB && ev.call === legB.call && cardPlaying) onCardDone()
         return
@@ -2267,6 +2831,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // Нога A стала готова (CONFIRMED + медіа або grace): PIN, привітання, пошта чи остання фраза, що чекали
   const onAReady = () => {
     maybeIntro()
+    maybeDsPhrase()
+    maybePre()
     maybePin()
     maybeGreeting()
     maybeVoicemail()
@@ -2322,7 +2888,9 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         }
         return
       case 'play_done':
-        if (isA && ev.tag === 'intro') onIntroDone()
+        if (isA && ev.tag === 'ds') onDsPlayed()
+        else if (isA && phase === 'prelude' && pre && ev.tag === pre.name) preDone()
+        else if (isA && ev.tag === 'intro') onIntroDone()
         else if (isA && ev.tag === 'aiDown') onAiDownPlayed()
         else if (isA && ev.tag === 'join') onJoinClientDone()
         else if (isB && legB.join && ev.tag === 'mgrJoin') onJoinMgrDone()
@@ -2388,6 +2956,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     }
     mark('end')
     const aiRes = (aiInfo?.sessions || []).map((x) => ({ kind: x.kind, at: x.at, r: x.s.result() }))
+    // клієнт поговорив із ШІ при відкритому обговоренні — сервер режиму лише продовжить строк (pending_call — ні, вирішує він)
+    if (ds && ds.kind !== 'pending' && aiRes.some(({ r }) => r.turns?.some((t) => t.speaker === 'client' && t.text?.trim()))) emitRoute('ai_ended')
     const conf = Object.fromEntries(Object.entries(confirms).map(([k, v]) => [k, { plays: v.plays, digit: v.digit }]))
     const entry = {
       v: 3,
@@ -2403,6 +2973,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       fallbackReason,
       abortReason,
       answeredBy,
+      ...(afterHoursUrgent ? { afterHoursUrgent: true } : {}),
       noAnswerMode,
       fallbackMode,
       category,
@@ -2442,16 +3013,21 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
             firstRetries: aiInfo.firstRetries ?? null, // повтори першого раунду (до з'єднання на запит ШІ); без з'єднання — null
             firstXferCode: aiInfo.firstXferCode ?? null,
             note: aiInfo.note ? { topic: aiInfo.note.topic, urgent: aiInfo.note.urgent, callback: aiInfo.note.callback, chars: aiInfo.note.question.length } : null,
-            sessions: aiRes.map(({ kind, at, r }) => ({ kind, at, provider: r.provider, model: r.model, durationMs: r.durationMs, end: r.end, toolCalls: r.toolCalls, usage: r.usage, costUsd: r.costUsd, turns: r.turns.length, errors: r.errors })),
+            ...(aiInfo.callbackRemoved ? { callbackRemoved: aiInfo.callbackRemoved } : {}), // callback:false зняв стільки перезвонів
+            // costUsd — ОЦІНКА шлюзу лише за голос (VG_AI_PRICE_PER_MIN); фактичну ціну gateway.mjs читає за conversationId
+            sessions: aiRes.map(({ kind, at, r }) => ({ kind, at, provider: r.provider, model: r.model, durationMs: r.durationMs, end: r.end, toolCalls: r.toolCalls, usage: r.usage, costUsd: r.costUsd, ...(r.conversationId ? { conversationId: r.conversationId } : {}), turns: r.turns.length, errors: r.errors })),
           }
         : null,
+      // Розшифровка: службові теги голосу в репліках ШІ («[slow]», «[laughs]») прибрано — у файл, документ дзвінка й журнал
+      // вони не потрапляють
       aiTranscript: aiRes.length
         ? {
             kind: aiInfo.kind,
             note: aiInfo.note,
-            turns: aiRes.flatMap(({ at, r }) => r.turns.map((x) => ({ ...x, start: Math.round((at / 1000 + x.start) * 100) / 100, end: Math.round((at / 1000 + x.end) * 100) / 100 }))),
+            turns: aiRes.flatMap(({ at, r }) => r.turns.map((x) => ({ ...x, ...(x.speaker === 'ai' ? { text: stripVoiceTags(x.text) } : {}), start: Math.round((at / 1000 + x.start) * 100) / 100, end: Math.round((at / 1000 + x.end) * 100) / 100 }))).filter((x) => x.text),
             providers: [...new Set(aiRes.map(({ r }) => `${r.provider}/${r.model}`))],
             costUsd: aiRes.reduce((a, { r }) => a + (Number(r.costUsd) || 0), 0),
+            conversations: aiRes.map(({ r }) => r.conversationId).filter(Boolean),
           }
         : null,
       t: { ...marks },
@@ -2459,6 +3035,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       // «ШІ одразу» і приєднання — лише коли були (рядок журналу старого режиму — без змін)
       ...(route ? { route: { ...route } } : {}),
       ...(join ? { join: joinInfo() } : {}),
+      // обговорення (лише з VG_DS_SOURCE): вид, джерело, вік, ключ ведучого (мобільний — маскою), фраза, підсумок, події
+      ...(dsOn && route ? { ds: { ...(dsJournal(ds, ds?.lead, clock.now(), ds ? null : dsWhy) || {}), ...(dsPhrase ? { phrase: dsPhrase } : {}), ...(dsResult ? { result: dsResult } : {}), ...(dsServed ? { served: true } : {}), ...(routeSent.length ? { events: [...routeSent] } : {}) } } : {}),
     }
     const why = [reason, fallbackReason, abortReason].filter(Boolean).join(', ')
     say(`итог: ${outcome}${why ? ` (${why})` : ''}`)
@@ -2487,6 +3065,14 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     get withAi() { return !done && phase === 'ai' },
     get callA() { return A },
     get callB() { return legB?.call ?? null },
+    // Група менеджера, з яким цей дзвінок зараз зайнятий (набір, картка, «1», переведення, міст, приєднання; передзвін —
+    // сам менеджер на лінії), — для гілки обговорення: ведучий на іншому дзвінку шлюзу не набирається (owner_busy)
+    get engagedGroup() {
+      if (done) return null
+      if (callback) return callerGroup
+      if (legB?.join && join) return join.result === 'manager_gone' ? null : join.group
+      return ['dialing', 'card', 'confirm', 'xferWait', 'transferring', 'bridged', 'connected'].includes(phase) && target === 'manager' ? mgrGroup : null
+    },
     joinableFor,
     adoptManager,
   }
@@ -2495,7 +3081,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
 // ---------- диспетчер: події рушія → потрібний сценарій ----------
 // Вхідний створює сценарій; 'dialing' прив'язує ногу B за ref; решта — за номером виклику (error без call — за ref).
 // Подію для ще невідомого виклику тримаємо недовго: рушій міг повідомити стан B раніше за 'dialing'.
-export function createDispatcher({ config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, callbacks = null, ai = null, log = () => {}, onDone = () => {} }) {
+export function createDispatcher({ config, send, clock, lookup = null, buildCard, tts = null, voicemailPath = null, callbacks = null, ai = null, log = () => {}, onDone = () => {}, staffState = null, appCalls = null, routeEvent = null, resendLink = null }) {
   const byCall = new Map()
   const byRef = new Map()
   const active = new Set()
@@ -2546,6 +3132,16 @@ export function createDispatcher({ config, send, clock, lookup = null, buildCard
     if (busy) return { busy: true }
     return best ? { flow: best.flow } : null
   }
+  // Ведучий обговорення зараз на іншому дзвінку шлюзу (його набирають, з'єднують, він говорить через міст або передзвонює)
+  function staffBusy(group, self) {
+    if (!group?.length) return false
+    for (const f of active) {
+      if (f === self || f.done) continue
+      const g = f.engagedGroup
+      if (g?.some((k) => group.includes(k))) return true
+    }
+    return false
+  }
   // Приєднуємо лише дзвінок менеджера без PIN: внутрішня лінія або зовнішній номер з VG_MANAGERS_EXTERNAL=nopin
   const joinEligible = (mc) => !mc.external || (externalCallbackOn(config) && !validPin(config.managerPin))
 
@@ -2590,6 +3186,11 @@ export function createDispatcher({ config, send, clock, lookup = null, buildCard
       callbacks,
       ai,
       partyBusy: (n) => partyBusy(n, flow),
+      staffBusy: (g) => staffBusy(g, flow),
+      staffState,
+      appCalls,
+      routeEvent,
+      resendLink,
       log,
       rejectReason: active.size >= limit ? 'busy' : null,
       breaker,

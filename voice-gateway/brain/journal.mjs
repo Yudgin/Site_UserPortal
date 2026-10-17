@@ -2,6 +2,7 @@
 // (дата за київським часом). Без аудіо і без секретів; у Firestore нічого не пишемо.
 import fs from 'node:fs'
 import path from 'node:path'
+import { cleanAiJournal } from './transcript.mjs'
 
 const SECRET_KEYS = /pass(word)?|secret|token|api[-_]?key/i
 
@@ -26,7 +27,7 @@ export function makeJournal({ dataDir, timeZone = 'Europe/Kyiv', now = () => new
   return function write(entry) {
     const file = path.join(dataDir, `calls-${ymd(now(), timeZone)}.jsonl`)
     fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 }) // у журналі номери клієнтів — лише власнику
-    fs.appendFileSync(file, `${JSON.stringify(scrub(entry))}\n`, { mode: 0o600 })
+    fs.appendFileSync(file, `${JSON.stringify(scrub(cleanAiJournal(entry)))}\n`, { mode: 0o600 })
     return file
   }
 }
