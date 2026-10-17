@@ -39,10 +39,11 @@ test('paid request of an old 1C repair counts as open for doneGraceDays (Binotel
   assert.equal(isOpen({ ...old, status: 'done' }, nowMs, DEFAULT_ROUTING), false)
 })
 
-// Мінімальний Firestore для createEstimateOps: get/set одного документа.
+// Мінімальний Firestore для createEstimateOps: get/set одного документа + транзакція (updateRequest у
+// фінальному спільному ядрі працює в транзакції: tx.get/tx.set на тих самих посиланнях).
 const fakeDb = (docs) => {
   const writes = []
-  return {
+  const db = {
     writes,
     collection: (name) => ({
       doc: (id) => ({
@@ -50,7 +51,13 @@ const fakeDb = (docs) => {
         set: async (data, opts) => { writes.push({ path: `${name}/${id}`, data, opts }) },
       }),
     }),
+    runTransaction: async (fn) => fn({
+      get: (ref) => ref.get(),
+      set: (ref, data, opts) => { ref.set(data, opts) },
+      update: (ref, data) => { ref.set(data, { merge: true }) },
+    }),
   }
+  return db
 }
 const owner = { uid: 'u1', email: 'o@x', role: 'owner', centers: [] }
 

@@ -40,6 +40,8 @@ class FakeDb {
   }
   async runTransaction(fn) {
     const db = this
+    // Имитация параллельной записи между проверкой и транзакцией (одноразовый хук теста).
+    if (db.beforeTx) { const h = db.beforeTx; db.beforeTx = null; h(db) }
     const tx = {
       async get(ref) { return ref.get() },
       set(ref, v, opts) { db._set(ref._col, ref.id, v, opts) },
@@ -112,6 +114,7 @@ test('createActualFromVariant: reapproval when the variant total grew with pendi
   const db = new FakeDb(seed())
   db.data.priceEstimates['var-1'] = { ...variant('var-1', 1000), ...applyEstimateDiscount(recomputeTotals({}, [line('w1', 1000, { complaintIndex: 0 })]), { value: 10, kind: 'pct' }) }
   db.data.serviceRequests['sr-1'].extraExpenses = [{ id: 'x1', title: 'Деталь', amount: 500, appliedToEstimateId: null }]
+  db.data.estimateOffers['off-1'].selectedVariantId = 'var-1' // явный родитель = выбор клиента
   const a = createEstimateActions({ adminDb: db })
   const r = await a.createActualFromVariant(owner, { requestId: 'sr-1', parentEstimateId: 'var-1' })
   assert.equal(r.ok, true, JSON.stringify(r))
@@ -142,6 +145,55 @@ test('createActualFromVariant: errors — no permission, other center, no varian
   // скасована
   db.data.serviceRequests['sr-1'].status = 'cancelled'
   assert.equal((await a.createActualFromVariant(master, { requestId: 'sr-1' })).code, 'CANCELLED')
+})
+
+test('createActualFromVariant: explicit parent must be the client\'s choice (NOT_CHOSEN); without a choice it is allowed', async () => {
+  const db = new FakeDb(seed()) // клиент выбрал var-2
+  const a = createEstimateActions({ adminDb: db })
+  const r = await a.createActualFromVariant(owner, { requestId: 'sr-1', parentEstimateId: 'var-1' })
+  assert.equal(r.ok, false)
+  assert.equal(r.status, 409)
+  assert.equal(r.code, 'NOT_CHOSEN')
+  assert.equal(db.data.serviceRequests['sr-1'].actualEstimateId, undefined)
+  assert.equal(db.data.estimateOffers['off-1'].status, 'chosen') // не зафиксировано
+  // клиент ещё не выбирал — явный вариант допустим (как в редакторе портала), оплата его не отклонит
+  db.data.estimateOffers['off-1'].selectedVariantId = null
+  db.data.estimateOffers['off-1'].status = 'pending_choice'
+  const ok = await a.createActualFromVariant(owner, { requestId: 'sr-1', parentEstimateId: 'var-1' })
+  assert.equal(ok.ok, true, JSON.stringify(ok))
+  assert.equal(db.data.priceEstimates[ok.data.estimateId].parentEstimateId, 'var-1')
+})
+
+test('createActualFromVariant: the client re-chose while the request was in flight → PATH_CHANGED, nothing written', async () => {
+  const db = new FakeDb(seed())
+  const a = createEstimateActions({ adminDb: db })
+  db.beforeTx = (d) => { d.data.estimateOffers['off-1'].selectedVariantId = 'var-1' } // /api/offers/:id/choose успел раньше
+  const r = await a.createActualFromVariant(master, { requestId: 'sr-1', clientKey: 'key-00000011' })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, 'PATH_CHANGED')
+  assert.equal(db.data.serviceRequests['sr-1'].actualEstimateId, undefined)
+  assert.equal(db.data.estimateOffers['off-1'].status, 'chosen')
+  assert.equal(Object.values(db.data.priceEstimates).filter((e) => e.kind === 'actual').length, 0)
+})
+
+test('createActualFromVariant: a concurrent request with the same clientKey committed first → idempotent 200, not 409', async () => {
+  const db = new FakeDb(seed())
+  const a = createEstimateActions({ adminDb: db })
+  db.beforeTx = (d) => {
+    d.data.priceEstimates['act-race'] = { id: 'act-race', kind: 'actual', total: 2000, status: 'approved', createdWithKey: 'key-00000012', createdReapproval: { required: false, diffPercent: 0, thresholdPct: 10 } }
+    d.data.serviceRequests['sr-1'].actualEstimateId = 'act-race'
+  }
+  const r = await a.createActualFromVariant(master, { requestId: 'sr-1', clientKey: 'key-00000012' })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(r.data.created, false)
+  assert.equal(r.data.estimateId, 'act-race')
+  // другой ключ в той же гонке — это уже чужой факт
+  const db2 = new FakeDb(seed())
+  db2.beforeTx = (d) => {
+    d.data.priceEstimates['act-race'] = { id: 'act-race', kind: 'actual', total: 2000, createdWithKey: 'key-other-0001' }
+    d.data.serviceRequests['sr-1'].actualEstimateId = 'act-race'
+  }
+  assert.equal((await createEstimateActions({ adminDb: db2 }).createActualFromVariant(master, { requestId: 'sr-1', clientKey: 'key-00000012' })).code, 'ALREADY_EXISTS')
 })
 
 // ---------- addExtraExpense / removeExtraExpense ----------
@@ -197,6 +249,16 @@ test('addExtraExpense: blocked when paid / pay in progress; not current estimate
   assert.equal((await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-9', title: 'x', amount: 1 })).code, 'NOT_CURRENT')
   assert.equal((await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: '', amount: 1 })).code, 'BAD_EXPENSE')
   assert.equal((await a.addExtraExpense(viewer, { requestId: 'sr-1', estimateId: 'act-1', title: 'x', amount: 1 })).code, 'NO_PERM_ACTUAL')
+  // права проверяются раньше текущего факта и валидации (контракт §1.2)
+  assert.equal((await a.addExtraExpense(viewer, { requestId: 'sr-1', estimateId: 'act-9', title: '', amount: 0 })).code, 'NO_PERM_ACTUAL')
+  // тот же ключ с другой суммой — не повтор
+  const first = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Доставка', amount: 150, clientKey: 'key-00000013' })
+  assert.equal(first.ok, true)
+  const reused = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Доставка', amount: 300, clientKey: 'key-00000013' })
+  assert.equal(reused.code, 'CLIENT_KEY_REUSED')
+  assert.equal(reused.status, 409)
+  assert.equal(db.data.priceEstimates['act-1'].lines.length, 2)
+  db.data.priceEstimates['act-1'].lines = db.data.priceEstimates['act-1'].lines.slice(0, 1)
   db.data.priceEstimates['act-1'].payInitiatedAt = new Date().toISOString()
   assert.equal((await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'x', amount: 1 })).code, 'PAY_IN_PROGRESS')
   db.data.priceEstimates['act-1'].payInitiatedAt = null
@@ -208,6 +270,18 @@ test('addExtraExpense: blocked when paid / pay in progress; not current estimate
   assert.equal(r.ok, true)
   assert.equal(r.data.applied, false)
   assert.equal(db2.data.serviceRequests['sr-1'].extraExpenses.length, 1)
+})
+
+test('removeExtraExpense: needs the «actual» permission and the current estimate, even for an unapplied expense', async () => {
+  const db = new FakeDb(withActual())
+  db.data.serviceRequests['sr-1'].extraExpenses = [{ id: 'x9', title: 'Від бота', amount: 500, appliedToEstimateId: null }]
+  const a = createEstimateActions({ adminDb: db })
+  assert.equal((await a.removeExtraExpense(viewer, { requestId: 'sr-1', estimateId: 'act-1', expenseId: 'x9' })).code, 'NO_PERM_ACTUAL')
+  assert.equal((await a.removeExtraExpense(master, { requestId: 'sr-1', estimateId: 'var-1', expenseId: 'x9' })).code, 'NOT_CURRENT')
+  assert.equal(db.data.serviceRequests['sr-1'].extraExpenses.length, 1)
+  const ok = await a.removeExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', expenseId: 'x9' })
+  assert.equal(ok.ok, true, JSON.stringify(ok))
+  assert.equal(db.data.serviceRequests['sr-1'].extraExpenses.length, 0)
 })
 
 test('removeExtraExpense: removes the line and the request expense, re-applies status', async () => {
@@ -223,6 +297,57 @@ test('removeExtraExpense: removes the line and the request expense, re-applies s
   assert.equal(db.data.serviceRequests['sr-1'].extraExpenses.length, 0)
   assert.equal(db.data.priceEstimates['act-1'].history.length, 2)
   assert.equal((await a.removeExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', expenseId: 'nope' })).code, 'NO_EXPENSE')
+})
+
+test('addExtraExpense: a DUPLICATE caught inside the engine transaction is returned as duplicate:true with the estimate totals', async () => {
+  const db = new FakeDb(withActual())
+  db.data.priceEstimates['act-1'].total = 2150
+  db.data.priceEstimates['act-1'].lines.push({ type: 'addon', refId: 'extra:x1', name: { uk: 'Доставка' }, qty: 1, unitPrice: 150, lineTotal: 150, extra: true })
+  const exp = { id: 'x1', title: 'Доставка', amount: 150, clientKey: 'key-00000020', appliedToEstimateId: 'act-1' }
+  // ядро нового формата (сессия бота): повтор ключа найден в транзакции → { ok, code: 'DUPLICATE', data }
+  const ops = { getDoc: async (name, id) => (db.data[name] && db.data[name][id] ? { id, ...db.data[name][id] } : null),
+    addExtraExpense: async () => ({ ok: true, code: 'DUPLICATE', data: { request: { id: 'sr-1' }, expense: exp, applied: true, duplicate: true } }),
+    removeExtraExpense: async () => ({ ok: false, code: 'CONFLICT', message: 'Заявку щойно змінили паралельно — спробуйте ще раз.' }) }
+  const a = createEstimateActions({ adminDb: db, ops })
+  const r = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Доставка', amount: 150, clientKey: 'key-00000020' })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.deepEqual(r.data, { expenseId: 'x1', refId: 'extra:x1', applied: true, estimateId: 'act-1', prevTotal: null, total: 2150, status: 'approved', reapproval: { required: false, diffPercent: 7.5, thresholdPct: 10 }, duplicate: true })
+  db.data.serviceRequests['sr-1'].extraExpenses = [exp]
+  const c = await a.removeExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', expenseId: 'x1' })
+  assert.deepEqual(c, { ok: false, status: 409, code: 'CONFLICT', message: 'Заявку щойно змінили паралельно — спробуйте ще раз.' })
+})
+
+test('addExtraExpense: a repeat whose expense is no longer in the current actual is KEY_STALE, not a false success', async () => {
+  // (1) витрату записали в факт act-1 (ответ потерян), затем в портале составили новый факт act-2 без неё
+  const db = new FakeDb(withActual())
+  const a = createEstimateActions({ adminDb: db })
+  const first = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Доставка', amount: 150, clientKey: 'key-00000030' })
+  assert.equal(first.ok, true)
+  db.data.priceEstimates['act-2'] = { ...db.data.priceEstimates['act-1'], id: 'act-2', lines: db.data.priceEstimates['act-1'].lines.filter((l) => !l.extra), total: 2000 }
+  db.data.serviceRequests['sr-1'].actualEstimateId = 'act-2'
+  const stale = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-2', title: 'Доставка', amount: 150, clientKey: 'key-00000030' })
+  assert.equal(stale.ok, false)
+  assert.equal(stale.status, 409)
+  assert.equal(stale.code, 'KEY_STALE')
+  // (2) тот же факт, но пересохранение в портале выкинуло строку extra
+  const db2 = new FakeDb(withActual())
+  const a2 = createEstimateActions({ adminDb: db2 })
+  assert.equal((await a2.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Деталь', amount: 99, clientKey: 'key-00000031' })).ok, true)
+  db2.data.priceEstimates['act-1'].lines = db2.data.priceEstimates['act-1'].lines.filter((l) => !l.extra)
+  assert.equal((await a2.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Деталь', amount: 99, clientKey: 'key-00000031' })).code, 'KEY_STALE')
+})
+
+test('addExtraExpense: a repeat keeps the reapproval warning of the current actual', async () => {
+  const db = new FakeDb(withActual())
+  const a = createEstimateActions({ adminDb: db })
+  const big = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Мотор', amount: 1000, clientKey: 'key-00000032' })
+  assert.equal(big.data.reapproval.required, true)
+  const again = await a.addExtraExpense(master, { requestId: 'sr-1', estimateId: 'act-1', title: 'Мотор', amount: 1000, clientKey: 'key-00000032' })
+  assert.equal(again.ok, true)
+  assert.equal(again.data.duplicate, true)
+  assert.equal(again.data.status, 'pending_approval')
+  assert.equal(again.data.reapproval.required, true)
+  assert.equal(again.data.total, 3000)
 })
 
 // ---------- HTTP ----------
@@ -275,6 +400,9 @@ test('HTTP: create actual → 201 with notify result; lines add/remove; price li
   const bad = await call(app, 'DELETE', `/api/estimates/${estId}/lines/w1`)
   assert.equal(bad.status, 400)
   assert.equal(bad.json.error.code, 'NOT_EXTRA')
+  const onVariant = await call(app, 'DELETE', '/api/estimates/var-1/lines/extra:x1')
+  assert.equal(onVariant.status, 400)
+  assert.equal(onVariant.json.error.code, 'NOT_ACTUAL')
   // не факт
   const notActual = await call(app, 'POST', '/api/estimates/var-1/lines', { kind: 'extra', title: 'x', amount: 1 })
   assert.equal(notActual.status, 400)

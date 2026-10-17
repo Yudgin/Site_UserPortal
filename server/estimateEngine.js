@@ -17,6 +17,7 @@ export const NO_REAPPROVAL_DEVIATION_PCT = 10
 export const PAY_CLAIM_MS = 3 * 60 * 1000 // клиент начал оплату (payInitiatedAt) — окно блокировки правок
 export const MAX_AMOUNT = 1_000_000
 export const HISTORY_LIMIT = 20
+export const DIAG_MAX = 4000 // предел текста диагностики (clip в updateRequest)
 
 export const STATUS_LABELS = {
   new: 'Нова', diagnostics: 'Діагностика', offered: 'Запропоновано', approved: 'Погоджено',
@@ -48,13 +49,16 @@ export const applyEstimateDiscount = (est, d) => {
   const value = Number(d && d.value) || 0
   if (!d || value <= 0) return est
   const grossKop = Math.round(est.total * 100)
-  if (grossKop <= 0) return est
+  // Нечего скидывать (итог 0, скидка < 1 коп., нет положительных строк) — строки не трогаем, но НАМЕРЕНИЕ
+  // скидки храним (amount 0): иначе после того как итог побывал нулём, новая строка прошла бы без скидки.
+  const keepIntent = () => ({ ...est, discount: { value, kind: d.kind, amount: 0, grossTotal: round2(grossKop / 100) } })
+  if (grossKop <= 0) return keepIntent()
   const offKop = Math.min(d.kind === 'pct' ? Math.round((grossKop * value) / 100) : Math.round(value * 100), grossKop)
-  if (offKop <= 0) return est
+  if (offKop <= 0) return keepIntent()
   const targetKop = grossKop - offKop
   const idxs = est.lines.map((l, i) => ({ i, kop: Math.round(l.lineTotal * 100) })).filter((x) => x.kop > 0)
   const sumKop = idxs.reduce((acc, x) => acc + x.kop, 0)
-  if (!idxs.length || sumKop <= 0) return est
+  if (!idxs.length || sumKop <= 0) return keepIntent()
   const lines = est.lines.map((l) => ({ ...l }))
   let acc = 0
   idxs.forEach((x, n) => {
@@ -201,7 +205,10 @@ export const canEditEstimate = (staff, sr) => {
 // Каждая возвращает { ok:true, code, data } либо { ok:false, code, message }. Тексты для Telegram/HTTP
 // транспорты строят сами из data. Коды ошибок: NOT_FOUND, FORBIDDEN (чужой центр), NO_EDIT (нет права
 // менять заявки), NO_ESTIMATE_PERM (нет права «факт»), BLOCKED (оплачен/отклонён/оплата идёт; data.reason),
-// INVALID (валидация), NOT_FOUND_EXPENSE, NOTHING (нечего менять), PAID_STATUS (статус оплаченной заявки).
+// INVALID (валидация), NOT_FOUND_EXPENSE, NOTHING (нечего менять), PAID_STATUS (статус оплаченной заявки),
+// CONFLICT (заявку дважды подряд изменили параллельно — повторить запрос), CLIENT_KEY_REUSED (тот же clientKey
+// уже записан для витраты с другой назвою/сумою), STALE (замена диагностики по устаревшему снимку). Успех addExtraExpense с тем же clientKey и теми же назвою/сумою,
+// что уже записаны, — { ok:true, code:'DUPLICATE', data:{ ...existing, duplicate:true } }.
 export function createEstimateOps({ adminDb }) {
   const col = (name) => adminDb.collection(name)
   const getDoc = async (name, id) => {
@@ -211,6 +218,18 @@ export function createEstimateOps({ adminDb }) {
   }
   const reqInfo = (sr) => ({ id: sr.id, number: displayNo(sr.id, sr), clientName: sr.clientName || '', actualEstimateId: sr.actualEstimateId || null })
   const fail = (code, message, data) => ({ ok: false, code, message, ...(data ? { data } : {}) })
+  // Повтор с тем же ключом клиента (приложение/бот): возвращаем уже записанный расход, второй строки нет.
+  // Проверяется ВНУТРИ транзакции — два одновременных запроса с одним ключом дают одну запись.
+  const findDup = (cur, p) => (p && p.clientKey ? (cur.extraExpenses || []).find((x) => x && x.clientKey === String(p.clientKey)) || null : null)
+  // Тот же ключ, но другая витрата (назва/сума после validateExpense) — не «уже додано», а ошибка клиента.
+  const dupCheck = (cur, p, v) => {
+    const dup = findDup(cur, p)
+    if (!dup) return null
+    return dup.title !== v.title || round2(dup.amount) !== v.amount ? { reused: true } : { duplicate: dup }
+  }
+  const REUSED_MSG = 'Ключ запиту вже використано для іншої витрати — спробуйте ще раз.'
+  const dupResult = (sr0, d) => ({ ok: true, code: 'DUPLICATE', data: { request: reqInfo(sr0), expense: d, applied: !!d.appliedToEstimateId, duplicate: true } })
+  const CONFLICT_MSG = 'Заявку щойно змінили паралельно — спробуйте ще раз.'
 
   const loadEditable = async (staff, requestId, { needEstimate = false } = {}) => {
     const sr = await getDoc('serviceRequests', requestId)
@@ -250,76 +269,109 @@ export function createEstimateOps({ adminDb }) {
         const eS = await tx.get(estRef)
         const cur = srS.exists ? srS.data() : null
         if (!cur) return { blocked: { code: 'NOT_FOUND', message: 'Заявку не знайдено.' } }
+        const dc = dupCheck(cur, p, v)
+        if (dc) return dc
+        // Факт заявки сменился между чтением и транзакцией (пересоздан) — повторить с новым состоянием.
+        if ((cur.actualEstimateId || null) !== sr0.actualEstimateId) return { retry: true }
         const e = eS.exists ? { id: eS.id, ...eS.data() } : null
+        // Запись собираем заново на каждой попытке транзакции (Firestore может повторить колбэк).
         if (!e) {
           // Ссылка на факт «висит» — пишем расход только на заявку.
-          tx.set(srRef, { extraExpenses: [...(cur.extraExpenses || []), exp], updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
-          return { applied: false }
+          const rec = { ...exp, appliedToEstimateId: null }
+          tx.set(srRef, { extraExpenses: [...(cur.extraExpenses || []), rec], updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+          return { applied: false, rec }
         }
         const blocked = estimateBlocked(e)
         if (blocked) return { blocked }
-        const { patch, next, reapproval, status } = estimatePatch(e, [...(e.lines || []), extraLine(exp)], parent, staff, via)
+        const rec = { ...exp, appliedToEstimateId: e.id }
+        const { patch, next, reapproval, status } = estimatePatch(e, [...(e.lines || []), extraLine(rec)], parent, staff, via)
         tx.set(estRef, patch, { merge: true })
-        exp.appliedToEstimateId = e.id
-        tx.set(srRef, { extraExpenses: [...(cur.extraExpenses || []), exp], updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
-        return { applied: true, prevTotal: round2(e.total || 0), total: next.total, reapproval, status, estimateId: e.id }
+        tx.set(srRef, { extraExpenses: [...(cur.extraExpenses || []), rec], updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+        return { applied: true, rec, prevTotal: round2(e.total || 0), total: next.total, reapproval, status, estimateId: e.id }
       })
+      if (r.reused) return fail('CLIENT_KEY_REUSED', REUSED_MSG)
+      if (r.duplicate) return dupResult(sr0, r.duplicate)
+      if (r.retry) return opts._retried ? fail('CONFLICT', CONFLICT_MSG) : addExtraExpense(staff, p, { ...opts, _retried: true })
       if (r.blocked) return fail(r.blocked.code === 'NOT_FOUND' ? 'NOT_FOUND' : 'BLOCKED', r.blocked.message, { reason: r.blocked.code })
-      return { ok: true, code: r.applied ? 'APPLIED' : 'RECORDED', data: { request: reqInfo(sr0), expense: exp, applied: !!r.applied, ...(r.applied ? { estimateId: r.estimateId, prevTotal: r.prevTotal, total: r.total, status: r.status, reapproval: r.reapproval } : {}) } }
+      return { ok: true, code: r.applied ? 'APPLIED' : 'RECORDED', data: { request: reqInfo(sr0), expense: r.rec, applied: !!r.applied, ...(r.applied ? { estimateId: r.estimateId, prevTotal: r.prevTotal, total: r.total, status: r.status, reapproval: r.reapproval } : {}) } }
     }
 
-    await adminDb.runTransaction(async (tx) => {
+    const r = await adminDb.runTransaction(async (tx) => {
       const srS = await tx.get(srRef)
-      const cur = srS.exists ? srS.data() : {}
-      tx.set(srRef, { extraExpenses: [...(cur.extraExpenses || []), exp], updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+      if (!srS.exists) return { notFound: true }
+      const cur = srS.data()
+      const dc = dupCheck(cur, p, v)
+      if (dc) return dc
+      // Пока решали, у заявки появился факт (создан в приложении/портале) — повторить: пойдёт ветка с фактом.
+      if (cur.actualEstimateId) return { retry: true }
+      const rec = { ...exp, appliedToEstimateId: null }
+      tx.set(srRef, { extraExpenses: [...(cur.extraExpenses || []), rec], updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+      return { rec }
     })
-    return { ok: true, code: 'RECORDED', data: { request: reqInfo(sr0), expense: exp, applied: false } }
+    if (r.notFound) return fail('NOT_FOUND', 'Заявку не знайдено.')
+    if (r.reused) return fail('CLIENT_KEY_REUSED', REUSED_MSG)
+    if (r.duplicate) return dupResult(sr0, r.duplicate)
+    if (r.retry) return opts._retried ? fail('CONFLICT', CONFLICT_MSG) : addExtraExpense(staff, p, { ...opts, _retried: true })
+    return { ok: true, code: 'RECORDED', data: { request: reqInfo(sr0), expense: r.rec, applied: false } }
   }
 
-  // Вилучити доп. расход (и его строку из факта, если была применена).
+  // Вилучити доп. расход (и его строку из факта, если она там есть). Кошторис, из которого убирать строку, —
+  // тот, к которому привязана запись, а если запись ещё не привязана — текущий факт заявки (редактор или
+  // застосунок мог уже записать строку, но ещё не перепривязать журнал). Всё решается по СВЕЖЕМУ состоянию
+  // внутри транзакции; если кошторис-цель сменился между чтением и транзакцией — один повтор, затем CONFLICT.
   const removeExtraExpense = async (staff, p, opts = {}) => {
     const via = opts.via || opts.source || 'server'
     const { sr: sr0, err } = await loadEditable(staff, p && p.requestId)
     if (err) return err
     const exp = (sr0.extraExpenses || []).find((x) => x && x.id === String(p.expenseId || ''))
     if (!exp) return fail('NOT_FOUND_EXPENSE', 'Таку витрату в заявці не знайдено.')
+    if (exp.appliedToEstimateId && !canEditEstimate(staff, sr0)) return fail('NO_ESTIMATE_PERM', 'Немає права «фактична калькуляція» для центру цієї заявки.')
     const srRef = col('serviceRequests').doc(String(sr0.id))
-    const estId = exp.appliedToEstimateId || null
-    if (estId) {
-      if (!canEditEstimate(staff, sr0)) return fail('NO_ESTIMATE_PERM', 'Немає права «фактична калькуляція» для центру цієї заявки.')
-      const estRef = col('priceEstimates').doc(String(estId))
-      const est0 = await getDoc('priceEstimates', estId)
-      const parent = est0 && est0.parentEstimateId ? await getDoc('priceEstimates', est0.parentEstimateId) : null
-      const r = await adminDb.runTransaction(async (tx) => {
-        const srS = await tx.get(srRef)
-        const eS = await tx.get(estRef)
-        const cur = srS.exists ? srS.data() : {}
-        const e = eS.exists ? { id: eS.id, ...eS.data() } : null
-        const rest = (cur.extraExpenses || []).filter((x) => x && x.id !== exp.id)
-        if (e) {
-          const blocked = estimateBlocked(e)
-          if (blocked) return { blocked }
-          const nextLines = (e.lines || []).filter((l) => l.refId !== `extra:${exp.id}`)
-          const { patch, next, reapproval, status } = estimatePatch(e, nextLines, parent, staff, via)
-          tx.set(estRef, patch, { merge: true })
-          tx.set(srRef, { extraExpenses: rest, updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
-          return { applied: true, prevTotal: round2(e.total || 0), total: next.total, reapproval, status, estimateId: e.id }
-        }
-        tx.set(srRef, { extraExpenses: rest, updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
-        return { applied: false }
-      })
-      if (r.blocked) return fail('BLOCKED', r.blocked.message, { reason: r.blocked.code })
-      return { ok: true, code: 'REMOVED', data: { request: reqInfo(sr0), expense: exp, applied: !!r.applied, ...(r.applied ? { estimateId: r.estimateId, prevTotal: r.prevTotal, total: r.total, status: r.status, reapproval: r.reapproval } : {}) } }
-    }
-    await adminDb.runTransaction(async (tx) => {
+    const lineRef = `extra:${exp.id}`
+    const estId = exp.appliedToEstimateId || sr0.actualEstimateId || null
+    const estRef = estId ? col('priceEstimates').doc(String(estId)) : null
+    const est0 = estId ? await getDoc('priceEstimates', estId) : null
+    const parent = est0 && est0.parentEstimateId ? await getDoc('priceEstimates', est0.parentEstimateId) : null
+    const r = await adminDb.runTransaction(async (tx) => {
       const srS = await tx.get(srRef)
-      const cur = srS.exists ? srS.data() : {}
-      tx.set(srRef, { extraExpenses: (cur.extraExpenses || []).filter((x) => x && x.id !== exp.id), updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+      const eS = estRef ? await tx.get(estRef) : null
+      if (!srS.exists) return { blocked: { code: 'NOT_FOUND', message: 'Заявку не знайдено.' } }
+      const cur = srS.data()
+      const curExp = (cur.extraExpenses || []).find((x) => x && x.id === exp.id)
+      // Уже вилучено параллельно (двойное нажатие, другой сотрудник) — ничего не пишем.
+      if (!curExp) return { gone: true }
+      // Кошторис-цель по свежему состоянию сменился (перепривязали запись / пересоздали факт) — повторить.
+      if ((curExp.appliedToEstimateId || cur.actualEstimateId || null) !== estId) return { retry: true }
+      const e = eS && eS.exists ? { id: eS.id, ...eS.data() } : null
+      const rest = (cur.extraExpenses || []).filter((x) => x && x.id !== exp.id)
+      // Строка есть в кошторисі — убираем и её (с пересчётом скидки/чека/статуса); нет (редактор уже убрал,
+      // либо запись не дошла до факта) — правим только журнал заявки, кошторис не трогаем.
+      if (e && (e.lines || []).some((l) => l.refId === lineRef)) {
+        if (!canEditEstimate(staff, sr0)) return { blocked: { code: 'NO_ESTIMATE_PERM', message: 'Немає права «фактична калькуляція» для центру цієї заявки.' } }
+        const blocked = estimateBlocked(e)
+        if (blocked) return { blocked }
+        const nextLines = (e.lines || []).filter((l) => l.refId !== lineRef)
+        const { patch, next, reapproval, status } = estimatePatch(e, nextLines, parent, staff, via)
+        tx.set(estRef, patch, { merge: true })
+        tx.set(srRef, { extraExpenses: rest, updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+        return { applied: true, prevTotal: round2(e.total || 0), total: next.total, reapproval, status, estimateId: e.id }
+      }
+      tx.set(srRef, { extraExpenses: rest, updatedAt: nowIso(), lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+      return { applied: false }
     })
-    return { ok: true, code: 'REMOVED', data: { request: reqInfo(sr0), expense: exp, applied: false } }
+    if (r.gone) return fail('NOT_FOUND_EXPENSE', 'Таку витрату в заявці не знайдено (уже вилучено).')
+    if (r.retry) return opts._retried ? fail('CONFLICT', CONFLICT_MSG) : removeExtraExpense(staff, p, { ...opts, _retried: true })
+    if (r.blocked) {
+      const code = r.blocked.code === 'NOT_FOUND' || r.blocked.code === 'NO_ESTIMATE_PERM' ? r.blocked.code : 'BLOCKED'
+      return fail(code, r.blocked.message, code === 'BLOCKED' ? { reason: r.blocked.code } : undefined)
+    }
+    return { ok: true, code: 'REMOVED', data: { request: reqInfo(sr0), expense: exp, applied: !!r.applied, ...(r.applied ? { estimateId: r.estimateId, prevTotal: r.prevTotal, total: r.total, status: r.status, reapproval: r.reapproval } : {}) } }
   }
 
-  // Поля заявки: diagnostics (текст; пусто → null), status, waybillNumber, returnTtn, boat.
+  // Поля заявки: diagnostics (заменить текстом; пусто → null) ИЛИ diagnosticsAppend (дописать новым абзацем
+  // к ТЕКУЩЕМУ тексту — собирается внутри транзакции, параллельная правка не теряется), status,
+  // waybillNumber, returnTtn, boat. expectDiagnostics ({at,length} | null) — снимок диагностики, на который
+  // опиралась пропозиция замены: если текст с тех пор изменили — STALE (не затираем чужое).
   // Первая диагностика двигает «нова» → «діагностика» (как в карточке), если статус не задан явно.
   const updateRequest = async (staff, p, opts = {}) => {
     const via = opts.via || opts.source || 'server'
@@ -327,8 +379,14 @@ export function createEstimateOps({ adminDb }) {
     if (err) return err
     const fields = {}
     const changes = []
+    if (p.diagnostics != null && p.diagnosticsAppend != null) return fail('INVALID', 'Або замінити діагностику, або дописати — не обидва.')
+    const append = p.diagnosticsAppend != null ? String(p.diagnosticsAppend).trim() : null
+    if (append !== null) {
+      if (!append) return fail('INVALID', 'Порожній текст для доповнення діагностики.')
+      changes.push({ field: 'diagnostics', label: `дописано до діагностики: «${clip(append, 200)}${append.length > 200 ? '…' : ''}»`, value: append })
+    }
     if (p.diagnostics !== undefined && p.diagnostics !== null) {
-      const text = clip(p.diagnostics, 4000).trim()
+      const text = clip(p.diagnostics, DIAG_MAX).trim()
       fields.diagnostics = text ? { text, at: nowIso(), by: staff.email || null } : null
       changes.push({ field: 'diagnostics', label: text ? `діагностика: «${clip(text, 200)}${text.length > 200 ? '…' : ''}»` : 'діагностику очищено', value: text })
       if (text && sr0.status === 'new' && !sr0.paymentId && !p.status) fields.status = 'diagnostics'
@@ -351,11 +409,39 @@ export function createEstimateOps({ adminDb }) {
       changes.push({ field: 'boat', label: `кораблик: ${fields.boat || '—'}`, value: fields.boat })
     }
     if (!changes.length) return fail('NOTHING', 'Немає що змінювати.')
-    const now = nowIso()
-    // Час зміни статусу (doneAt при «Виконано») — для правила входящих Binotel; той самий статус нічого не ставить.
-    Object.assign(fields, statusTimes(sr0.status, fields.status, now))
-    await col('serviceRequests').doc(String(sr0.id)).set({ ...fields, updatedAt: now, lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
-    return { ok: true, code: 'UPDATED', data: { request: reqInfo(sr0), fields, changes } }
+    // Проверки, зависящие от состояния (оплата, авто-«діагностика», время статуса), — по СВЕЖЕМУ документу
+    // в транзакции: оплата, пришедшая между чтением и записью, не откатывается статусом бота/застосунку.
+    const srRef = col('serviceRequests').doc(String(sr0.id))
+    const r = await adminDb.runTransaction(async (tx) => {
+      const s = await tx.get(srRef)
+      if (!s.exists) return { notFound: true }
+      const cur = s.data()
+      const out = { ...fields }
+      if (p.status && cur.paymentId) return { paid: true }
+      const cd = cur.diagnostics && cur.diagnostics.text ? cur.diagnostics : null
+      if (p.expectDiagnostics !== undefined) {
+        const curSig = cd ? { at: cd.at || null, length: String(cd.text).length } : null
+        const exp = p.expectDiagnostics ? { at: p.expectDiagnostics.at || null, length: Number(p.expectDiagnostics.length) || 0 } : null
+        if (JSON.stringify(curSig) !== JSON.stringify(exp)) return { stale: true }
+      }
+      const now = nowIso()
+      if (append !== null) {
+        const text = cd ? `${String(cd.text).trimEnd()}\n${append}` : append
+        if (text.length > DIAG_MAX) return { tooLong: true }
+        out.diagnostics = { text, at: now, by: staff.email || null }
+        if (cur.status === 'new' && !cur.paymentId && !p.status) out.status = 'diagnostics'
+      }
+      if (out.status === 'diagnostics' && !p.status && !(cur.status === 'new' && !cur.paymentId)) delete out.status
+      // Час зміни статусу (doneAt при «Виконано») — для правила входящих Binotel; той самий статус нічого не ставить.
+      Object.assign(out, statusTimes(cur.status, out.status, now))
+      tx.set(srRef, { ...out, updatedAt: now, lastEditedBy: staff.email || null, lastEditedVia: via }, { merge: true })
+      return { out }
+    })
+    if (r.notFound) return fail('NOT_FOUND', 'Заявку не знайдено.')
+    if (r.paid) return fail('PAID_STATUS', 'Заявку оплачено — статус зафіксовано.')
+    if (r.stale) return fail('STALE', 'Діагностику змінили після пропозиції — опишіть зміну ще раз.')
+    if (r.tooLong) return fail('INVALID', `Діагностика перевищить ${DIAG_MAX} символів — допишіть її в порталі.`)
+    return { ok: true, code: 'UPDATED', data: { request: reqInfo(sr0), fields: r.out, changes } }
   }
 
   return { addExtraExpense, removeExtraExpense, updateRequest, getDoc }
