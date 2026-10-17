@@ -25,9 +25,12 @@ export const SERVICE_REQUEST_STATUS_LABELS: Record<ServiceRequestStatus, string>
 // Фізичний етап ремонту (рішення власника 2026-10-08): окремо від комерційного статусу, який
 // рухає система (offered/approved/in_work/done). Етап ставить людина (хаб, мобільний додаток)
 // або синхронізація 1С за ТТН (fill-only). Порядок — фізичний шлях кораблика через майстерню.
-export type RepairStage = 'received' | 'diagnosed' | 'waiting_parts' | 'repaired' | 'packed' | 'shipped'
+// 'handed_over' — кораблик у клієнта (рішення власника 2026-10-18): самовивіз або підтверджене отримання посилки.
+// Від цієї відмітки рахуються 14 днів, поки заявка ще «відкрита» (правило власника 2026-10-17; isOpen у
+// server/binotelWebhook.js).
+export type RepairStage = 'received' | 'diagnosed' | 'waiting_parts' | 'repaired' | 'packed' | 'shipped' | 'handed_over'
 
-export const REPAIR_STAGE_ORDER: RepairStage[] = ['received', 'diagnosed', 'waiting_parts', 'repaired', 'packed', 'shipped']
+export const REPAIR_STAGE_ORDER: RepairStage[] = ['received', 'diagnosed', 'waiting_parts', 'repaired', 'packed', 'shipped', 'handed_over']
 
 export const REPAIR_STAGE_LABELS: Record<RepairStage, string> = {
   received: 'Отримано',
@@ -36,10 +39,12 @@ export const REPAIR_STAGE_LABELS: Record<RepairStage, string> = {
   repaired: 'Відремонтовано',
   packed: 'Запаковано',
   shipped: 'Відправлено',
+  handed_over: 'Видано клієнту',
 }
 
 // Наступний «звичайний» етап для кнопки «Наступний етап». waiting_parts — бічна гілка: з неї
-// далі — repaired; після shipped наступного немає.
+// далі — repaired; після shipped — handed_over (клієнт отримав); після handed_over наступного немає. Самовивіз —
+// окрема кнопка «Видано клієнту» з repaired/packed.
 export const nextRepairStage = (stage?: RepairStage | null): RepairStage | null => {
   switch (stage) {
     case undefined:
@@ -49,6 +54,7 @@ export const nextRepairStage = (stage?: RepairStage | null): RepairStage | null 
     case 'waiting_parts': return 'repaired'
     case 'repaired': return 'packed'
     case 'packed': return 'shipped'
+    case 'shipped': return 'handed_over'
     default: return null
   }
 }

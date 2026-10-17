@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import express from 'express'
 import {
   parseNestedForm, parseBinotelBody, normalizeRouting, decideCallSettings, buildCustomerData, pickRequests,
-  clip, NAME_MAX, DESC_MAX, registerBinotelWebhook, clientCategory, isOpen, lastActivityMs, DEFAULT_ROUTING, currentDelivery,
+  clip, NAME_MAX, DESC_MAX, registerBinotelWebhook, clientCategory, isOpen, lastActivityMs, DEFAULT_ROUTING, currentDelivery, handedOverMs,
 } from './binotelWebhook.js'
 
 const FORM = 'requestType=apiCallSettings&externalNumber=0675499555&pbxNumber=0443338049&companyID=12345&callType=0'
@@ -671,4 +671,44 @@ test('п\'яте коло: старий імпорт з відправкою б�
   assert.equal(isOpen(SR({ ...old, stage: 'received', stageHistory: [{ stage: 'received', at: daysAgo(25), by: 'm' }] }), NOW), true)
   // старий імпорт без жодних справжніх подій → давно отримано → закрита
   assert.equal(isOpen(SR({ ...old, stage: 'shipped', stageHistory: [{ stage: 'shipped', at: daysAgo(327), by: '1c-sync' }] }), NOW), false)
+})
+
+test('«Видано клієнту» (handed_over, власник 2026-10-18): 14 днів від відмітки; гарантія або нова відправка її перекривають', () => {
+  const paid = { status: 'done', paidAt: daysAgo(40), doneAt: daysAgo(40), createdAt: daysAgo(60) }
+  // самовивіз: видано 10 днів тому → відкрита; 15 днів тому → закрита (навіть якщо оплата була давно)
+  const pickup = (n) => SR({ ...paid, stage: 'handed_over', stageHistory: [{ stage: 'packed', at: daysAgo(n + 1), by: 'm' }, { stage: 'handed_over', at: daysAgo(n), by: 'm', note: 'самовивіз' }] })
+  assert.equal(isOpen(pickup(10), NOW), true)
+  assert.equal(isOpen(pickup(14), NOW), true)
+  assert.equal(isOpen(pickup(15), NOW), false)
+  // відправлено (np-ttn) 20 днів тому, клієнт отримав — видано 3 дні тому → відкрита ще 11 днів, а не за вікном 21
+  const shippedThenHanded = SR({ ...paid, stage: 'handed_over', returnTtn: '7', stageHistory: [{ stage: 'shipped', at: daysAgo(20), by: 'np-ttn' }, { stage: 'handed_over', at: daysAgo(3), by: 'app:m' }] })
+  assert.equal(isOpen(shippedThenHanded, NOW), true)
+  assert.equal(isOpen({ ...shippedThenHanded, stageHistory: [{ stage: 'shipped', at: daysAgo(30), by: 'np-ttn' }, { stage: 'handed_over', at: daysAgo(16), by: 'app:m' }] }, NOW), false)
+  // гарантія: видано 60 днів тому, прийняли 5 днів тому → кораблик у нас → відкрита
+  const warranty = SR({ ...paid, stage: 'received', stageHistory: [{ stage: 'handed_over', at: daysAgo(60), by: 'm' }, { stage: 'received', at: daysAgo(5), by: 'm' }] })
+  assert.equal(handedOverMs(warranty), 0)
+  assert.equal(isOpen(warranty, NOW), true)
+  // нова відправка після видачі → у дорозі від неї
+  const reship = SR({ ...paid, stage: 'shipped', returnTtn: '8', stageHistory: [{ stage: 'handed_over', at: daysAgo(60), by: 'm' }, { stage: 'shipped', at: daysAgo(2), by: 'np-ttn' }] })
+  assert.equal(handedOverMs(reship), 0)
+  assert.equal(isOpen(reship, NOW), true)
+  // відмітка від 1c-sync/backfill не вважається (лише людина)
+  assert.equal(handedOverMs(SR({ stageHistory: [{ stage: 'handed_over', at: daysAgo(1), by: 'backfill' }] })), 0)
+  // видача пізніше за доставку з 1С — перемагає видача
+  const both = SR({ ...paid, stage: 'handed_over', returnDelivery: { ttn: null, shippedAt: daysAgo(25), deliveredAt: daysAgo(20) },
+    stageHistory: [{ stage: 'handed_over', at: daysAgo(4), by: 'm' }] })
+  assert.equal(isOpen(both, NOW), true)
+  // видача клієнту — не «повернення в роботу» для правила кораблика, що повернувся
+  assert.equal(clientCategory({ requests: [pickup(30)] }, NOW), 'knownClient')
+  assert.equal(clientCategory({ requests: [pickup(2)] }, NOW), 'openRequest')
+})
+
+test('карточка: «Видано клієнту ДД.ММ» для відкритої; для закритої — «Останній ремонт · Видано клієнту»', () => {
+  const open = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'done', paidAt: daysAgo(20), stage: 'handed_over', createdAt: daysAgo(30),
+    stageHistory: [{ stage: 'handed_over', at: '2026-10-12T21:30:00Z', by: 'm' }] })] })
+  assert.ok(open.description.startsWith('Ремонт №1234 · Видано клієнту 13.10'), open.description) // 00:30 13.10 за Києвом
+  const closed = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'done', stage: 'handed_over', createdAt: daysAgo(120),
+    stageHistory: [{ stage: 'handed_over', at: daysAgo(90), by: 'm' }] })] })
+  assert.ok(closed.description.startsWith('Останній ремонт №1234 · Видано клієнту'), closed.description)
+  assert.ok(closed.description.length <= DESC_MAX)
 })

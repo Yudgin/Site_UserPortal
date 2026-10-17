@@ -46,7 +46,7 @@ export const DESC_MAX = 70
 // Підписи для картки дзвінка (укр.) — дзеркало src/types/serviceRequest.ts
 const STAGE_UK = {
   received: 'Отримано', diagnosed: 'Діагностовано', waiting_parts: 'Чекаємо запчастини',
-  repaired: 'Відремонтовано', packed: 'Запаковано', shipped: 'Відправлено',
+  repaired: 'Відремонтовано', packed: 'Запаковано', shipped: 'Відправлено', handed_over: 'Видано клієнту',
 }
 const STATUS_UK = {
   new: 'Нова', diagnostics: 'Діагностика', offered: 'Запропоновано', approved: 'Погоджено',
@@ -277,10 +277,12 @@ export const lastActivityMs = (sr) => Math.max(
 // Номер ТТН заявки з returnDelivery не звіряємо: returnTtn у заявці пишеться лише раз і застаріває, коли 1С
 // відправляє повторно з новим номером (ревʼю 2026-10-17).
 const stageEvents = (sr) => (Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).filter(isRealStageEvent)
+// Етапи, коли кораблик пішов від нас: відправлено або видано клієнту ('handed_over', відмітка людини з 2026-10-18).
+const LEFT_US = new Set(['shipped', 'handed_over'])
 const shippedEventMs = (sr, skip1c = false) => Math.max(0, ...stageEvents(sr)
   .filter((h) => h.stage === 'shipped' && !(skip1c && h.by === '1c-sync')).map((h) => msOf(h.at)))
-// Робота з корабликом (він у нас): справжній етап, крім 'shipped', діагностика, зміна статусу не на 'done'.
-const reopenEventMs = (sr) => Math.max(0, ...stageEvents(sr).filter((h) => h.stage !== 'shipped').map((h) => msOf(h.at)),
+// Робота з корабликом (він у нас): справжній етап, крім 'shipped'/'handed_over', діагностика, зміна статусу не на 'done'.
+const reopenEventMs = (sr) => Math.max(0, ...stageEvents(sr).filter((h) => !LEFT_US.has(h.stage)).map((h) => msOf(h.at)),
   msOf(sr?.diagnostics?.at), sr?.status !== 'done' ? msOf(sr?.statusChangedAt) : 0)
 // Кораблик повернули до нас (гарантія тощо): останній справжній 'received' новіший за завершення (doneAt/paidAt), за
 // будь-який запис 'shipped' в історії (навіть 1c-sync/backfill — верхня межа відправки старого імпорту) або за
@@ -289,8 +291,8 @@ const boatReceivedBack = (sr) => {
   const evs = stageEvents(sr)
   const rAt = Math.max(0, ...evs.filter((h) => h.stage === 'received').map((h) => msOf(h.at)))
   if (!rAt) return false
-  const anyShipped = (Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).some((h) => h && h.stage === 'shipped' && msOf(h.at) && msOf(h.at) < rAt)
-  const workBefore = evs.some((h) => h.stage !== 'shipped' && h.stage !== 'received' && msOf(h.at) < rAt)
+  const anyShipped = (Array.isArray(sr?.stageHistory) ? sr.stageHistory : []).some((h) => h && LEFT_US.has(h.stage) && msOf(h.at) && msOf(h.at) < rAt)
+  const workBefore = evs.some((h) => !LEFT_US.has(h.stage) && h.stage !== 'received' && msOf(h.at) < rAt)
   const doneMs = Math.max(msOf(sr?.doneAt), msOf(sr?.paidAt))
   // Старий імпорт 'done' без часу завершення: будь-який справжній 'received' — уже після нього (п'яте коло ревʼю).
   const legacyDone = sr?.status === 'done' && doneMs === 0
@@ -303,6 +305,13 @@ const shippedBoundMs = (sr) => Math.max(0, ...(Array.isArray(sr?.stageHistory) ?
 const normTtnDigits = (v) => { const d = String(v ?? '').replace(/\D/g, ''); return d && d !== '0' ? d : '' }
 // Посилки запчастин/купівлі (npScenario parts/purchase) — не повернення кораблика.
 const boatShipStage = (sr) => sr?.stage === 'shipped' && !['parts', 'purchase'].includes(sr?.npScenario)
+// «Видано клієнту» людиною (хаб, застосунок): кораблик у клієнта з цього моменту, як підтверджене отримання. Не
+// враховується, якщо потім кораблик повернули в роботу (гарантія) або відправили знову.
+export function handedOverMs(sr) {
+  const h = Math.max(0, ...stageEvents(sr).filter((e) => e.stage === 'handed_over').map((e) => msOf(e.at)))
+  if (!h) return 0
+  return reopenEventMs(sr) > h || shippedEventMs(sr) > h ? 0 : h
+}
 export function currentDelivery(sr) {
   const rd = sr?.returnDelivery
   if (!rd || typeof rd !== 'object') return null
@@ -315,7 +324,8 @@ export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   if (!sr || sr.status === 'cancelled') return false
   const days = (t) => (nowMs - t) / DAY_MS
   const rd = currentDelivery(sr)
-  const deliveredMs = msOf(rd?.deliveredAt)
+  // Отримання: перше «отримано» останньої посилки з 1С або відмітка «Видано клієнту» — що пізніше.
+  const deliveredMs = Math.max(msOf(rd?.deliveredAt), handedOverMs(sr))
   if (deliveredMs) return days(deliveredMs) <= cfg.doneGraceDays
   const reopenMs = reopenEventMs(sr)
   // Дата відправки — і з перекритої доставки: вона відома, просто старша за подальшу роботу (четверте коло ревʼю).
@@ -383,12 +393,16 @@ export function buildCustomerData({ phone, requests, orders, profile, siteUrl, a
     const head = `${mainOpen ? 'Ремонт' : 'Останній ремонт'}${no ? ` №${no}` : ''}`
     // Закритий ремонт показуємо статусом («Виконано»/«Скасовано»), а не етапом: синхронізація 1С поставила
     // 'received' сотням виконаних ремонтів, і «Отримано» читалося б як «кораблик у нас». Виняток — «Відправлено».
-    const deliveredAt = main.status !== 'cancelled' ? currentDelivery(main)?.deliveredAt : null
-    const state = deliveredAt
-      ? `Клієнт отримав ${kyivDayMonth(deliveredAt, nowMs)}`
-      : mainOpen
-        ? STAGE_UK[main.stage] || STATUS_UK[main.status] || ''
-        : main.stage === 'shipped' && main.status !== 'cancelled' ? STAGE_UK.shipped : STATUS_UK[main.status] || ''
+    const alive = main.status !== 'cancelled'
+    const deliveredMs = alive ? msOf(currentDelivery(main)?.deliveredAt) : 0
+    const handedMs = alive ? handedOverMs(main) : 0
+    const state = handedMs && handedMs >= deliveredMs
+      ? `Видано клієнту ${kyivDayMonth(new Date(handedMs).toISOString(), nowMs)}`
+      : deliveredMs
+        ? `Клієнт отримав ${kyivDayMonth(new Date(deliveredMs).toISOString(), nowMs)}`
+        : mainOpen
+          ? STAGE_UK[main.stage] || STATUS_UK[main.status] || ''
+          : LEFT_US.has(main.stage) && alive ? STAGE_UK[main.stage] : STATUS_UK[main.status] || ''
     const more = openCount > 1 ? ` (+${openCount - 1})` : ''
     const parts = [head + more, state, main.boat, main.complaint].filter(Boolean)
     description = clip(parts.join(' · '), DESC_MAX)
