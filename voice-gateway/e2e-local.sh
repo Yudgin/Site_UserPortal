@@ -37,6 +37,17 @@
 #   s13 ШІ передає менеджеру: менеджер узяв, але «1» не натиснув → ШІ → transfer_to_manager → сесію ШІ закрито → набір
 #       менеджера → картка → «1» → REFER/Replaces → connected (ai.transfers 1)
 #   s14 ШІ недоступний: підроблений ElevenLabs рве з'єднання → клієнту «лінія зайнята», передзвін один (busy_callback, ai_error)
+#   s15 VG_ANSWER_MODE=ai: ШІ одразу — вступ 80 (тон), перша фраза без «Вітаю!», без музики перед ШІ → transfer_to_manager →
+#       гудки 425 Гц (VG_HOLD_TONE=ringback) → менеджер → картка → «1» → REFER/Replaces → connected; перезвону не ставили
+#   s16 ШІ одразу, підроблений ElevenLabs рве з'єднання → фраза 82 → звичайний набір менеджера → «1» → connected; «лінія
+#       зайнята» не звучить
+#   s19 приєднання (VG_JOIN_ON_CALLBACK=1): клієнт говорить із ШІ, питання записане → менеджер-pjsua дзвонить на шлюз
+#       (зовнішній номер, VG_MANAGERS_EXTERNAL=nopin) → ШІ стоп, клієнту 81, менеджеру «Клієнт на лінії…» → міст: звук в
+#       обидва боки (тони 300 / 1200 Гц) → bridged_join у клієнта, callback_joined у менеджера, перезвін знято
+#   s20 приєднання, поки шлюз дзвонить тому самому менеджеру (на прохання ШІ): набір скасовано (CANCEL), міст
+#   s21 VG_JOIN_MODE=refer, обидві ноги вхідні: REFER на нозі клієнта з Replaces ноги менеджера → клієнт-pjsua сам
+#       з'єднується з менеджером (менеджер на :5060, як у s10) → connected_join
+#   (s17/s18 — гілка обговорення, черга B записки, ще не зроблені)
 #
 # Запуск: voice-gateway/e2e-local.sh        Журнали — voice-gateway/.e2e/<сценарій>/ (у git не потрапляють).
 # Лише деякі сценарії: ONLY="s11 s12" voice-gateway/e2e-local.sh
@@ -135,6 +146,7 @@ wait_until() { # сек команда… — опитуємо кожні 0,1 с
 }
 udp_bound() { lsof -nP -a -iUDP@127.0.0.1:"$1" >/dev/null 2>&1; }
 trace_has() { grep -Eq -- "$1" "$SDIR"/data/logs/brain-*.log 2>/dev/null; }
+pending_has() { grep -q '"clientNumber"' "$SDIR/data/callbacks.json" 2>/dev/null; } # ШІ записав питання — перезвін є
 journal_lines() { cat "$SDIR"/data/calls-*.jsonl 2>/dev/null | grep -c . ; }
 journal_ge() { [ "$(journal_lines)" -ge "$1" ]; }
 confirm_plays() { grep -h ' >> ' "$SDIR"/data/logs/brain-*.log 2>/dev/null | grep -c '"tag":"confirm"'; }
@@ -397,7 +409,7 @@ const aiRec = readJson(path.join(dir, 'ai-rec.json'))
 const aiSess = e.ai?.sessions || []
 const aiTools = aiSess.flatMap((x) => (x.toolCalls || []).map((tc) => ({ ...tc, abs: x.at + tc.at })))
 
-const lines = scn === 's7' ? 2 : 1 // s7: звонок клиента и перезвон менеджера
+const lines = ['s7', 's19', 's20', 's21'].includes(scn) ? 2 : 1 // s7: звонок клиента и перезвон менеджера; s19–s21: клиент и присоединившийся менеджер
 // Номер клиента и PIN — не в трассе мозга (URI набора маской, цифр DTMF нет) и не в строках [engine] лога движка
 ok(!traceText.includes(nat.slice(1)) && !engLines.some((l) => l.includes(nat.slice(1))), 'полного номера клиента нет ни в трассе мозга, ни в строках [engine] лога движка')
 ok(!evs.some((x) => x.ev === 'dtmf' && x.digit !== '<…>') && !traceText.includes('2468'), 'в трассе нет цифр DTMF (и PIN)')
@@ -751,6 +763,110 @@ switch (scn) {
     ok(j?.pending?.length === 1 && j.pending[0].clientNumber === ALLOWED, 'перезвон сохранён один раз')
     break
   }
+  case 's15': {
+    const init = aiRec?.inits?.[0]?.conversation_config_override?.agent || {}
+    const fm = init.first_message || ''
+    ok(e.outcome === 'connected' && e.ai?.kind === 'first' && e.ai?.transfers === 1 && e.ai?.endReason === 'transfer', 'исход connected через «ИИ сразу» (kind first, transfers 1)', `${e.outcome}/${e.ai?.kind}/${e.ai?.transfers}/${e.ai?.endReason}`)
+    ok(e.route?.branch === 'ai_first' && e.route?.variant === 'nodata' && e.route?.why === 'no_data', 'route: ai_first; поиск выключен — первая фраза «данных нет»', JSON.stringify(e.route))
+    ok(e.callback === null && noPending(), 'перезвон не ставился (на старте ИИ — нет, менеджер соединён)', JSON.stringify(e.callback))
+    ok(mgrDials.length === 1 && mgrDials[0].ai === 1 && mgrDials[0].code === 200, 'один набор менеджера — по просьбе ИИ', JSON.stringify(e.dials))
+    ok(fm === 'Я віртуальний помічник, штучний інтелект, розмова записується. Чим можу допомогти?', 'первая фраза ИИ после вступления 80 — без «Вітаю!», с «штучний інтелект» и предупреждением о записи', fm)
+    ok(/Ти першим відповідаєш/.test(init.prompt?.prompt || '') && /сторінці заявки/.test(init.prompt?.prompt || '') && !/кабінет/.test(init.prompt?.prompt || ''), 'инструкции модели — режим «ИИ сразу», «сторінка заявки» вместо «кабінет»')
+    order('команды', [
+      ['answer', (c) => c.cmd === 'answer' && c.call === A && c.code === 200],
+      ['play intro (80)', (c) => c.cmd === 'play' && c.call === A && c.tag === 'intro' && !c.loop],
+      ['audio_start', (c) => c.cmd === 'audio_start' && c.call === A],
+      ['гудки клиенту (425 Гц по кругу)', (c) => c.cmd === 'play' && c.call === A && c.tag === 'hold' && c.loop === true && /ringback-425hz\.wav$/.test(c.file)],
+      ['dial менеджера', (c) => c.cmd === 'dial' && c.uri === mU(MGR_URI)],
+      ['play card менеджеру', (c) => c.cmd === 'play' && c.call === B && c.tag === 'card'],
+      ['play confirm менеджеру', (c) => c.cmd === 'play' && c.call === B && c.tag === 'confirm'],
+      ['xfer_replaces', (c) => c.cmd === 'xfer_replaces' && c.call === A && c.dest === B],
+    ])
+    const iAs = cmds.findIndex((c) => c.cmd === 'audio_start')
+    ok(!cmds.some((c) => c.tag === 'greeting') && !cmds.slice(0, iAs).some((c) => c.tag === 'hold'), 'ни старого приветствия, ни музыки ожидания перед ИИ')
+    ok(evs.some((x) => x.ev === 'play_done' && x.call === A && x.tag === 'intro'), 'вступление доиграло до первой фразы ИИ')
+    ok(fs.existsSync(path.join(dir, 'cache', 'ringback-425hz.wav')), 'гудки сгенерированы: cache/ringback-425hz.wav')
+    const it = toneSec(path.join(dir, 'client-rec.wav'), 1500), rb = toneSec(path.join(dir, 'client-rec.wav'), 425)
+    ok(it >= 0.5 && rb >= 0.6, `клиент слышал вступление (${it.toFixed(1)} с 1500 Гц) и гудки (${rb.toFixed(1)} с 425 Гц)`)
+    const refer = tx(eng, 'REFER', CLA)[0]
+    ok(refer && /\?Replaces=/.test(hdr(refer, 'Refer-To') || ''), 'шлюз → клиенту REFER с Replaces')
+    break
+  }
+  case 's16': {
+    const fm = aiRec?.inits?.[0]?.conversation_config_override?.agent?.first_message || ''
+    ok(e.outcome === 'connected' && e.ai?.kind === 'first' && e.ai?.error === 'ai_error' && e.ai?.transfers === 0, 'ИИ сразу упал → 82 → менеджер → connected (ai.error ai_error)', `${e.outcome}/${e.ai?.kind}/${e.ai?.error}`)
+    ok(mgrDials.length === 1 && !mgrDials[0].ai && mgrDials[0].code === 200, 'один обычный набор менеджера (не по просьбе ИИ)', JSON.stringify(e.dials))
+    ok(aiRec?.closes?.some((c) => c.by === 'server'), '«модель» разорвала соединение')
+    ok(/^Вітаю! Це віртуальний помічник Runferry, штучний інтелект, розмова записується\./.test(fm), 'без вступления первая фраза ИИ начинается с «Вітаю!»', fm)
+    order('команды', [
+      ['answer', (c) => c.cmd === 'answer' && c.call === A],
+      ['audio_start', (c) => c.cmd === 'audio_start' && c.call === A],
+      ['play aiDown (82)', (c) => c.cmd === 'play' && c.call === A && c.tag === 'aiDown' && !c.loop],
+      ['dial менеджера', (c) => c.cmd === 'dial' && c.uri === mU(MGR_URI)],
+      ['play card менеджеру', (c) => c.cmd === 'play' && c.call === B && c.tag === 'card'],
+      ['play confirm менеджеру', (c) => c.cmd === 'play' && c.call === B && c.tag === 'confirm'],
+      ['xfer_replaces', (c) => c.cmd === 'xfer_replaces' && c.call === A && c.dest === B],
+    ])
+    ok(!cmds.some((c) => c.cmd === 'play' && c.tag === 'busy'), '«линия занята» не звучала (менеджеру ещё не звонили)')
+    ok(!cmds.some((c) => c.tag === 'greeting' || c.tag === 'intro'), 'старого приветствия нет; вступления нет (VG_INTRO_WAV не задан)')
+    ok(e.callback === null && noPending(), 'перезвона нет — менеджер соединён')
+    const heard = toneSec(path.join(dir, 'client-rec.wav'), 1900)
+    ok(heard >= 0.5, `клиент слышал фразу 82: ${heard.toFixed(1)} с тона 1900 Гц`)
+    break
+  }
+  case 's19':
+  case 's20':
+  case 's21': {
+    const ec = journal.find((j) => j.kind === 'client') || {}
+    const em = journal.find((j) => j.kind === 'callback') || {}
+    const [Ac, M] = evs.filter((x) => x.ev === 'incoming').map((x) => x.call)
+    const want = { s19: ['bridged_join', 'ai', 'bridge', 'bridged'], s20: ['bridged_join', 'dialing', 'bridge', 'bridged'], s21: ['connected_join', 'ai', 'refer', 'connected'] }[scn]
+    ok(ec.outcome === want[0] && ec.join?.fromPhase === want[1] && ec.join?.mode === want[2] && ec.join?.result === want[3], `клиент: ${want[0]} (присоединение из фазы ${want[1]}, ${want[2]})`, `${ec.outcome} ${JSON.stringify(ec.join)}`)
+    ok(em.outcome === 'callback_joined' && em.number === MGR_E164 && em.callback?.source === 'join' && em.join?.result === want[3], 'менеджер: отдельная строка журнала callback_joined', `${em.outcome}/${em.number}/${JSON.stringify(em.callback)}`)
+    ok(ec.ai?.kind === 'first' && ec.ai?.joins === 1, 'до присоединения клиент говорил с ИИ (сразу)', JSON.stringify(ec.ai?.kind))
+    ok(noPending(), 'перезвон клиента у менеджера снят после соединения')
+    ok(!JSON.stringify(ec.join || {}).match(/\d{5}/) && !JSON.stringify(em.join || {}).match(/\d{5}/), 'в поле join нет номеров')
+    ok(aiRec?.closes?.some((c) => c.by === 'client'), 'шлюз закрыл сессию ИИ при присоединении')
+    ok(cmds.some((c) => c.cmd === 'play' && c.call === M && c.tag === 'mgrJoin') && !cmds.some((c) => c.call === M && ['confirm', 'cbConnecting', 'cbClientBusy', 'pin'].includes(c.tag)),
+      'менеджеру «Клієнт на лінії з віртуальним помічником — з\'єдную.»; без «1», PIN и «передзвоніть за хвилину»')
+    const j81 = toneSec(path.join(dir, 'client-rec.wav'), 1700), mj = toneSec(path.join(dir, 'mgr-rec.wav'), 2100)
+    ok(j81 >= 0.5 && mj >= 0.5, `фразы присоединения услышаны: клиент 81 (${j81.toFixed(1)} с), менеджер (${mj.toFixed(1)} с)`)
+    const cm = toneSec(path.join(dir, 'client-rec.wav'), 1200), mc = toneSec(path.join(dir, 'mgr-rec.wav'), 300)
+    ok(cm >= 1.0, `клиент слышит менеджера: ${cm.toFixed(1)} с тона 1200 Гц`)
+    ok(mc >= 0.8, `менеджер слышит клиента: ${mc.toFixed(1)} с тона 300 Гц`)
+    if (scn === 's19' || scn === 's20') {
+      order('команды', [
+        ['answer клиенту', (c) => c.cmd === 'answer' && c.call === Ac],
+        ['audio_start', (c) => c.cmd === 'audio_start' && c.call === Ac],
+        ...(scn === 's20' ? [['dial менеджера (по просьбе ИИ)', (c) => c.cmd === 'dial' && c.uri === mU(MGR_URI)], ['hangup своего набора', (c) => c.cmd === 'hangup' && c.call === B]] : []),
+        ['answer менеджеру', (c) => c.cmd === 'answer' && c.call === M],
+        ['play 81 клиенту', (c) => c.cmd === 'play' && c.call === Ac && c.tag === 'join'],
+        ['bridge клиент ↔ менеджер', (c) => c.cmd === 'bridge' && c.a === Ac && c.b === M],
+      ])
+      ok(down(Ac) && down(M), 'обе ноги шлюза закрыты')
+    }
+    if (scn === 's19') ok((ec.dials || []).length === 0 && aiTools.some((x) => x.name === 'save_question_for_manager' && x.ok), 'шлюз менеджеру не звонил; ИИ записал вопрос (перезвон в группе менеджера)', JSON.stringify(ec.dials))
+    if (scn === 's20') {
+      const d = ec.dials || []
+      ok(d.length === 1 && d[0].ai === 1 && d[0].code === 487, 'набор менеджера по просьбе ИИ отменён (487)', JSON.stringify(d))
+      ok(tx(eng, 'CANCEL', MGA).length >= 1 && rx(mg, 'CANCEL', GWA).length >= 1, 'шлюз отменил свой звонок менеджеру (CANCEL) — у менеджера не два звонка от шлюза')
+    }
+    if (scn === 's21') {
+      const refer = tx(eng, 'REFER', CLA)[0]
+      const rt = hdr(refer, 'Refer-To') || ''
+      ok(refer && rt.includes(`sip:${MGR_URI.slice(4).split(':')[0]}`) && /\?Replaces=/.test(rt) && !rt.includes(nat), 'шлюз → клиенту REFER: Refer-To на менеджера с ?Replaces= (номера клиента нет)', rt.slice(0, 120))
+      ok(evs.some((x) => x.ev === 'xfer' && x.call === Ac && x.final && x.code === 200), 'итоговый NOTIFY 200 на ноге клиента')
+      const inv = tx(cl, 'INVITE').find((b) => hdr(b, 'Replaces') && b.peer.endsWith(':5060'))
+      ok(!!inv, 'клиент → менеджеру INVITE с Replaces')
+      const cid = callId(inv)
+      ok(!!resp(cl, 'RX', 200, 'INVITE', cid), 'менеджер ответил клиенту 200 — говорят напрямую')
+      const replacedCid = (hdr(inv, 'Replaces') || '').split(';')[0]
+      ok(tx(mg, 'BYE', GWA).some((b) => callId(b) === replacedCid), 'у менеджера звонок на шлюз заменён: BYE шлюзу по Call-ID из Replaces', replacedCid)
+      ok(!cmds.some((c) => c.cmd === 'bridge'), 'мост не понадобился')
+      ok(em.callback?.referOn === 'client', 'в строке менеджера: REFER на ноге клиента')
+    }
+    break
+  }
   default:
     ok(false, `неизвестный сценарий ${scn}`)
 }
@@ -817,7 +933,8 @@ cp "$CARD_SRC" "$WORK/card.wav"
 const [mod, dir] = process.argv.slice(1)
 const { toneWav } = await import("file://" + mod)
 const fs = await import("node:fs")
-for (const [n, freq, ms] of [["confirm", 600, 1200], ["busy", 700, 1500], ["cb-connecting", 800, 1000], ["cb-none", 900, 1200], ["cb-greeting", 1100, 1000], ["cb-no-answer", 1300, 1000], ["pin", 500, 800]]) fs.writeFileSync(`${dir}/${n}.wav`, toneWav({ freq, ms }))
+for (const [n, freq, ms] of [["confirm", 600, 1200], ["busy", 700, 1500], ["cb-connecting", 800, 1000], ["cb-none", 900, 1200], ["cb-greeting", 1100, 1000], ["cb-no-answer", 1300, 1000], ["pin", 500, 800],
+  ["intro", 1500, 900], ["join-client", 1700, 900], ["ai-down", 1900, 900], ["mgr-join", 2100, 900], ["mgr-join-busy", 2300, 900], ["mgr-join-gone", 2500, 900]]) fs.writeFileSync(`${dir}/${n}.wav`, toneWav({ freq, ms }))
 ' "$HERE/brain/tts.mjs" "$PROMPT_DIR" || { say "не удалось создать фразы в $PROMPT_DIR"; exit 2; }
 # «Голос» клієнта для ШІ (300 Гц): speech — увесь час уривками по 0,5 с; barge — 2 с тиші, 1,2 с голосу, тиша
 "$NODE" --input-type=module -e '
@@ -829,6 +946,10 @@ const seg = (sec, on) => { const n = Math.round(R * sec), b = Buffer.alloc(n * 2
 const speech = []; for (let i = 0; i < 60; i++) speech.push(seg(0.5, true), seg(0.5, false))
 fs.writeFileSync(`${dir}/client-speech.wav`, wavFromPcm16(Buffer.concat(speech)))
 fs.writeFileSync(`${dir}/client-barge.wav`, wavFromPcm16(Buffer.concat([seg(2.0, false), seg(1.2, true), seg(40, false)])))
+// «голос» менеджера для s19–s21 (1200 Гц уривками по 0,5 с) — щоб перевірити звук через міст в обидва боки
+const tone = (hz, sec) => { const n = Math.round(R * sec), b = Buffer.alloc(n * 2); for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(6000 * Math.sin((2 * Math.PI * hz * i) / R)), i * 2); return b }
+const mgr = []; for (let i = 0; i < 60; i++) mgr.push(tone(1200, 0.5), seg(0.5, false))
+fs.writeFileSync(`${dir}/mgr-voice.wav`, wavFromPcm16(Buffer.concat(mgr)))
 ' "$HERE/brain/tts.mjs" "$WORK" || { say "не удалось создать «голос» клиента в $WORK"; exit 2; }
 say "Локальная проверка шлюза: движок $ENGINE, pjsua $PJSUA, журналы $WORK"
 say "шлюз $GW_URI, менеджер $MANAGER_URI, запасная $FALLBACK_URI, клиент sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"
@@ -1104,6 +1225,149 @@ if want && start_fake_ai && start_gateway VG_NO_ANSWER_MODE=ai VG_AI_EL_URL="$AI
     check
   else abort_scenario "за 30 с нет строки в журнале"; fi
 elif want; then abort_scenario "участники не запустились"; fi
+stop_fake_ai
+
+# ---------- s15: ШІ одразу → перевід на прохання → «1» → connected ----------
+
+scenario s15 "VG_ANSWER_MODE=ai: ИИ сразу (вступление 80) → «з'єднайте» → гудки → менеджер → «1» → REFER/Replaces → connected"
+cat > "$SDIR/ai-script.json" <<'JSON'
+{"firstSec": 1.2, "auto": true, "vad": false, "steps": [
+  {"afterMs": 600, "say": 1.0, "text": "З'єдную з менеджером, залишайтеся на лінії.", "tool": {"name": "transfer_to_manager", "params": {"reason": "хоче людину"}}}
+]}
+JSON
+if want && start_fake_ai && start_gateway VG_ANSWER_MODE=ai VG_AI_EL_URL="$AI_URL" VG_WORK_HOURS= VG_INTRO_WAV="$PROMPT_DIR/intro.wav" VG_HOLD_TONE=ringback \
+  && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 200 && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"; then
+  peer_cmd client m "$GW_URI"
+  if wait_until 40 trace_has '"tag":"confirm"'; then
+    sleep 0.3
+    peer_cmd mgr '#' 1
+    if wait_until 20 journal_ge 1; then
+      sleep 2
+      peer_cmd client ha
+      sleep 0.7
+      stop_peers
+      stop_gateway
+      stop_fake_ai
+      check
+    else abort_scenario "за 20 с после «1» в журнале нет строки"; fi
+  else abort_scenario "за 40 с не дошло до вопроса «1 / 2» менеджеру"; fi
+elif want; then abort_scenario "участники не запустились"; fi
+stop_fake_ai
+
+# ---------- s16: ШІ одразу не піднявся → 82 → набір менеджера → connected ----------
+
+scenario s16 "ИИ сразу, поддельный ElevenLabs рвёт соединение → фраза 82 → набор менеджера → «1» → connected (без «линия занята»)"
+cat > "$SDIR/ai-script.json" <<'JSON'
+{"firstSec": 0.8, "closeAfterMs": 1500}
+JSON
+if want && start_fake_ai && start_gateway VG_ANSWER_MODE=ai VG_AI_EL_URL="$AI_URL" VG_WORK_HOURS= VG_AI_DOWN_WAV="$PROMPT_DIR/ai-down.wav" \
+  && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" 200 && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT"; then
+  peer_cmd client m "$GW_URI"
+  if wait_until 40 trace_has '"tag":"confirm"'; then
+    sleep 0.3
+    peer_cmd mgr '#' 1
+    if wait_until 20 journal_ge 1; then
+      sleep 2
+      peer_cmd client ha
+      sleep 0.7
+      stop_peers
+      stop_gateway
+      stop_fake_ai
+      check
+    else abort_scenario "за 20 с после «1» в журнале нет строки"; fi
+  else abort_scenario "за 40 с не дошло до вопроса «1 / 2» менеджеру"; fi
+elif want; then abort_scenario "участники не запустились"; fi
+stop_fake_ai
+
+# ---------- s19–s21: приєднання менеджера, що передзвонив ----------
+
+# Менеджер-pjsua дзвонить зі «зовнішнього» номера: приєднання — лише без PIN (VG_MANAGERS_EXTERNAL=nopin, PIN порожній)
+JOIN_ENV=(VG_ANSWER_MODE=ai VG_JOIN_ON_CALLBACK=1 VG_AI_EL_URL="$AI_URL" VG_WORK_HOURS= VG_MANAGERS_EXTERNAL=nopin VG_MANAGER_PIN=
+  VG_JOIN_CLIENT_WAV="$PROMPT_DIR/join-client.wav" VG_MGR_JOIN_WAV="$PROMPT_DIR/mgr-join.wav" VG_MGR_JOIN_BUSY_WAV="$PROMPT_DIR/mgr-join-busy.wav"
+  VG_MGR_JOIN_GONE_WAV="$PROMPT_DIR/mgr-join-gone.wav")
+# ШІ записує питання (перезвін у групі менеджера) і далі «говорить» довгу фразу — приєднання її обриває
+write_join_script() {
+  cat > "$SDIR/ai-script.json" <<'JSON'
+{"firstSec": 1.0, "auto": true, "vad": false, "steps": [
+  {"afterMs": 400, "tool": {"name": "save_question_for_manager", "expect": true, "params": {"question": "Коли буде готовий ремонт?", "topic": "repair", "urgent": false, "callback": true}}, "then": {"say": 1.0, "text": "Записав, менеджер передзвонить."}},
+  {"afterMs": 400, "say": 20, "text": "Довга відповідь."}
+]}
+JSON
+}
+
+scenario s19 "VG_JOIN_ON_CALLBACK=1: клиент с ИИ (вопрос записан) → менеджер-pjsua звонит на шлюз → ИИ стоп, 81 / «Клієнт на лінії…» → мост, звук в обе стороны"
+write_join_script
+if want && start_fake_ai && start_gateway "${JOIN_ENV[@]}" && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" "" "$WORK/mgr-voice.wav" \
+  && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$WORK/client-speech.wav"; then
+  peer_cmd client m "$GW_URI"
+  if wait_until 30 pending_has; then
+    sleep 0.5
+    peer_cmd mgr m "$GW_URI" # менеджер передзвонює на лінію шлюзу, поки клієнт говорить із ШІ
+    if wait_until 20 trace_has '"cmd":"bridge"'; then
+      sleep 4 # клієнт і менеджер говорять через міст шлюзу
+      peer_cmd client ha
+      if wait_until 10 journal_ge 2; then
+        sleep 0.5
+        stop_peers
+        stop_gateway
+        stop_fake_ai
+        check
+      else abort_scenario "за 10 с после отбоя в журнале нет двух строк"; fi
+    else abort_scenario "за 20 с после звонка менеджера моста нет"; fi
+  else abort_scenario "за 30 с ИИ не записал вопрос (нет перезвона)"; fi
+elif want; then abort_scenario "участники не запустились"; fi
+stop_fake_ai
+
+scenario s20 "присоединение, пока шлюз звонит тому же менеджеру по просьбе ИИ: менеджер звонит на шлюз → набор отменён (CANCEL) → мост"
+cat > "$SDIR/ai-script.json" <<'JSON'
+{"firstSec": 1.0, "auto": true, "vad": false, "steps": [
+  {"afterMs": 400, "say": 1.0, "text": "З'єдную з менеджером, залишайтеся на лінії.", "tool": {"name": "transfer_to_manager", "params": {"reason": "хоче людину"}}}
+]}
+JSON
+if want && start_fake_ai && start_gateway "${JOIN_ENV[@]}" VG_MANAGER_TIMEOUT_SEC=20 && start_peer mgr "$MGR_PORT" 4200 "$MANAGER_URI" "" "$WORK/mgr-voice.wav" \
+  && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$WORK/client-speech.wav"; then
+  peer_cmd client m "$GW_URI"
+  if wait_until 30 trace_has '"cmd":"dial"'; then
+    sleep 1.5 # телефон менеджера дзвонить (автовідповіді немає)
+    peer_cmd mgr m "$GW_URI" # а менеджер сам дзвонить на лінію шлюзу
+    if wait_until 20 trace_has '"cmd":"bridge"'; then
+      sleep 4
+      peer_cmd client ha
+      if wait_until 10 journal_ge 2; then
+        sleep 0.5
+        stop_peers
+        stop_gateway
+        stop_fake_ai
+        check
+      else abort_scenario "за 10 с после отбоя в журнале нет двух строк"; fi
+    else abort_scenario "за 20 с после звонка менеджера моста нет"; fi
+  else abort_scenario "за 30 с шлюз не начал звонить менеджеру по просьбе ИИ"; fi
+elif want; then abort_scenario "участники не запустились"; fi
+stop_fake_ai
+
+scenario s21 "VG_JOIN_MODE=refer, обе ноги входящие: REFER на ноге клиента с Replaces ноги менеджера → клиент и менеджер напрямую (connected_join)"
+write_join_script
+# Refer-To збирається з From вхідного INVITE менеджера, а pjsip у From порт не пише — менеджер-pjsua слухає :5060 (як у s10)
+MGR_PORT_MAIN=$MGR_PORT
+MGR_PORT=5060
+if want && start_fake_ai && start_gateway "${JOIN_ENV[@]}" VG_JOIN_MODE=refer && start_peer mgr "$MGR_PORT" 4200 "sip:$MANAGER_NUM@127.0.0.1:$MGR_PORT" "" "$WORK/mgr-voice.wav" \
+  && start_peer client "$CLIENT_PORT" 4100 "sip:$ALLOWED_NUM@127.0.0.1:$CLIENT_PORT" "" "$WORK/client-speech.wav"; then
+  peer_cmd client m "$GW_URI"
+  if wait_until 30 pending_has; then
+    sleep 0.5
+    peer_cmd mgr m "$GW_URI"
+    if wait_until 25 journal_ge 2; then
+      sleep 3 # клієнт і менеджер говорять напряму, шлюзу в розмові вже немає
+      peer_cmd client ha
+      sleep 0.7
+      stop_peers
+      stop_gateway
+      stop_fake_ai
+      check
+    else abort_scenario "за 25 с после звонка менеджера в журнале нет двух строк"; fi
+  else abort_scenario "за 30 с ИИ не записал вопрос (нет перезвона)"; fi
+elif want; then abort_scenario "участники не запустились"; fi
+MGR_PORT=$MGR_PORT_MAIN
 stop_fake_ai
 
 # ---------- підсумок ----------
