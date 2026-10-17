@@ -501,7 +501,7 @@ struct CallRec {
   AudioMediaRecorder *rec = nullptr;  // запис голосу співрозмовника (голосова пошта)
   bool recOn = false;                 // звук виклику вже йде в запис
   std::string recFile;
-  GwAudio *audio = nullptr;  // потік звуку до мозку (ІІ-співрозмовник), команда audio_start
+  GwAudio *audio = nullptr;  // потік звуку до мозку (ШІ-співрозмовник), команда audio_start
   bool audioOn = false;      // порт уже під'єднаний до звуку виклику в обидва боки
   // Остання цифра DTMF: pjsua2 може повідомити те саме натискання двома колбеками (onDtmfDigit і onDtmfEvent)
   std::string dtmfDigit;
@@ -604,7 +604,7 @@ class GwPlayer : public AudioMediaPlayer {
   const bool loop_;
 };
 
-// ---------- звук виклику ↔ мозок (ІІ-співрозмовник) ----------
+// ---------- звук виклику ↔ мозок (ШІ-співрозмовник) ----------
 // audio_start: рушій під'єднується до Unix-сокета мозку (шлях і токен дає мозок) і пускає звук виклику в обидва боки.
 // Перший рядок від рушія — JSON {"token":"…","call":N,"rate":R}\n (мозок за ним зіставляє з'єднання з дзвінком), далі
 // кадри: 1 байт типу + u32 LE довжина + дані.
@@ -1634,7 +1634,7 @@ static void cmdBridge(const JObj &o) {
   if (a == b) return emitError("bridge", a, "", "a and b are the same");
   dropPlayer(*ra);
   dropPlayer(*rb);
-  dropAudio(*ra, "bridge");  // далі говорять люди: ІІ від'єднуємо
+  dropAudio(*ra, "bridge");  // далі говорять люди: ШІ від'єднуємо
   dropAudio(*rb, "bridge");
   if (ra->bridgePeer && ra->bridgePeer != b) unlinkBridge(*ra);
   if (rb->bridgePeer && rb->bridgePeer != a) unlinkBridge(*rb);
@@ -1970,7 +1970,7 @@ int main() {
     return 1;
   }
   // record — рушій уміє record/record_stop (голосова пошта); dtmf — повідомляє натискання (RFC 2833 і SIP INFO);
-  // audio — уміє audio_start/audio_stop (потік звуку виклику до мозку для ІІ-співрозмовника)
+  // audio — уміє audio_start/audio_stop (потік звуку виклику до мозку для ШІ-співрозмовника)
   Ev("ready").boolean("record", true).boolean("dtmf", true).boolean("audio", true).emit();
 
   std::string inbuf;

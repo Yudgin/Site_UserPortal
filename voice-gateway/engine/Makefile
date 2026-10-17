@@ -25,7 +25,7 @@ SYS_LIBS := -L$(SSL)/lib -lssl -lcrypto -lm -lpthread \
 
 # sip-engine-next — та сама збірка під іншим ім'ям: новий рушій можна зібрати й перевірити, поки шлюз працює
 # зі старим sip-engine (його файл під живим процесом не перезаписуємо); шлюз бере його з VG_ENGINE_PATH / --engine.
-# sip-engine-ai — те саме з потоком звуку до мозку (audio_start / audio_stop, ІІ-співрозмовник): окремий файл, бо
+# sip-engine-ai — те саме з потоком звуку до мозку (audio_start / audio_stop, ШІ-співрозмовник): окремий файл, бо
 # sip-engine-next зараз під живим шлюзом.
 sip-engine sip-engine-next sip-engine-ai: engine.cpp Makefile
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ engine.cpp $(PJ_LIBS) $(SYS_LIBS)
