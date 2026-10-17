@@ -81,22 +81,28 @@
 // з першої сесії (правила 20/21 — в інструкціях моделі, VG_AI_FIRST_TRANSFER), той самий шлях набору, «1», REFER; поки
 // дзвонимо — гудки (holdTone ringback) або 05-hold. ШІ не піднявся, а менеджеру в цьому дзвінку ще не дзвонили → фраза
 // 82 (prompts.aiDown) → звичний набір менеджера з карткою і «1»; не взяв → busy_callback («зайнята» — лише після
-// справжнього набору). Запобіжник (breaker від диспетчера): VG_AI_BREAKER збоїв ШІ за вікно → на час шлюз по-старому.
-// Немає фабрики ШІ або рушій без звуку — старий режим.
+// справжнього набору). Уночі ШІ не піднявся — менеджеру не дзвонимо, «зайнята» не кажемо: фраза 83 (prompts.aiDownNight,
+// «неробочий час, менеджер передзвонить у робочий час»; перезвін after_hours уже стоїть) і відбій (ai_failed_callback).
+// Пошук клієнта повернув null (у lookup.mjs це тайм-аут або помилка) — перша фраза «даних немає». Запобіжник (breaker від
+// диспетчера): VG_AI_BREAKER збоїв ШІ за вікно → на час шлюз по-старому. Немає фабрики ШІ або рушій без звуку — старий
+// режим.
 //
-// ПРИЄДНАННЯ МЕНЕДЖЕРА, що передзвонив (joinOnCallback, VG_JOIN_ON_CALLBACK=1). Менеджер (managerCaller без PIN) дзвонить
-// на шлюз, а клієнт «чекає саме його» (рішення 16): фаза ai і перезвін у групі менеджера, або шлюз зараз набирає цього
-// менеджера для нього. Двоє таких — той, кого цьому менеджеру набирали останнім, за рівності — хто чекає довше. Диспетчер
-// віддає ногу менеджера сценарію клієнта (adoptManager, фаза joining): answer, набір цього менеджера скасовано, сесію ШІ
-// закрито так, що запізнілі onEnd / transfer / end_call ігноруються; коли в нозі менеджера є звук — клієнту 81
-// (prompts.joinClient), менеджеру prompts.mgrJoin і, якщо синтез устиг за JOIN_Q_WAIT_MS, «Питання клієнта: …» (без
-// телефонів), «1» не питаємо → міст (bridge; joinMode 'refer' — REFER на нозі клієнта з Replaces ноги менеджера, не
-// вдалося → міст). Підсумки: bridged_join / connected_join у клієнта, окремий рядок журналу менеджера callback_joined
-// (onExtra); перезвони клієнта в групах обох менеджерів знято. Клієнт поклав під час приєднання → менеджеру
-// prompts.mgrJoinGone, відбій (callback_join_gone), перезвін лишається. Менеджер поклав до з'єднання → знову ШІ
-// (transfer_failed). Клієнта вже з'єднують (card / confirm / transferring / bridged із цим менеджером або приєднання
-// триває) → другому дзвінку менеджера prompts.mgrJoinBusy (callback_join_busy). Дзвінок менеджера, що приєднується, не
-// рахується в maxCalls; для менеджерів межа maxCalls + 1. Прапорець вимкнено — передзвін, як і раніше.
+// ПРИЄДНАННЯ МЕНЕДЖЕРА, що передзвонив (joinOnCallback, VG_JOIN_ON_CALLBACK=1). Менеджер (managerCaller без PIN)
+// дзвонить на шлюз, а клієнт «чекає саме його» (рішення 16): фаза ai і перезвін у групі менеджера (цього дзвінка або ще
+// з попереднього — у callbacks.json), або шлюз зараз набирає цього менеджера для нього. Двоє таких — той, кого цьому
+// менеджеру набирали останнім, за рівності — хто чекає довше. Диспетчер віддає ногу менеджера сценарію клієнта
+// (adoptManager, фаза joining): answer, набір цього менеджера скасовано, сесію ШІ закрито так, що запізнілі onEnd /
+// transfer / end_call ігноруються; коли в нозі менеджера є звук — клієнту 81 (prompts.joinClient; привітання, якщо
+// грає, догрує; немає 81 — гудки чи утримання, поки менеджер слухає фрази), менеджеру prompts.mgrJoin (клієнт говорив
+// із ШІ; ні — prompts.mgrJoinPlain) і, якщо синтез устиг за JOIN_Q_WAIT_MS, «Питання клієнта: …» (без телефонів), «1»
+// не питаємо → міст (bridge; joinMode 'refer' — REFER на нозі клієнта з Replaces ноги менеджера, не вдалося → міст).
+// Підсумки: bridged_join / connected_join у клієнта, окремий рядок журналу менеджера callback_joined (onExtra);
+// перезвони клієнта в групах обох менеджерів знято. Клієнт поклав під час приєднання (у т. ч. поки REFER приєднання без
+// відповіді або не вдався) → менеджеру prompts.mgrJoinGone, відбій (callback_join_gone), перезвін лишається. Менеджер
+// поклав до з'єднання → знову ШІ (transfer_failed з failedBy 'join': «менеджер не зміг продовжити розмову»). Клієнта
+// вже з'єднують (card / confirm / transferring / bridged із цим менеджером або приєднання триває) → другому дзвінку
+// менеджера prompts.mgrJoinBusy (callback_join_busy). Дзвінок менеджера, що приєднується, не рахується в maxCalls; для
+// менеджерів межа maxCalls + 1. Прапорець вимкнено — передзвін, як і раніше.
 //
 // ПЕРЕДЗВІН (kind 'callback'): номер того, хто дзвонить, — із config.managers, порівнюємо ЦІЛКОМ (без підрядка).
 // Це менеджер, а не клієнт: його не вважаємо клієнтом і йому ж не дзвонимо (захист від петлі). Внутрішня лінія
@@ -331,8 +337,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   let aiS = null
   let aiRound = 0
   // «ШІ одразу»: v2 — цей дзвінок іде в новому режимі (вирішується на старті: answerMode ai, ШІ доступний, запобіжник
-  // закритий); route — рішення фази route (у журнал); intro — вступ 80: none | wait | playing | done; aiDownRound —
-  // набір менеджера після 82 (ШІ не піднявся); aiDownPlay — фраза 82: playing | done
+  // закритий); route — рішення фази route (у журнал); intro — вступ 80: none | wait | playing | done | failed (рушій не
+  // зіграв); aiDownRound — набір менеджера після 82 (ШІ не піднявся); aiDownPlay — фраза 82: playing | done
   let v2 = false
   let route = null
   let intro = 'none'
@@ -458,10 +464,12 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     mark('intro')
   }
 
-  function onIntroDone() {
+  // failed — рушій не зміг зіграти вступ (файл пошкоджений / недоступний): клієнт його не чув, тож ШІ почне з «Вітаю! Це
+  // віртуальний помічник Runferry…», а не з «Я віртуальний помічник…» (intro 'failed', у сесію — intro: false)
+  function onIntroDone(failed = false) {
     if (phase !== 'route' || intro !== 'playing') return
-    intro = 'done'
-    mark('introDone')
+    intro = failed ? 'failed' : 'done'
+    mark(failed ? 'introFailed' : 'introDone')
     if (infoDone) return decide('data')
     later('routeData', Math.max(0, Number(config.routeDecideGraceMs ?? 1000) || 0), () => decide('timeout'))
   }
@@ -483,7 +491,10 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       say('нерабочее время — отвечает ИИ')
       return startAi('after_hours')
     }
-    const variant = !infoDone || lookupState === 'error' || lookupState === 'off' || lookupState === 'pending' ? 'nodata' : category === 'openRequest' ? 'request' : 'general'
+    // Даних немає: пошук не встиг, вимкнений або впав. lookup.mjs на тайм-аут і помилку відповідає null, а «номера немає в
+    // базі» — це об'єкт із порожніми списками, тож null (lookupState 'none') — теж «даних немає», а не «заявки немає»
+    const noData = !infoDone || ['error', 'off', 'pending', 'none'].includes(lookupState)
+    const variant = noData ? 'nodata' : category === 'openRequest' ? 'request' : 'general'
     route.branch = 'ai_first'
     route.variant = variant
     if (variant === 'nodata') route.why = !infoDone ? 'timeout' : 'no_data'
@@ -704,6 +715,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     maybeVoicemail() // пошта чекала, поки привітання догра
     maybeNotice() // остання фраза — теж
     maybeAi() // ШІ — теж
+    maybeJoinClient() // 81 менеджера, що приєднався під час привітання, — теж
   }
 
   function startHold() {
@@ -1297,6 +1309,9 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         note: aiInfo.note,
         // «ШІ одразу»: нові тексти й правила (v2), варіант першої фрази і чи прозвучав вступ 80
         ...(v2 ? { v2: true, variant: aiInfo.variant ?? null, intro: intro === 'done' } : {}),
+        // повторна сесія: чому не з'єднали — dial (менеджер не взяв: у нього пропущений) чи join (менеджер, що передзвонив,
+        // поклав до з'єднання: «не відповідає» й «пропущений дзвінок» були б неправдою); afterHours — неробочий час
+        ...(kind === 'transfer_failed' ? { failedBy: aiInfo.failedBy || 'dial', afterHours: aiAfterHours() } : {}),
         onTool: aiTool,
         onSpeaking: () => {
           if (holdOn && phase === 'ai' && aiS === sess) {
@@ -1369,7 +1384,11 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     } catch (e) {
       err('callbacks', e?.message)
     }
-    if (!pendingCb?.stored) return { ok: true, saved: false, note: 'Записати передзвін не вдалося. Скажи, що менеджер побачить пропущений дзвінок.' }
+    if (!pendingCb?.stored) {
+      // «пропущений дзвінок» — лише якщо менеджеру справді дзвонили (у «ШІ одразу» до прохання клієнта — ні)
+      const missed = dials.some((d) => d.to === 'manager')
+      return { ok: true, saved: false, note: missed ? 'Записати передзвін не вдалося. Скажи, що менеджер побачить пропущений дзвінок.' : 'Записати передзвін не вдалося. Чесно скажи, що зараз записати не вийшло, і попроси передзвонити трохи пізніше.' }
+    }
     return { ok: true, saved: true, callback: true, note: aiInfo.kind === 'after_hours' ? 'Записано. Менеджер передзвонить у робочий час.' : 'Записано. Менеджер передзвонить.' }
   }
 
@@ -1429,6 +1448,14 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       if (!legA.down && !legA.gone) hangup(A)
       return finish()
     }
+    // «ШІ одразу» в неробочий час: менеджеру не дзвонили і не дзвонитимемо (рішення 23) — «лінія зайнята» була б
+    // неправдою (рішення 19). Перезвін after_hours уже стоїть: фраза 83 «неробочий час, менеджер передзвонить у робочий
+    // час» (prompts.aiDownNight; немає WAV або перезвону — без неї), відбій
+    if (v2 && aiAfterHours() && !dials.some((d) => d.to === 'manager')) {
+      if (!pendingCb?.stored) savePending()
+      say(`ИИ недоступен (${why}), нерабочее время — менеджеру не звоню, «линия занята» не говорю${pendingCb?.stored ? ', перезвон сохранён' : ''}, кладу трубку`)
+      return notice(pendingCb?.stored ? 'aiDownNight' : null, 'ai_failed_callback')
+    }
     say(`ИИ недоступен (${why})`)
     busyCallback(why)
   }
@@ -1465,6 +1492,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     aiDownPlay = 'done'
     cancel('aiDownPlay')
     if (phase === 'dialing') startHold()
+    if (phase === 'joining' && join?.client === 'done') joinHold() // менеджер приєднався, 81 немає — після 82 не тиша
     maybeNotice() // менеджер уже відмовив, поки грала 82: «лінія зайнята» / пошта — після неї
     maybeVoicemail()
   }
@@ -1536,7 +1564,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   // Менеджер на запит ШІ не взяв: знову ШІ (нова сесія: менеджер не відповів; з'єднати ще раз — лише якщо aiTransferMax
   // дозволяє). Клієнт сам просив менеджера, а перша фраза цієї сесії (і «лінія зайнята») обіцяє передзвін: якщо його
   // немає (клієнт раніше відмовився — callback:false), ставимо знову, з уже записаним питанням.
-  function aiTransferFailed(why) {
+  function aiTransferFailed(why, { joined = false } = {}) {
+    aiInfo.failedBy = joined ? 'join' : 'dial'
     if (!pendingCb?.stored) {
       const n = aiInfo.note
       savePending({ note: n ? { question: n.question, topic: n.topic, urgent: n.urgent } : null })
@@ -1550,8 +1579,9 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     phase = 'ai'
     aiInfo.sessionKind = 'transfer_failed'
     aiInfo.state = 'wait'
-    if (v2 && holdOn) {
-      // гудки після невдалого набору — не «ще дзвонимо»: тиша, поки ШІ не заговорить
+    if (holdOn && (v2 || (config.holdTone === 'ringback' && config.ringbackFile))) {
+      // гудки після невдалого набору — не «ще дзвонимо»: у «ШІ одразу» тиша, поки ШІ не заговорить; у старому режимі
+      // (VG_NO_ANSWER_MODE=ai з гудками) — звичне утримання 05-hold (aiHold), як перед першою сесією
       holdOn = false
       send({ cmd: 'stop', call: A })
     }
@@ -1586,8 +1616,22 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     const lastDial = [...dials].reverse().find((d) => d.to === 'manager')
     const st = { status: 'joinable', lastDialedAt: lastDial ? t0 + lastDial.at : null, since: t0 }
     if (phase === 'dialing' && target === 'manager' && mine) return st
-    if (phase === 'ai' && pendingCb?.stored && inGroup(pendingCb.managerKey)) return st
+    if (phase === 'ai' && waitsFor(group)) return st
     return null
+  }
+
+  // Перезвін цьому клієнту в групі менеджера: поставлений у цьому дзвінку або ще з попереднього (callbacks.json — один
+  // запис на пару клієнт + менеджер, живе callbackTtlHours; у «ШІ одразу» на старті перезвону немає, тож старий запис —
+  // єдиний слід того, що менеджер не взяв). Клієнт у цьому дзвінку відмовився від передзвону — не чекає.
+  function waitsFor(group) {
+    if (pendingCb?.stored && group.includes(pendingCb.managerKey)) return true
+    if (!phone || !callbacks?.listPending || callbackRefused()) return false
+    try {
+      return callbacks.listPending(group).some((x) => x.clientNumber === phone)
+    } catch (e) {
+      err('callbacks', e?.message)
+      return false
+    }
   }
 
   // Диспетчер віддав нам вхідну ногу менеджера (mc — managerCaller). Відповідаємо, скасовуємо набір цього менеджера,
@@ -1622,11 +1666,8 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       if (sess && !sess.ended) sess.stop('joined')
     }
     if (aiInfo) aiInfo.joins = (aiInfo.joins || 0) + 1
-    if (aiDownPlay === 'playing') {
-      // фразу 82 замінить 81 («Менеджер уже на лінії…»)
-      aiDownPlay = 'done'
-      cancel('aiDownPlay')
-    }
+    // фраза 82, якщо грає, — до 81 (maybeJoinClient): менеджер може покласти раніше, ніж 81 почнеться, і тоді 82 не
+    // обриваємо «лінія зайнята» (maybeNotice чекає її кінця)
     phase = 'joining'
     target = 'manager'
     legB = { call: ev.call, ref: null, join: true, confirmed: false, media: false, grace: false, down: false, ringing: false, code: null }
@@ -1682,12 +1723,14 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     maybeJoinGone()
   }
 
-  // У нозі менеджера є звук: клієнту 81, менеджеру «Клієнт на лінії з віртуальним помічником — з'єдную.» — одночасно
+  // У нозі менеджера є звук: клієнту 81, менеджеру «Клієнт на лінії з віртуальним помічником — з'єдную.» — одночасно.
+  // Клієнт із ШІ не говорив (класичний набір, набір після 82) — менеджеру «Клієнт на лінії — з'єдную.» (mgrJoinPlain)
   function maybeJoinPlay() {
     if (phase !== 'joining' || !join || join.state !== 'answer' || !bAlive() || !legReady(legB)) return
     join.state = 'phrases'
     join.marks.ready = clock.now() - join.at
-    const mf = prompt('mgrJoin')
+    const withAi = join.fromPhase === 'ai' || aiRound > 0 // з фази ai або набір на прохання ШІ
+    const mf = prompt(withAi ? 'mgrJoin' : 'mgrJoinPlain')
     if (mf) {
       join.mgr = 'playing'
       send({ cmd: 'play', call: legB.call, file: mf, loop: false, tag: 'mgrJoin' })
@@ -1700,14 +1743,22 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
   function maybeJoinClient() {
     if (phase !== 'joining' || !join || join.state !== 'phrases' || join.client !== 'none' || legA.down || legA.gone) return
     if (greeting === 'playing') {
-      // привітання (класичний набір) не обриваємо — 81 після нього
+      // привітання (класичний набір) не обриваємо — 81 після нього (onGreetingDone покличе знову)
       if (tm.joinGreeting == null) later('joinGreeting', PROMPT_MAX_MS, () => { greeting = 'done'; maybeJoinClient() })
       return
     }
+    cancel('joinGreeting')
     const cf = prompt('joinClient')
     if (!cf) {
+      // 81 немає (WAV ще не зроблені): поки менеджер слухає фрази — гудки чи утримання, а не тиша після обірваного ШІ
       join.client = 'done'
+      joinHold()
       return maybeJoinConnect()
+    }
+    if (aiDownPlay === 'playing') {
+      // фразу 82 замінює 81 («Менеджер уже на лінії…»)
+      aiDownPlay = 'done'
+      cancel('aiDownPlay')
     }
     join.client = 'playing'
     holdOn = false
@@ -1720,11 +1771,18 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     join.client = 'done'
     cancel('joinClient')
     // менеджер ще слухає питання клієнта — клієнту гудки (якщо задано), щоб не було тиші
-    if (phase === 'joining' && join.mgr !== 'finished' && config.holdTone === 'ringback' && config.ringbackFile && !legA.down) {
-      holdOn = true
-      send({ cmd: 'play', call: A, file: config.ringbackFile, loop: true, tag: 'hold' })
-    }
+    joinHold({ ringbackOnly: true })
     maybeJoinConnect()
+  }
+
+  // Приєднання: клієнт чекає, поки менеджер дослухає фрази, — гудки (holdTone ringback), інакше утримання (після 81 —
+  // лише гудки: «з'єдную вас» уже прозвучало). Не поверх привітання, 82 чи утримання, що вже грає.
+  function joinHold({ ringbackOnly = false } = {}) {
+    if (phase !== 'joining' || !join || join.mgr === 'finished' || holdOn || legA.down || legA.gone || greeting === 'playing' || aiDownPlay === 'playing') return
+    const file = config.holdTone === 'ringback' && config.ringbackFile ? config.ringbackFile : ringbackOnly ? null : config.holdFile
+    if (!file) return
+    holdOn = true
+    send({ cmd: 'play', call: A, file, loop: true, tag: 'hold' })
   }
 
   function onJoinMgrDone() {
@@ -1812,7 +1870,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
       holdOn = false
       send({ cmd: 'stop', call: A })
     }
-    if (aiInfo && aiReady()) return aiTransferFailed(why)
+    if (aiInfo && aiReady()) return aiTransferFailed(why, { joined: true })
     return noManager(why)
   }
 
@@ -2042,9 +2100,10 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
     finish()
   }
 
-  // A поклав (клієнт; на передзвоні — менеджер): кладемо B або скасовуємо набір, що ще йде
+  // A поклав (клієнт; на передзвоні — менеджер): кладемо B або скасовуємо набір, що ще йде. Приєднання ще не скінчилось
+  // (фрази або REFER приєднання, що не вдався чи лишився без відповіді, а нога менеджера жива) — менеджеру mgrJoinGone
   function clientGone() {
-    if (join && !join.result && phase === 'joining') return joinClientGone()
+    if (legB?.join && join && !join.result && (phase === 'joining' || phase === 'transferring')) return joinClientGone()
     const dialingNow = phase === 'dialing'
     const before = phase
     outcome = callback ? 'callback_cancelled' : 'client_hangup'
@@ -2161,7 +2220,7 @@ export function createFlow({ incoming, config, send, clock, lookup = null, build
         }
         return
       case 'play':
-        if (ev.call === A && phase === 'route' && intro === 'playing') onIntroDone()
+        if (ev.call === A && phase === 'route' && intro === 'playing') onIntroDone(true)
         else if (ev.call === A && aiDownPlay === 'playing') onAiDownPlayed()
         else if (ev.call === A && phase === 'joining' && join?.client === 'playing') onJoinClientDone()
         else if (legB?.join && ev.call === legB.call && phase === 'joining' && join?.mgr === 'playing') onJoinMgrDone()

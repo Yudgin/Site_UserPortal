@@ -25,7 +25,12 @@ const SPEAKER_UK = { client: 'Клієнт', ai: AI_NAME }
 const EVENT_SUMMARY_MAX = 300
 // Розмова з ШІ справді була (а не клієнт поклав у перші секунди): так вирішуємо, чи потрібна картка на дошці
 export const aiTalked = (entry) => (entry.ai?.sessions || []).some((x) => (x.durationMs || 0) >= 8000 || (x.toolCalls || []).length > 0)
-const OUTCOME_AI = { ai_noted: 'noted', ai_answered: 'ended', ai_client_hangup: 'client_hangup', connected: 'transferred', busy_callback: 'failed' }
+const OUTCOME_AI = { ai_noted: 'noted', ai_answered: 'ended', ai_client_hangup: 'client_hangup', connected: 'transferred', busy_callback: 'failed', ai_failed_callback: 'failed' }
+// Клієнт говорив із менеджером: переведення (connected…) або міст через шлюз (bridged…, у т. ч. приєднання менеджера, що
+// передзвонив, — bridged_join / connected_join)
+export const wasTransferred = (entry) => /^(connected|bridged)/.test(entry?.outcome || '')
+// Перезвін справді чекає: записаний і не знятий, коли клієнта з'єднали (served → pendingRemoved)
+export const callbackPending = (entry) => !!entry?.callback?.stored && !(entry.pendingRemoved > 0)
 
 // Документ дзвінка з журнального запису шлюзу (entry) і розшифровки (entry.aiTranscript). Чиста функція — для тестів.
 export function buildAiCallDoc({ entry, transcript, sr = null, now = new Date() }) {
@@ -33,7 +38,8 @@ export function buildAiCallDoc({ entry, transcript, sr = null, now = new Date() 
   const nowIso = now.toISOString()
   const callId = entry.gcid ? `ai-${String(entry.gcid).replace(/[^0-9A-Za-z_-]/g, '')}` : `ai-${Date.parse(startedAt).toString(36)}-${crypto.randomBytes(2).toString('hex')}`
   const turns = (transcript?.turns || []).map((t) => ({ speaker: t.speaker, start: t.start, end: t.end, text: t.text }))
-  const transferred = entry.outcome === 'connected' || /^connected/.test(entry.outcome || '')
+  const transferred = wasTransferred(entry)
+  const callbackStored = callbackPending(entry)
   const note = transcript?.note || null
   const aiStart = entry.t?.aiStart ?? entry.t?.ai ?? 0
   return {
@@ -67,7 +73,7 @@ export function buildAiCallDoc({ entry, transcript, sr = null, now = new Date() 
         createdAt: nowIso,
       },
       summary: {
-        text: summaryText({ note, transferred, callbackStored: !!entry.callback?.stored }),
+        text: summaryText({ note, transferred, callbackStored }),
         lang: 'uk',
         model: 'voice-gateway',
         createdAt: nowIso,
@@ -76,7 +82,7 @@ export function buildAiCallDoc({ entry, transcript, sr = null, now = new Date() 
         outcome: OUTCOME_AI[entry.outcome] || entry.outcome,
         kind: entry.ai?.kind || null,
         note,
-        callbackStored: !!entry.callback?.stored,
+        callbackStored,
         transfers: entry.ai?.transfers || 0,
         toolCalls: (entry.ai?.sessions || []).flatMap((x) => x.toolCalls || []).map(({ name, at, ok }) => ({ name, at, ok })),
       },
@@ -93,7 +99,7 @@ export function buildAiCallDoc({ entry, transcript, sr = null, now = new Date() 
 // Картка для операторської дошки (callEvents/ai-<gcid>) — у тій самій формі, що дзеркало originate
 export function buildAiCallEvent({ entry, transcript, callId, sr = null, now = new Date() }) {
   const nowIso = now.toISOString()
-  const summary = summaryText({ note: transcript?.note || null, transferred: entry.outcome === 'connected', callbackStored: !!entry.callback?.stored }).replace(/\n/g, ' ')
+  const summary = summaryText({ note: transcript?.note || null, transferred: wasTransferred(entry), callbackStored: callbackPending(entry) }).replace(/\n/g, ' ')
   return {
     callId,
     sourceCallId: entry.gcid || null,

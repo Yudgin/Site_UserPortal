@@ -32,13 +32,22 @@ export const TRANSFER_FAILED_V2 = {
   noted: 'На жаль, менеджер зараз не відповідає. Ваше питання я передам — він вам передзвонить. Чим ще можу допомогти?',
   none: 'На жаль, менеджер зараз не відповідає. Він побачить пропущений дзвінок і передзвонить вам. Що йому передати?',
 }
+// Менеджер, що передзвонив, приєднався і поклав до з'єднання (failedBy 'join'): «не відповідає» і «побачить пропущений
+// дзвінок» були б неправдою — він щойно дзвонив сам. Перезвін при цьому стоїть (aiTransferFailed), тож «передзвонить» —
+// правда. Обидва режими (приєднання — лише з VG_JOIN_ON_CALLBACK, тож старі тексти без прапорця не змінюються)
+export const TRANSFER_FAILED_JOIN = {
+  noted: 'На жаль, менеджер не зміг продовжити розмову. Ваше питання я передам — він вам передзвонить. Чим ще можу допомогти?',
+  none: 'На жаль, менеджер не зміг продовжити розмову. Він вам передзвонить. Що йому передати?',
+}
 // Що ШІ каже про сторінку заявки (AI-REQUEST-PAGE; слова — як у A-DAY сесії заглушок, «кабінет» → «сторінка заявки»)
 export const REQUEST_PAGE_TEXT = 'Щодо заявки найзручніше писати на сторінці заявки — посилання ми надіслали в SMS або в месенджері. Там можна поставити запитання, залишити коментар, дізнатися статус ремонту й замовити дзвінок від майстра; відповідаємо протягом одного робочого дня.'
 export const SECOND_LINE_TEXT = 'Відповідайте, будь ласка, — можливо, це менеджер. До побачення!' // AI-SECOND-LINE
 
 // Перша фраза сесії. v2 — режим «ШІ одразу» (нові тексти); інакше — рівно як раніше (FIRST_MESSAGES). variant —
-// request | general | nodata (для kind first), intro — чи прозвучав вступ 80, note — чи записане питання.
-export function firstMessageFor({ kind = 'busy', variant = 'nodata', intro = false, note = null, v2 = false } = {}) {
+// request | general | nodata (для kind first), intro — чи прозвучав вступ 80, note — чи записане питання, failedBy —
+// для transfer_failed: dial (менеджер не взяв) | join (менеджер, що передзвонив, поклав до з'єднання).
+export function firstMessageFor({ kind = 'busy', variant = 'nodata', intro = false, note = null, v2 = false, failedBy = 'dial' } = {}) {
+  if (kind === 'transfer_failed' && failedBy === 'join') return note?.question ? TRANSFER_FAILED_JOIN.noted : TRANSFER_FAILED_JOIN.none
   if (!v2) return FIRST_MESSAGES[kind] || FIRST_MESSAGES.busy
   if (kind === 'transfer_failed') return note?.question ? TRANSFER_FAILED_V2.noted : TRANSFER_FAILED_V2.none
   const tail = kind === 'first' ? FIRST_TAILS[`first_${variant}`] || FIRST_TAILS.first_nodata : FIRST_TAILS[kind]
@@ -108,13 +117,14 @@ function transferRuleV2({ kind, category, transferMode }) {
 // Інструкції моделі (укр.). kind: busy | after_hours | transfer_failed | first (v2); hoursText — «з понеділка до
 // п'ятниці, з дев'ятої до вісімнадцятої»; category — openRequest | knownClient | unknown | null (пошук не встиг);
 // transferAllowed — чи можна з'єднати з менеджером; v2 — режим «ШІ одразу» (без нього текст рівно як раніше);
-// transferMode — VG_AI_FIRST_TRANSFER (ask | always). Номер клієнта моделі не передаємо ніколи.
-export function buildInstructions({ kind = 'busy', hoursText = '', category = null, transferAllowed = false, statusDetail = 'minimal', note = null, v2 = false, transferMode = 'ask' } = {}) {
-  if (v2) return buildInstructionsV2({ kind, hoursText, category, transferAllowed, statusDetail, note, transferMode })
+// transferMode — VG_AI_FIRST_TRANSFER (ask | always); failedBy — для transfer_failed: dial | join (менеджер, що
+// передзвонив, поклав до з'єднання); afterHours — повторна сесія в неробочий час. Номер клієнта моделі не передаємо ніколи.
+export function buildInstructions({ kind = 'busy', hoursText = '', category = null, transferAllowed = false, statusDetail = 'minimal', note = null, v2 = false, transferMode = 'ask', failedBy = 'dial', afterHours = false } = {}) {
+  if (v2) return buildInstructionsV2({ kind, hoursText, category, transferAllowed, statusDetail, note, transferMode, failedBy, afterHours })
   const why = kind === 'after_hours'
     ? `Зараз неробочий час${hoursText ? `: ми працюємо ${hoursText}` : ''}. Менеджери не на зв'язку.`
     : kind === 'transfer_failed'
-      ? `Ти вже говорив із цим клієнтом і намагався з'єднати його з менеджером, але менеджер не відповів. Про це клієнт щойно почув у першій фразі.${note?.question ? ` Уже записане питання для менеджера: «${note.question}». Повторно не записуй, лише доповни, якщо клієнт скаже щось нове.` : ''}`
+      ? transferFailedWhy({ note, failedBy, afterHours, hoursText })
       : 'Менеджер зараз не зміг відповісти на дзвінок.'
   const who = {
     openRequest: 'За номером, з якого дзвонять, є відкрита заявка на ремонт.',
@@ -152,13 +162,24 @@ export function buildInstructions({ kind = 'busy', hoursText = '', category = nu
   ].join('\n')
 }
 
-function buildInstructionsV2({ kind, hoursText, category, transferAllowed, statusDetail, note, transferMode }) {
+// Повторна сесія (transfer_failed): що сталося — менеджер не взяв (dial) чи приєднався й поклав (join); уночі — ще й
+// що зараз неробочий час (сесія вже не after_hours, а контекст не має губитися)
+function transferFailedWhy({ note, failedBy, afterHours, hoursText }) {
+  const what = failedBy === 'join'
+    ? "Менеджер передзвонив і приєднався до розмови, але поклав слухавку до з'єднання (або зв'язок обірвався)."
+    : "Ти вже говорив із цим клієнтом і намагався з'єднати його з менеджером, але менеджер не відповів."
+  const night = afterHours ? ` Зараз неробочий час${hoursText ? `: ми працюємо ${hoursText}` : ''}.` : ''
+  const noted = note?.question ? ` Уже записане питання для менеджера: «${note.question}». Повторно не записуй, лише доповни, якщо клієнт скаже щось нове.` : ''
+  return `${what} Про це клієнт щойно почув у першій фразі.${night}${noted}`
+}
+
+function buildInstructionsV2({ kind, hoursText, category, transferAllowed, statusDetail, note, transferMode, failedBy, afterHours }) {
   const why = kind === 'after_hours'
     ? `Зараз неробочий час${hoursText ? `: ми працюємо ${hoursText}` : ''}. Менеджери не на зв'язку, з'єднати з людиною не можна.`
     : kind === 'first'
       ? "Ти першим відповідаєш на дзвінки на лінію Runferry в робочий час. Менеджеру ще не дзвонили: допоможи сам, а якщо клієнт просить людину — з'єднай за правилами нижче."
       : kind === 'transfer_failed'
-        ? `Ти вже говорив із цим клієнтом і намагався з'єднати його з менеджером, але менеджер не відповів. Про це клієнт щойно почув у першій фразі.${note?.question ? ` Уже записане питання для менеджера: «${note.question}». Повторно не записуй, лише доповни, якщо клієнт скаже щось нове.` : ''}`
+        ? transferFailedWhy({ note, failedBy, afterHours, hoursText })
         : 'Менеджер зараз не зміг відповісти на дзвінок.'
   const who = {
     openRequest: 'За номером, з якого дзвонять, є відкрита заявка на ремонт.',

@@ -45,24 +45,31 @@ export const PROMPT_ENV = {
 // словник, щоб без нових прапорців набір фраз (і їх синтез при старті) лишався рівно тим самим.
 export const JOIN_PROMPT_TEXTS = {
   mgrJoin: "Клієнт на лінії з віртуальним помічником — з'єдную.", // менеджеру, що передзвонив, перед мостом
+  // те саме, коли клієнт із ШІ не говорив (класичний набір, набір після 82): «з віртуальним помічником» було б неправдою
+  mgrJoinPlain: "Клієнт на лінії — з'єдную.",
   mgrJoinBusy: "Клієнта вже з'єднують з менеджером.", // другий дзвінок менеджера, поки клієнта вже з'єднують
   mgrJoinGone: 'Клієнт поклав слухавку.', // клієнт поклав, поки менеджера приєднували
 }
-// Клієнтські фрази (80, 81, 82) — ПРОБНІ тексти записки (розд. 4). Шлюз їх сам НЕ синтезує (правило власника «аудіо
+// Клієнтські фрази (80, 81, 82, 83) — ПРОБНІ тексти записки (розд. 4). Шлюз їх сам НЕ синтезує (правило власника «аудіо
 // лише після погодження текстів»): лише свій WAV (VG_*_WAV) або VG_CLIENT_SYNTH=trial за непорожнього
 // VG_ALLOWED_CALLERS (проба на тестових номерах). Немає файла — фразу пропускаємо.
 export const CLIENT_TRIAL_TEXTS = {
   intro: 'Вітаємо! Це багатоканальна лінія компанії Runferry.', // 80: перша фраза дзвінка в режимі ai (про запис — ні)
   joinClient: "Менеджер уже на лінії — з'єдную вас.", // 81: менеджер передзвонив, поки клієнт із ШІ
   aiDown: "Залишайтеся, будь ласка, на лінії — з'єднуємо вас із менеджером.", // 82: ШІ не піднявся, менеджеру ще не дзвонили
+  // 83: уночі ШІ не піднявся — менеджеру не дзвонимо, «лінія зайнята» була б неправдою; перезвін after_hours уже стоїть.
+  // Слова — з пробної першої фрази ШІ в неробочий час (AI-AFTER-HOURS); новий текст — на погодження власнику
+  aiDownNight: "Зараз неробочий час: ми працюємо з понеділка до п'ятниці, з дев'ятої до вісімнадцятої. Менеджер передзвонить вам у робочий час.",
 }
 export const AI_FIRST_PROMPT_ENV = {
   mgrJoin: 'VG_MGR_JOIN_WAV',
+  mgrJoinPlain: 'VG_MGR_JOIN_PLAIN_WAV',
   mgrJoinBusy: 'VG_MGR_JOIN_BUSY_WAV',
   mgrJoinGone: 'VG_MGR_JOIN_GONE_WAV',
   intro: 'VG_INTRO_WAV',
   joinClient: 'VG_JOIN_CLIENT_WAV',
   aiDown: 'VG_AI_DOWN_WAV',
+  aiDownNight: 'VG_AI_DOWN_NIGHT_WAV',
 }
 export const CLIENT_PROMPT_KEYS = Object.keys(CLIENT_TRIAL_TEXTS)
 
@@ -259,7 +266,7 @@ export function loadConfig(env = process.env) {
     // ringback — гудки 425 Гц (1 с звук / 4 с тиша), gateway.mjs генерує cache/ringback-425hz.wav (або VG_RINGBACK_WAV)
     holdTone: String(env.VG_HOLD_TONE || '').trim().toLowerCase() === 'ringback' ? 'ringback' : 'phrase',
     ringbackFile: env.VG_RINGBACK_WAV || null,
-    // Клієнтські фрази 80/81/82: off — лише свої WAV; trial — пробний синтез CLIENT_TRIAL_TEXTS (лише з VG_ALLOWED_CALLERS)
+    // Клієнтські фрази 80–83: off — лише свої WAV; trial — пробний синтез CLIENT_TRIAL_TEXTS (лише з VG_ALLOWED_CALLERS)
     clientSynth: String(env.VG_CLIENT_SYNTH || '').trim().toLowerCase() === 'trial' ? 'trial' : 'off',
     // Менеджер передзвонив на 901, поки клієнт чекає саме його (із ШІ з перезвоном у його групі або шлюз зараз йому
     // дзвонить), — приєднуємо: ШІ стоп, клієнту 81, менеджеру «Клієнт на лінії…», далі міст (bridge) або REFER клієнта з

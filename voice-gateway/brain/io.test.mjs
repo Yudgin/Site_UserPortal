@@ -674,3 +674,53 @@ test('gateway: рушій без DTMF і підтвердження «1» — н
   assert.ok(!/шлюз не запускается/.test(b.out), b.out)
   assert.deepEqual(cmds('b'), ['local', 'quit'])
 })
+
+// Клієнтські фрази 80/81/82/83 шлюз сам не синтезує (правило «аудіо лише після погодження текстів»): лише свій WAV або
+// VG_CLIENT_SYNTH=trial за непорожнього VG_ALLOWED_CALLERS. Перевіряємо список фраз, яких бракує (--no-tts: шлюз пише
+// «синтез выключен — нет фраз: …» — той самий відбір, що й для синтезу при старті), на підробленому рушії без мережі.
+test('gateway: клієнтські фрази 80–83 потрапляють у синтез лише з VG_CLIENT_SYNTH=trial і VG_ALLOWED_CALLERS; фрази менеджеру приєднання — з VG_JOIN_ON_CALLBACK', async () => {
+  const dir = tmpDir()
+  const fakeJs = path.join(dir, 'fake-engine.mjs')
+  fs.writeFileSync(fakeJs, `
+    import { createInterface } from 'node:readline'
+    const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n')
+    out({ ev: 'ready', dtmf: true, record: true })
+    createInterface({ input: process.stdin }).on('line', (l) => {
+      const c = JSON.parse(l)
+      if (c.cmd === 'local') out({ ev: 'reg', code: 200, reason: 'local', active: true, local: true })
+      if (c.cmd === 'quit') setTimeout(() => process.exit(0), 20)
+    })
+  `)
+  const fakeSh = path.join(dir, 'fake-engine.sh')
+  fs.writeFileSync(fakeSh, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeJs)}\n`)
+  fs.chmodSync(fakeSh, 0o755)
+  const wav = path.join(dir, 'p.wav')
+  fs.writeFileSync(wav, wavFromPcm16(Buffer.alloc(1600)))
+  const gwPath = fileURLToPath(new URL('./gateway.mjs', import.meta.url))
+  let n = 0
+  const run = (extra) => new Promise((resolve) => {
+    n++
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^VG_|^BINOTEL_/.test(k))),
+      VG_GREETING_WAV: wav, VG_HOLD_WAV: wav, VG_DATA_DIR: path.join(dir, `data${n}`), VG_CACHE_DIR: path.join(dir, `cache${n}`), VG_ANSWER_MODE: 'ai', VG_JOIN_ON_CALLBACK: '1', ...extra }
+    const gw = spawn(process.execPath, [gwPath, '--local', '--manager', 'sip:907@127.0.0.1:5094', '--engine', fakeSh, '--no-tts', '--no-lookup'], { env, stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = ''
+    gw.stdout.on('data', (b) => { out += b })
+    gw.stderr.on('data', (b) => { out += b })
+    const t = setTimeout(() => gw.kill('SIGTERM'), 1500)
+    gw.on('exit', (code) => { clearTimeout(t); resolve({ code, out, missing: (out.match(/синтез выключен — нет фраз: ([^\n]*)/) || [])[1] || '' }) })
+  })
+  const CLIENT = [/вступление 80/, /\(81\)/, /\(82\)/, /\(83\)/]
+  const a = await run({ VG_ALLOWED_CALLERS: '+380500000001' })
+  assert.equal(a.code, 0, a.out)
+  assert.match(a.missing, /«клиент на линии с ИИ — соединяю» менеджеру/, a.out)
+  assert.match(a.missing, /«клиент на линии — соединяю» менеджеру/)
+  for (const re of CLIENT) assert.doesNotMatch(a.missing, re, `без VG_CLIENT_SYNTH=trial: ${a.missing}`)
+  const b = await run({ VG_ALLOWED_CALLERS: '+380500000001', VG_CLIENT_SYNTH: 'trial' })
+  for (const re of CLIENT) assert.match(b.missing, re, `trial: ${b.missing}`)
+  const c = await run({ VG_CLIENT_SYNTH: 'trial' })
+  assert.match(c.out, /VG_CLIENT_SYNTH=trial без VG_ALLOWED_CALLERS — клиентские фразы 80–83 не синтезирую/)
+  for (const re of CLIENT) assert.doesNotMatch(c.missing, re, `trial без номерів: ${c.missing}`)
+  const d = await run({ VG_ALLOWED_CALLERS: '+380500000001', VG_CLIENT_SYNTH: 'trial', VG_JOIN_ON_CALLBACK: '0' })
+  assert.doesNotMatch(d.missing, /соединяю» менеджеру|\(81\)/, `без приєднання: ${d.missing}`)
+  assert.match(d.missing, /вступление 80/)
+})

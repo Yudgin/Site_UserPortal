@@ -11,7 +11,7 @@ import { buildInstructions, FIRST_MESSAGES, TOOL_DEFS, requestStatusFor, summary
 import { loadConfig, parseBreaker, CLIENT_TRIAL_TEXTS, JOIN_PROMPT_TEXTS } from './config.mjs'
 import { ringbackWav, ensureRingback } from './storage.mjs'
 import { readWavInfo, isTelephonyWav } from './tts.mjs'
-import { summary } from './gateway.mjs'
+import { summary, newModesLine } from './gateway.mjs'
 import { buildAiCallDoc, buildAiCallEvent, aiTalked, makeAiCallStore } from './aicalls.mjs'
 import { saveAiTranscript, pruneGatewayData } from './storage.mjs'
 import { toolConfig, agentBody } from './ai-setup-elevenlabs.mjs'
@@ -252,10 +252,13 @@ test('config: нові змінні черги A — типово все вим�
   assert.deepEqual([c.answerMode, c.joinOnCallback, c.joinMode, c.holdTone, c.clientSynth, c.aiFirstTransfer, c.routeDecideGraceMs, c.ringbackFile],
     ['manager', false, 'bridge', 'phrase', 'off', 'ask', 1000, null])
   assert.deepEqual(c.aiBreaker, { fails: 3, windowMs: 600000, offMs: 1800000 })
-  assert.deepEqual(Object.values(c.aiFirstPromptFiles), [null, null, null, null, null, null])
+  assert.deepEqual(Object.values(c.aiFirstPromptFiles), [null, null, null, null, null, null, null, null])
+  assert.deepEqual(Object.keys(c.aiFirstPromptFiles).sort(), ['aiDown', 'aiDownNight', 'intro', 'joinClient', 'mgrJoin', 'mgrJoinBusy', 'mgrJoinGone', 'mgrJoinPlain'])
   const c2 = loadConfig({ VG_ANSWER_MODE: ' AI ', VG_JOIN_ON_CALLBACK: '1', VG_JOIN_MODE: 'refer', VG_HOLD_TONE: 'ringback', VG_CLIENT_SYNTH: 'trial', VG_AI_FIRST_TRANSFER: 'always', VG_INTRO_WAV: '/w/80.wav', VG_JOIN_CLIENT_WAV: '/w/81.wav', VG_AI_DOWN_WAV: '/w/82.wav', VG_MGR_JOIN_WAV: '/w/mj.wav', VG_ROUTE_DECIDE_GRACE_MS: '700' })
   assert.deepEqual([c2.answerMode, c2.joinOnCallback, c2.joinMode, c2.holdTone, c2.clientSynth, c2.aiFirstTransfer, c2.routeDecideGraceMs], ['ai', true, 'refer', 'ringback', 'trial', 'always', 700])
   assert.deepEqual([c2.aiFirstPromptFiles.intro, c2.aiFirstPromptFiles.joinClient, c2.aiFirstPromptFiles.aiDown, c2.aiFirstPromptFiles.mgrJoin], ['/w/80.wav', '/w/81.wav', '/w/82.wav', '/w/mj.wav'])
+  const c3 = loadConfig({ VG_AI_DOWN_NIGHT_WAV: '/w/83.wav', VG_MGR_JOIN_PLAIN_WAV: '/w/mjp.wav' })
+  assert.deepEqual([c3.aiFirstPromptFiles.aiDownNight, c3.aiFirstPromptFiles.mgrJoinPlain], ['/w/83.wav', '/w/mjp.wav'])
   assert.deepEqual(parseBreaker('2/5/15'), { fails: 2, windowMs: 300000, offMs: 900000 })
   assert.equal(parseBreaker('0'), null)
   assert.equal(parseBreaker('off'), null)
@@ -264,6 +267,10 @@ test('config: нові змінні черги A — типово все вим�
   assert.doesNotMatch(CLIENT_TRIAL_TEXTS.intro, /запис/) // про запис скаже перша фраза ШІ
   assert.equal(CLIENT_TRIAL_TEXTS.joinClient, "Менеджер уже на лінії — з'єдную вас.")
   assert.equal(JOIN_PROMPT_TEXTS.mgrJoinBusy, "Клієнта вже з'єднують з менеджером.")
+  // клієнт із ШІ не говорив — менеджеру без «віртуального помічника»; 83 (ніч, ШІ не піднявся) — без «зайнята»
+  assert.equal(JOIN_PROMPT_TEXTS.mgrJoinPlain, "Клієнт на лінії — з'єдную.")
+  assert.doesNotMatch(CLIENT_TRIAL_TEXTS.aiDownNight, /зайнят|з'єдну/)
+  assert.match(CLIENT_TRIAL_TEXTS.aiDownNight, /неробочий час.*передзвонить вам у робочий час/)
   assert.ok(!('intro' in c.promptTexts) && !('mgrJoin' in c.promptTexts), 'старий набір фраз (і їх синтез при старті) не змінився')
 })
 
@@ -287,4 +294,59 @@ test('консоль: підсумок — «ШІ одразу», старий �
   assert.match(summary({ number: '+380500000001', outcome: 'ai_noted', ai: { kind: 'first', sessions: [{ durationMs: 30000, costUsd: 0.05 }], note: { urgent: false } }, route: { branch: 'ai_first' }, t: {} }), /ИИ \(сразу\): 30\.0 с/)
   assert.match(summary({ number: '+380500000001', outcome: 'connected', route: { branch: 'classic', why: 'breaker' }, t: {} }), /«ИИ сразу» не включился \(предохранитель\)/)
   assert.match(summary({ number: '+380500000001', outcome: 'bridged_join', join: { fromPhase: 'ai', mode: 'bridge', result: 'bridged', ms: 4200 }, t: {} }), /присоединение менеджера \(из фазы ai, мост\): соединены мостом за 4\.2 с/)
+})
+
+test('повторна сесія після приєднаного менеджера, що поклав (failedBy join): перша фраза й інструкції без «не відповідає» / «пропущений дзвінок», в обох режимах; недозвон (dial) — як і раніше', () => {
+  for (const v2 of [true, false]) {
+    for (const note of [null, { question: 'Де посилка?' }]) {
+      const t = firstMessageFor({ kind: 'transfer_failed', v2, note, failedBy: 'join' })
+      assert.doesNotMatch(t, /пропущений|не відповідає|Ваш дзвінок записано/)
+      assert.match(t, /менеджер не зміг продовжити розмову/)
+      assert.match(t, /передзвонить/)
+    }
+    const ins = buildInstructions({ kind: 'transfer_failed', v2, failedBy: 'join', note: { question: 'Де посилка?' } })
+    assert.match(ins, /приєднався до розмови, але поклав слухавку/)
+    assert.doesNotMatch(ins, /менеджер не відповів/)
+    assert.match(ins, /«Де посилка\?»/)
+    assert.doesNotMatch(ins, /неробочий час/)
+    assert.match(buildInstructions({ kind: 'transfer_failed', v2, failedBy: 'join', afterHours: true, hoursText: "з понеділка до п'ятниці, з 09:00 до 18:00" }), /Зараз неробочий час: ми працюємо з понеділка/)
+  }
+  // недозвон — рівно як раніше
+  assert.equal(firstMessageFor({ kind: 'transfer_failed', v2: false }), FIRST_MESSAGES.transfer_failed)
+  assert.match(firstMessageFor({ kind: 'transfer_failed', v2: true }), /побачить пропущений дзвінок/)
+  assert.match(buildInstructions({ kind: 'transfer_failed', v2: true }), /менеджер не відповів\. Про це клієнт щойно почув у першій фразі\./)
+})
+
+test('документ і картка дошки: приєднаний менеджер (bridged_join / connected_join) і міст — «З\'єднано з менеджером», перезвін знято — не «Менеджер передзвонить»', () => {
+  const now = new Date('2026-10-16T10:01:31Z')
+  for (const outcome of ['bridged_join', 'connected_join', 'bridged', 'connected_unconfirmed']) {
+    const entry = { ...ENTRY, outcome, callback: { managerKey: '907', stored: true, id: 'x' }, pendingRemoved: 1 }
+    const { doc } = buildAiCallDoc({ entry, transcript: TRANSCRIPT, now })
+    assert.match(doc.summary.text, /Домовилися: З'єднано з менеджером\.\nДалі: немає/, outcome)
+    assert.equal(doc.ai.callbackStored, false, outcome)
+    const ev = buildAiCallEvent({ entry, transcript: TRANSCRIPT, callId: 'ai-x', now })
+    assert.match(ev.summary, /Домовилися: З'єднано з менеджером\. Далі: немає/, outcome)
+  }
+  // питання записане, перезвін чекає — як і раніше
+  const { doc } = buildAiCallDoc({ entry: ENTRY, transcript: TRANSCRIPT, now })
+  assert.match(doc.summary.text, /Домовилися: Менеджер передзвонить\./)
+  assert.equal(doc.ai.callbackStored, true)
+  // ШІ вночі не піднявся — у документі «failed», перезвін чекає
+  assert.equal(buildAiCallDoc({ entry: { ...ENTRY, outcome: 'ai_failed_callback' }, transcript: TRANSCRIPT, now }).doc.ai.outcome, 'failed')
+})
+
+test('консоль: «сначала менеджер» — лише якщо менеджеру дзвонили; ніч без ШІ — без «линия занята»; рядок нових режимів — пробний синтез вступу ще йде', () => {
+  const night = summary({ number: '+380500000001', outcome: 'ai_answered', route: { branch: 'classic', why: 'breaker' }, ai: { kind: 'after_hours', sessions: [] }, dials: [], t: {} })
+  assert.match(night, /«ИИ сразу» не включился \(предохранитель\)/)
+  assert.doesNotMatch(night, /сначала менеджер/)
+  assert.match(summary({ number: '+380500000001', outcome: 'connected', route: { branch: 'classic', why: 'breaker' }, dials: [{ to: 'manager', attempt: 1 }], t: {} }), /не включился \(предохранитель\) — сначала менеджер/)
+  const down = summary({ number: '+380500000001', outcome: 'ai_failed_callback', reason: 'after_hours', callback: { stored: true }, ai: { kind: 'after_hours', error: 'ai_error', sessions: [] }, t: {} })
+  assert.doesNotMatch(down, /клиенту «линия занята»/)
+  assert.match(down, /менеджеру не звонили — «линия занята» не звучала, перезвон сохранён/)
+  const c = loadConfig({ VG_ANSWER_MODE: 'ai', VG_CLIENT_SYNTH: 'trial', VG_ALLOWED_CALLERS: '+380500000001' })
+  assert.match(newModesLine(c, { aiReady: true, clientTrial: true, introSynth: true }), /вступление пробный синтез/)
+  assert.match(newModesLine(c, { aiReady: true, clientTrial: true }), /вступление нет/)
+  assert.match(newModesLine({ ...c, prompts: { intro: '/w/80.wav' } }, { aiReady: true, clientTrial: true, introSynth: true }), /вступление есть/)
+  assert.match(newModesLine(c, { aiReady: false }), /ИИ сразу \(ИИ не готов — по-старому\)/)
+  assert.equal(newModesLine(loadConfig({})), null)
 })
