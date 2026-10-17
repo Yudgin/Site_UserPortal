@@ -12,6 +12,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -484,6 +485,7 @@ static std::string maskUri(const std::string &uri) {
 class GwCall;
 class GwPlayer;
 class GwAccount;
+class GwAudio;
 
 struct CallRec {
   int eid = 0;
@@ -499,6 +501,8 @@ struct CallRec {
   AudioMediaRecorder *rec = nullptr;  // запис голосу співрозмовника (голосова пошта)
   bool recOn = false;                 // звук виклику вже йде в запис
   std::string recFile;
+  GwAudio *audio = nullptr;  // потік звуку до мозку (ІІ-співрозмовник), команда audio_start
+  bool audioOn = false;      // порт уже під'єднаний до звуку виклику в обидва боки
   // Остання цифра DTMF: pjsua2 може повідомити те саме натискання двома колбеками (onDtmfDigit і onDtmfEvent)
   std::string dtmfDigit;
   int dtmfMethod = -1;
@@ -600,6 +604,244 @@ class GwPlayer : public AudioMediaPlayer {
   const bool loop_;
 };
 
+// ---------- звук виклику ↔ мозок (ІІ-співрозмовник) ----------
+// audio_start: рушій під'єднується до Unix-сокета мозку (шлях і токен дає мозок) і пускає звук виклику в обидва боки.
+// Перший рядок від рушія — JSON {"token":"…","call":N,"rate":R}\n (мозок за ним зіставляє з'єднання з дзвінком), далі
+// кадри: 1 байт типу + u32 LE довжина + дані.
+//   рушій → мозок: 'A' голос співрозмовника, PCM16LE моно, кадр 20 мс на частоті порту (немає звуку — тиша);
+//                  'M' u32 id + u32 відтворено — мітку мозку дограно;
+//                  'K' u32 відтворено + u32 скинуто — чергу скинуто (відповідь на 'C').
+//   мозок → рушій: 'A' PCM16LE для відтворення (будь-якої довжини), 'C' скинути чергу (співрозмовник перебив),
+//                  'M' u32 id — мітка в кінці того, що вже в черзі (дограно — рушій повертає 'M').
+// «Відтворено» — скільки семплів узято з черги від початку з'єднання (тиша-заповнювач не рахується), mod 2^32.
+// Колбеки порту приходять із медіапотоку моста конференції, а не з головного: черга й вихідний буфер під м'ютексом,
+// сокет неблокувальний. Мозок не читає — вихідний буфер обмежений, зайві кадри голосу відкидаємо (лічильник).
+static const size_t kAudioOutMax = 512 * 1024;  // вихідний буфер до мозку
+static const uint32_t kAudioFrameMax = 1u << 20; // найдовший кадр від мозку
+static const unsigned kAudioQueueSec = 180;     // черга відтворення — не довше
+
+static void putU32(std::string &s, uint32_t v) {
+  for (int i = 0; i < 4; i++) s += (char)((v >> (8 * i)) & 0xff);
+}
+static uint32_t getU32(const char *p) {
+  const unsigned char *u = (const unsigned char *)p;
+  return (uint32_t)u[0] | ((uint32_t)u[1] << 8) | ((uint32_t)u[2] << 16) | ((uint32_t)u[3] << 24);
+}
+
+class GwAudio : public AudioMediaPort {
+ public:
+  GwAudio(int eid, int fd, unsigned rate) : eid_(eid), fd_(fd), rate_(rate), spf_(rate / 50) {}
+  ~GwAudio() override {
+    std::lock_guard<std::mutex> g(mu_);
+    closeFdLocked();
+  }
+  int fd() {
+    std::lock_guard<std::mutex> g(mu_);
+    return fd_;
+  }
+  unsigned rate() const { return rate_; }
+  int eid() const { return eid_; }
+
+  // Медіапотік: наступні 20 мс для співрозмовника — з черги мозку; черга порожня — кадру немає (міст дає тишу)
+  void onFrameRequested(MediaFrame &f) override {
+    std::lock_guard<std::mutex> g(mu_);
+    size_t have = q_.size() - rd_;
+    if (closed_ || have == 0 || f.size < 2) {
+      f.type = PJMEDIA_FRAME_TYPE_NONE;
+      return;
+    }
+    size_t want = f.size / 2;
+    size_t n = std::min(want, have);
+    f.buf.assign(want * 2, 0);  // недобір наприкінці — тиша
+    memcpy(f.buf.data(), q_.data() + rd_, n * 2);
+    f.type = PJMEDIA_FRAME_TYPE_AUDIO;
+    rd_ += n;
+    played_ += n;
+    if (rd_ == q_.size()) {
+      q_.clear();
+      rd_ = 0;
+    } else if (rd_ > (size_t)rate_ * 4 && rd_ * 2 > q_.size()) {
+      q_.erase(q_.begin(), q_.begin() + (long)rd_);
+      rd_ = 0;
+    }
+    while (!marks_.empty() && marks_.front().first <= played_) {
+      outMark(marks_.front().second);
+      marks_.erase(marks_.begin());
+    }
+    flushLocked();
+  }
+
+  // Медіапотік: голос співрозмовника → мозку (без звуку — тиша того ж розміру: мозку потрібен безперервний потік)
+  void onFrameReceived(MediaFrame &f) override {
+    std::lock_guard<std::mutex> g(mu_);
+    if (closed_ || fd_ < 0) return;
+    size_t n = f.buf.empty() ? (size_t)spf_ * 2 : f.buf.size();
+    if (out_.size() + n + 5 > kAudioOutMax) {
+      droppedOut_++;
+      return;
+    }
+    out_ += 'A';
+    putU32(out_, (uint32_t)n);
+    if (f.buf.empty() || f.type != PJMEDIA_FRAME_TYPE_AUDIO) out_.append(n, '\0');
+    else out_.append((const char *)f.buf.data(), n);
+    flushLocked();
+  }
+
+  // Головний потік: перший рядок для мозку (до будь-якого кадру)
+  void hello(const std::string &line) {
+    std::lock_guard<std::mutex> g(mu_);
+    out_.insert(0, line);
+    flushLocked();
+  }
+
+  // Головний потік: прочитати все, що прийшло від мозку. false — мозок закрив з'єднання, помилка сокета чи протоколу.
+  bool pump() {
+    char buf[16384];
+    for (;;) {
+      int fd = this->fd();
+      if (fd < 0) return false;
+      ssize_t k = recv(fd, buf, sizeof buf, 0);
+      if (k > 0) {
+        in_.append(buf, (size_t)k);
+        if (!parse()) return false;
+        if ((size_t)k < sizeof buf) break;
+        continue;
+      }
+      if (k == 0) return false;
+      if (errno == EINTR) continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+      return false;
+    }
+    std::lock_guard<std::mutex> g(mu_);
+    flushLocked();
+    return !broken_;
+  }
+
+  bool wantWrite() {
+    std::lock_guard<std::mutex> g(mu_);
+    return fd_ >= 0 && !out_.empty();
+  }
+  void flush() {
+    std::lock_guard<std::mutex> g(mu_);
+    flushLocked();
+  }
+  bool broken() {
+    std::lock_guard<std::mutex> g(mu_);
+    return broken_;
+  }
+  // Більше не грати й не слати: колбеки моста, що ще прийдуть, нічого не роблять; сокет закриваємо одразу
+  void shut(unsigned long long &played, unsigned long long &queued, unsigned long long &droppedOut) {
+    std::lock_guard<std::mutex> g(mu_);
+    closed_ = true;
+    played = played_;
+    queued = q_.size() - rd_;
+    droppedOut = droppedOut_;
+    q_.clear();
+    rd_ = 0;
+    marks_.clear();
+    flushLocked();
+    closeFdLocked();
+  }
+
+ private:
+  void outMark(uint32_t id) {
+    out_ += 'M';
+    putU32(out_, 8);
+    putU32(out_, id);
+    putU32(out_, (uint32_t)played_);
+  }
+  void flushLocked() {
+    while (fd_ >= 0 && !out_.empty()) {
+      ssize_t w = send(fd_, out_.data(), out_.size(), 0);
+      if (w > 0) {
+        out_.erase(0, (size_t)w);
+        continue;
+      }
+      if (w < 0 && errno == EINTR) continue;
+      if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK) broken_ = true;
+      break;
+    }
+  }
+  void closeFdLocked() {
+    if (fd_ < 0) return;
+    ::close(fd_);
+    fd_ = -1;
+  }
+  // Кадри від мозку з in_; false — порушення протоколу (кадр завеликий)
+  bool parse() {
+    size_t off = 0;
+    bool ok = true;
+    while (in_.size() - off >= 5) {
+      char type = in_[off];
+      uint32_t len = getU32(in_.data() + off + 1);
+      if (len > kAudioFrameMax) {
+        ok = false;
+        break;
+      }
+      if (in_.size() - off - 5 < len) break;
+      const char *p = in_.data() + off + 5;
+      std::lock_guard<std::mutex> g(mu_);
+      if (type == 'A') {
+        size_t n = len / 2;
+        size_t cap = (size_t)rate_ * kAudioQueueSec;
+        size_t queued = q_.size() - rd_;
+        if (queued + n > cap) {
+          droppedIn_ += queued + n - cap;
+          n = queued < cap ? cap - queued : 0;
+        }
+        if (n) {
+          size_t at = q_.size();
+          q_.resize(at + n);
+          memcpy(q_.data() + at, p, n * 2);
+        }
+      } else if (type == 'C') {
+        uint32_t dropped = (uint32_t)(q_.size() - rd_);
+        q_.clear();
+        rd_ = 0;
+        marks_.clear();
+        out_ += 'K';
+        putU32(out_, 8);
+        putU32(out_, (uint32_t)played_);
+        putU32(out_, dropped);
+      } else if (type == 'M' && len == 4) {
+        uint32_t id = getU32(p);
+        unsigned long long pos = played_ + (q_.size() - rd_);
+        if (pos <= played_) outMark(id);
+        else marks_.push_back({pos, id});
+      }  // невідомі типи — пропускаємо (сумісність із новішим мозком)
+      off += 5 + len;
+    }
+    in_.erase(0, off);
+    if (!ok) return false;
+    std::lock_guard<std::mutex> g(mu_);
+    flushLocked();
+    return true;
+  }
+
+  const int eid_;
+  int fd_;
+  const unsigned rate_;
+  const unsigned spf_;  // семплів у кадрі 20 мс
+  std::mutex mu_;
+  std::vector<int16_t> q_;  // черга відтворення (PCM16 на частоті порту)
+  size_t rd_ = 0;
+  unsigned long long played_ = 0;
+  std::vector<std::pair<unsigned long long, uint32_t>> marks_;  // позиція (відтворено) → id мітки
+  std::string out_;  // до мозку
+  std::string in_;   // від мозку, ще не розібране (лише головний потік)
+  bool closed_ = false;
+  bool broken_ = false;
+  unsigned long long droppedOut_ = 0;  // кадрів голосу, які не влізли у вихідний буфер
+  unsigned long long droppedIn_ = 0;   // семплів, які не влізли в чергу відтворення
+};
+
+// Від'єднаний порт видаляємо із запізненням, як програвач: колбек моста ще може прийти
+struct DeadAudio {
+  GwAudio *a;
+  Clock::time_point at;
+};
+static std::vector<DeadAudio> g_deadAudios;
+
 static CallRec *findRec(int eid) {
   auto it = g_calls.find(eid);
   return it == g_calls.end() ? nullptr : &it->second;
@@ -693,6 +935,43 @@ static void dropRecorder(CallRec &r, const char *why) {
   r.recFile.clear();
 }
 
+// Потік звуку до мозку: звук виклику → порт і порт → виклик; медіа ще немає — під'єднаємо в onCallMediaState
+static void startAudio(CallRec &r) {
+  if (!r.audio || r.audioOn || r.ended || !r.mediaActive || !r.call) return;
+  try {
+    AudioMedia am = r.call->getAudioMedia(-1);
+    am.startTransmit(*r.audio);
+    r.audio->startTransmit(am);
+    r.audioOn = true;
+  } catch (Error &e) {
+    logf("call %d: audio stream start failed: %s", r.eid, e.reason.c_str());
+  }
+}
+
+// Потік більше не потрібен (audio_stop, кінець виклику, міст, мозок закрив сокет, вихід): від'єднати, закрити сокет,
+// повідомити мозок подією audio closed, об'єкт — на видалення в головному циклі.
+static void dropAudio(CallRec &r, const char *why) {
+  if (!r.audio) return;
+  if (r.audioOn && !r.ended && r.mediaActive && r.call) {
+    try {
+      AudioMedia am = r.call->getAudioMedia(-1);
+      am.stopTransmit(*r.audio);
+      r.audio->stopTransmit(am);
+    } catch (Error &) {
+    }
+  }
+  unsigned long long played = 0, queued = 0, droppedOut = 0;
+  r.audio->shut(played, queued, droppedOut);
+  logf("call %d: audio stream closed (%s, played %.1f s, dropped frames %llu)", r.eid, why,
+       (double)played / (double)r.audio->rate(), droppedOut);
+  g_deadAudios.push_back({r.audio, Clock::now()});
+  r.audio = nullptr;
+  r.audioOn = false;
+  if (!r.silent)
+    Ev("audio").call(r.eid).str("state", "closed").str("reason", why).num("played", (long long)played)
+        .num("queued", (long long)queued).num("dropped_frames", (long long)droppedOut).emit();
+}
+
 static void linkBridge(CallRec &a) {
   if (!a.bridgePeer || a.ended || !a.mediaActive) return;
   CallRec *b = findRec(a.bridgePeer);
@@ -741,6 +1020,7 @@ void GwCall::onCallState(OnCallStateParam &) {
     unlinkBridge(*r);
     dropPlayer(*r);
     dropRecorder(*r, "hangup");
+    dropAudio(*r, "hangup");
     g_deadCalls.push_back(eid_);  // видалимо об'єкт у головному циклі
   }
   if (r->silent) return;
@@ -760,13 +1040,14 @@ void GwCall::onCallMediaState(OnCallMediaStateParam &) {
   }
   if (active != r->mediaActive) {
     r->mediaActive = active;
-    if (!active) r->playerOn = r->recOn = false;  // порт міг зникнути
+    if (!active) r->playerOn = r->recOn = r->audioOn = false;  // порт міг зникнути
     Ev("media").call(eid_).boolean("active", active).emit();
   }
   if (active) {
-    r->playerOn = r->recOn = false;  // медіа могли перестворити — під'єднуємо заново
+    r->playerOn = r->recOn = r->audioOn = false;  // медіа могли перестворити — під'єднуємо заново
     startPlayer(*r);
     startRecorder(*r);
+    startAudio(*r);
     linkBridge(*r);
   }
 }
@@ -1186,6 +1467,81 @@ static void cmdRecordStop(const JObj &o) {
   dropRecorder(*r, "stop");
 }
 
+// Потік звуку виклику до мозку: {"cmd":"audio_start","call":N,"sock":"/abs/path.sock","token":"…","rate":8000}.
+// Сокет слухає мозок (тека 0700); рушій під'єднується, шле рядок привітання і далі кадри (див. GwAudio). rate — частота
+// порту (8000, 16000, 24000 або 48000): міст сам перетворює частоту, мозку не треба переводити. Один потік на виклик.
+static void cmdAudioStart(const JObj &o) {
+  int eid = 0;
+  CallRec *r = liveRec(o, "call", "audio_start", &eid);
+  if (!r) return;
+  if (r->audio) return emitError("audio_start", eid, "", "audio already started");
+  std::string sock, token;
+  if (!getStr(o, "sock", sock) || sock.empty() || sock[0] != '/')
+    return emitError("audio_start", eid, "", "sock must be an absolute path");
+  struct sockaddr_un sa;
+  if (sock.size() >= sizeof sa.sun_path) return emitError("audio_start", eid, "", "sock path too long");
+  getStr(o, "token", token);
+  if (token.size() > 128) return emitError("audio_start", eid, "", "bad token");
+  for (char c : token)
+    if (!isalnum((unsigned char)c) && c != '-' && c != '_') return emitError("audio_start", eid, "", "bad token");
+  long long rate = 8000;
+  if (has(o, "rate") && (!getInt(o, "rate", rate) || (rate != 8000 && rate != 16000 && rate != 24000 && rate != 48000)))
+    return emitError("audio_start", eid, "", "bad rate (8000, 16000, 24000, 48000)");
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) return emitError("audio_start", eid, "", std::string("socket: ") + strerror(errno));
+  fcntl(fd, F_SETFD, FD_CLOEXEC);
+#ifdef SO_NOSIGPIPE
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+  memset(&sa, 0, sizeof sa);
+  sa.sun_family = AF_UNIX;
+  memcpy(sa.sun_path, sock.c_str(), sock.size());
+  if (connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+    std::string why = strerror(errno);
+    ::close(fd);
+    return emitError("audio_start", eid, "", "connect: " + why);
+  }
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+  GwAudio *a = new GwAudio(eid, fd, (unsigned)rate);  // сокет тепер належить порту
+  try {
+    MediaFormatAudio fmt;
+    fmt.init(PJMEDIA_FORMAT_PCM, (unsigned)rate, 1, 20000, 16);
+    a->createPort("ai" + std::to_string(eid), fmt);
+  } catch (Error &e) {
+    delete a;
+    return emitError("audio_start", eid, "", e.reason.empty() ? e.info() : e.reason);
+  }
+  a->hello("{\"token\":" + jsonQuote(token) + ",\"call\":" + std::to_string(eid) + ",\"rate\":" + std::to_string(rate) + "}\n");
+  r->audio = a;
+  r->audioOn = false;
+  startAudio(*r);  // якщо медіа ще немає — під'єднаємо в onCallMediaState
+  logf("call %d: audio stream started (%lld Hz)", eid, rate);  // шлях сокета і токен не друкуємо
+  Ev("audio").call(eid).str("state", "started").num("rate", rate).emit();
+}
+
+static void cmdAudioStop(const JObj &o) {
+  int eid = 0;
+  CallRec *r = liveRec(o, "call", "audio_stop", &eid);
+  if (!r) return;
+  if (!r->audio) return emitError("audio_stop", eid, "", "no audio stream");
+  dropAudio(*r, "stop");
+}
+
+// Головний цикл: що прочитати з сокетів мозку і що дописати; мозок закрив сокет або помилка — потік закриваємо
+static void processAudio(const fd_set &rf, const fd_set &wf) {
+  for (auto &kv : g_calls) {
+    CallRec &r = kv.second;
+    if (!r.audio) continue;
+    int fd = r.audio->fd();
+    bool alive = fd >= 0 && !r.audio->broken();
+    if (alive && FD_ISSET(fd, &rf)) alive = r.audio->pump();
+    else if (alive && FD_ISSET(fd, &wf)) r.audio->flush();
+    if (alive && r.audio->broken()) alive = false;
+    if (!alive) dropAudio(r, "peer_closed");
+  }
+}
+
 static void cmdDial(const JObj &o) {
   std::string ref, uri;
   getStr(o, "ref", ref);
@@ -1278,6 +1634,8 @@ static void cmdBridge(const JObj &o) {
   if (a == b) return emitError("bridge", a, "", "a and b are the same");
   dropPlayer(*ra);
   dropPlayer(*rb);
+  dropAudio(*ra, "bridge");  // далі говорять люди: ІІ від'єднуємо
+  dropAudio(*rb, "bridge");
   if (ra->bridgePeer && ra->bridgePeer != b) unlinkBridge(*ra);
   if (rb->bridgePeer && rb->bridgePeer != a) unlinkBridge(*rb);
   ra->bridgePeer = b;
@@ -1310,6 +1668,8 @@ static void handleLine(std::string &line) {
   else if (cmd == "bridge") cmdBridge(o);
   else if (cmd == "record") cmdRecord(o);
   else if (cmd == "record_stop") cmdRecordStop(o);
+  else if (cmd == "audio_start") cmdAudioStart(o);
+  else if (cmd == "audio_stop") cmdAudioStop(o);
   else if (cmd == "quit") g_quit = true;
   else emitError(cmd, 0, "", "unknown cmd");
   auto pw = o.find("password");
@@ -1410,6 +1770,15 @@ static void reap(bool all = false) {
     g_closingRecs.push_back({d.eid, d.file, d.why, Clock::now()});
   }
   g_deadRecs.clear();
+  if (!g_deadAudios.empty()) {
+    auto now = Clock::now();
+    std::vector<DeadAudio> keep;
+    for (const auto &d : g_deadAudios) {
+      if (all || now - d.at >= kPlayerLinger) delete d.a;
+      else keep.push_back(d);
+    }
+    g_deadAudios.swap(keep);
+  }
   if (!g_deadPlayers.empty()) {
     auto now = Clock::now();
     std::vector<DeadPlayer> keep;
@@ -1475,6 +1844,7 @@ static void shutdownAll() {
   for (auto &kv : g_calls) {
     dropPlayer(kv.second);
     dropRecorder(kv.second, "shutdown");
+    dropAudio(kv.second, "shutdown");
     delete kv.second.call;  // деструктор сам покладе, якщо ще живий
     kv.second.call = nullptr;
   }
@@ -1599,18 +1969,29 @@ int main() {
     Ev("error").null("cmd").null("call").null("ref").str("msg", "init failed: " + e.reason).emit();
     return 1;
   }
-  // record — рушій уміє record/record_stop (голосова пошта); dtmf — повідомляє натискання (RFC 2833 і SIP INFO)
-  Ev("ready").boolean("record", true).boolean("dtmf", true).emit();
+  // record — рушій уміє record/record_stop (голосова пошта); dtmf — повідомляє натискання (RFC 2833 і SIP INFO);
+  // audio — уміє audio_start/audio_stop (потік звуку виклику до мозку для ІІ-співрозмовника)
+  Ev("ready").boolean("record", true).boolean("dtmf", true).boolean("audio", true).emit();
 
   std::string inbuf;
   bool eof = false;
   while (!g_quit && !g_signal) {
-    fd_set rf;
+    fd_set rf, wf;
     FD_ZERO(&rf);
+    FD_ZERO(&wf);
     FD_SET(0, &rf);
+    int maxfd = 0;
+    for (auto &kv : g_calls) {  // сокети потоків звуку до мозку: прийшов звук — прокидаємось одразу
+      if (!kv.second.audio) continue;
+      int afd = kv.second.audio->fd();
+      if (afd < 0 || afd >= FD_SETSIZE) continue;
+      FD_SET(afd, &rf);
+      if (kv.second.audio->wantWrite()) FD_SET(afd, &wf);
+      maxfd = std::max(maxfd, afd);
+    }
     struct timeval tv = {0, 10000};
     bool gotInput = false;
-    int n = select(1, &rf, nullptr, nullptr, &tv);
+    int n = select(maxfd + 1, &rf, &wf, nullptr, &tv);
     if (n > 0 && FD_ISSET(0, &rf)) {
       char buf[8192];
       ssize_t k = read(0, buf, sizeof buf);
@@ -1641,6 +2022,7 @@ int main() {
       logf("stdin closed");
       g_quit = true;
     }
+    if (n > 0 && maxfd > 0) processAudio(rf, wf);
     ep.libHandleEvents(gotInput ? 0 : 10);
     processRejects();
     processEof();

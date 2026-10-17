@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import dgram from 'node:dgram'
 import fs from 'node:fs'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
@@ -222,6 +223,7 @@ await step('0. старт рушія, локальний режим, помил�
   const ready = await eng.wait((e) => e.ev === 'ready', 3000, 'ready')
   assert(ready.record === true, `ready без record: ${JSON.stringify(ready)}`)
   assert(ready.dtmf === true, `ready без dtmf: ${JSON.stringify(ready)}`)
+  assert(ready.audio === true, `ready без audio: ${JSON.stringify(ready)}`)
   eng.send({ cmd: 'local', bind: '127.0.0.1', port: 5092, user: 'gw' })
   const reg = await eng.wait((e) => e.ev === 'reg', 3000, 'reg (local)')
   assert(reg.active === true && reg.code === 200, 'local: reg.active')
@@ -512,6 +514,200 @@ await step('5c. DTMF від pjsua: RFC 2833 (консоль «#») і SIP INFO (
   let log = ''
   for (let i = 0; i < 10 && !(/dtmf via rfc2833/.test(log) && /dtmf via info/.test(log)); i++) { await sleep(100); log = fs.readFileSync(eng.errLogPath, 'utf8') }
   assert(/dtmf via rfc2833/.test(log) && /dtmf via info/.test(log), 'у лозі рушія — метод DTMF')
+})
+
+// Мозок на Unix-сокеті: приймає з'єднання рушія, розбирає рядок привітання і кадри (тип + u32 LE довжина + дані)
+function audioBrain(sockPath) {
+  const conns = []
+  const waiters = new Set()
+  const notify = () => { for (const w of [...waiters]) w() }
+  const server = net.createServer((s) => {
+    const c = { s, hello: null, frames: [], buf: Buffer.alloc(0), ended: false }
+    conns.push(c)
+    s.on('data', (d) => {
+      c.buf = Buffer.concat([c.buf, d])
+      if (!c.hello) {
+        const nl = c.buf.indexOf(10)
+        if (nl < 0) return
+        c.hello = JSON.parse(c.buf.subarray(0, nl).toString('utf8'))
+        c.buf = c.buf.subarray(nl + 1)
+      }
+      while (c.buf.length >= 5) {
+        const len = c.buf.readUInt32LE(1)
+        if (c.buf.length < 5 + len) break
+        c.frames.push({ type: String.fromCharCode(c.buf[0]), data: Buffer.from(c.buf.subarray(5, 5 + len)), at: Date.now() })
+        c.buf = c.buf.subarray(5 + len)
+      }
+      notify()
+    })
+    s.on('close', () => { c.ended = true; notify() })
+    s.on('error', () => {})
+    notify()
+  })
+  const ready = new Promise((r) => server.listen(sockPath, r))
+  const frame = (type, data) => {
+    const h = Buffer.alloc(5)
+    h[0] = type.charCodeAt(0)
+    h.writeUInt32LE(data.length, 1)
+    return Buffer.concat([h, data])
+  }
+  return {
+    ready, conns,
+    send(c, type, data = Buffer.alloc(0)) { c.s.write(frame(type, data)) },
+    until(pred, ms, label) {
+      return new Promise((resolve, reject) => {
+        const check = () => {
+          const v = pred()
+          if (!v) return false
+          clearTimeout(timer)
+          waiters.delete(check)
+          resolve(v)
+          return true
+        }
+        const timer = setTimeout(() => { waiters.delete(check); reject(new Error(`тайм-аут ${ms} мс: ${label}`)) }, ms)
+        if (!check()) waiters.add(check)
+      })
+    },
+    close() { for (const c of conns) c.s.destroy(); server.close() },
+  }
+}
+const tone = (rate, sec, hz = 1000, amp = 8000) => {
+  const n = Math.round(rate * sec)
+  const b = Buffer.alloc(n * 2)
+  for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(amp * Math.sin((2 * Math.PI * hz * i) / rate)), i * 2)
+  return b
+}
+const rms = (b) => {
+  let s = 0
+  const n = Math.floor(b.length / 2)
+  for (let i = 0; i < n; i++) { const v = b.readInt16LE(i * 2); s += v * v }
+  return n ? Math.sqrt(s / n) : 0
+}
+// Частка потужності на частоті hz у PCM16 (Гьорцель): тон 1 кГц, що пройшов 16 кГц → міст 8 кГц → RTP → pjsua, — це він
+function toneShare(file, hz) {
+  const h = wavHeader(file)
+  const b = fs.readFileSync(file)
+  let off = 12
+  let dataOff = -1
+  while (off + 8 <= b.length) {
+    const id = b.toString('ascii', off, off + 4)
+    const len = b.readUInt32LE(off + 4)
+    if (id === 'data') { dataOff = off + 8; break }
+    off += 8 + len + (len & 1)
+  }
+  const n = Math.floor((b.length - dataOff) / 2)
+  const k = 2 * Math.cos((2 * Math.PI * hz) / h.rate)
+  const N = Math.round(h.rate * 0.02)
+  let best = 0
+  for (let i = 0; i + N <= n; i += N) {
+    let s1 = 0, s2 = 0, e = 0
+    for (let j = 0; j < N; j++) {
+      const x = b.readInt16LE(dataOff + 2 * (i + j))
+      e += x * x
+      const s0 = x + k * s1 - s2
+      s2 = s1
+      s1 = s0
+    }
+    if (e / N < 300 * 300) continue
+    const p = (s1 * s1 + s2 * s2 - k * s1 * s2) / (N * N / 2) / (e / N)
+    best = Math.max(best, p)
+  }
+  return best
+}
+
+await step('5d. потік звуку до мозку audio_start/audio_stop: голос P1 → сокет, тон від мозку → P1, мітка, скидання черги', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-smoke-'))
+  const sock = path.join(dir, 'a.sock')
+  const brain = audioBrain(sock)
+  await brain.ready
+  try {
+    const p1 = await startPeer('s5d-p1', 5091, 6000, { autoPlay: HOLD }) // P1 безперервно «говорить»
+    peers.push(p1)
+    eng.send({ cmd: 'audio_start', call: 995, sock, token: 't1' })
+    await eng.wait((e) => e.ev === 'error' && e.cmd === 'audio_start' && e.call === 995, 2000, 'error audio_start на невідомий виклик')
+    eng.send({ cmd: 'dial', ref: 'ai-1', uri: 'sip:peer@127.0.0.1:5091;transport=udp' })
+    const d = await eng.wait((e) => e.ev === 'dialing' && e.ref === 'ai-1', 3000, 'dialing')
+    await eng.wait((e) => e.ev === 'media' && e.call === d.call && e.active, 5000, 'media')
+    eng.send({ cmd: 'audio_start', call: d.call, sock: 'rel.sock', token: 't1' })
+    await eng.wait((e) => e.ev === 'error' && e.cmd === 'audio_start' && /absolute/.test(e.msg), 2000, 'error: відносний шлях')
+    eng.send({ cmd: 'audio_start', call: d.call, sock, token: 't1', rate: 11025 })
+    await eng.wait((e) => e.ev === 'error' && e.cmd === 'audio_start' && /rate/.test(e.msg), 2000, 'error: частота')
+    eng.send({ cmd: 'audio_start', call: d.call, sock: path.join(dir, 'nobody.sock'), token: 't1' })
+    await eng.wait((e) => e.ev === 'error' && e.cmd === 'audio_start' && /connect/.test(e.msg), 2000, 'error: сокета немає')
+    const token = `tok${crypto.randomBytes(6).toString('hex')}`
+    eng.send({ cmd: 'audio_start', call: d.call, sock, token, rate: 16000 })
+    const st = await eng.wait((e) => e.ev === 'audio' && e.call === d.call && e.state === 'started', 2000, 'audio started')
+    assert(st.rate === 16000, `audio started ${JSON.stringify(st)}`)
+    eng.send({ cmd: 'audio_start', call: d.call, sock, token })
+    await eng.wait((e) => e.ev === 'error' && e.cmd === 'audio_start' && /already/.test(e.msg), 2000, 'error: потік уже є')
+    const c = await brain.until(() => brain.conns.find((x) => x.hello), 2000, 'привітання від рушія')
+    assert(c.hello.token === token && c.hello.call === d.call && c.hello.rate === 16000, `привітання ${JSON.stringify(c.hello)}`)
+    // голос P1: кадри по 20 мс на 16 кГц (640 Б), більшість — не тиша
+    await sleep(2000)
+    const voice = c.frames.filter((f) => f.type === 'A')
+    assert(voice.length >= 80, `кадрів голосу за 2 с: ${voice.length}`)
+    assert(voice.every((f) => f.data.length === 640), `розмір кадру ${voice.find((f) => f.data.length !== 640)?.data.length}`)
+    const loud = voice.filter((f) => rms(f.data) > 300).length
+    say(`  голос P1: ${voice.length} кадрів за 2 с, гучних ${loud}`)
+    assert(loud >= voice.length * 0.4, 'у потоці від рушія немає голосу P1')
+    // тон 1,5 с шматками по 0,25 с + мітка 7 → мітка повертається, коли дограно (~1,5 с), відтворено = 24000
+    const t = tone(16000, 1.5)
+    const sentAt = Date.now()
+    for (let i = 0; i < t.length; i += 8000) brain.send(c, 'A', t.subarray(i, i + 8000))
+    const mk = Buffer.alloc(4)
+    mk.writeUInt32LE(7)
+    brain.send(c, 'M', mk)
+    const m7 = await brain.until(() => c.frames.find((f) => f.type === 'M' && f.data.readUInt32LE(0) === 7), 4000, 'мітка 7')
+    const playedAt7 = m7.data.readUInt32LE(4)
+    say(`  мітка 7 через ${m7.at - sentAt} мс, відтворено ${playedAt7}`)
+    assert(playedAt7 === 24000, `відтворено на мітці ${playedAt7}`)
+    assert(m7.at - sentAt >= 1300 && m7.at - sentAt <= 2600, `мітка прийшла через ${m7.at - sentAt} мс`)
+    // довгий тон 10 с, через 0,5 с — скидання: K з відтвореним і скинутим, сума = усе надіслане
+    brain.send(c, 'A', tone(16000, 10))
+    await sleep(500)
+    brain.send(c, 'C')
+    const k = await brain.until(() => c.frames.find((f) => f.type === 'K'), 2000, 'K після скидання')
+    const played = k.data.readUInt32LE(0)
+    const dropped = k.data.readUInt32LE(4)
+    say(`  скидання: відтворено ${played}, скинуто ${dropped}`)
+    assert(played + dropped === 24000 + 160000, `відтворено+скинуто ${played + dropped}`)
+    assert(dropped > 120000, `скинуто ${dropped}`)
+    // мітка на порожній черзі повертається одразу
+    mk.writeUInt32LE(8)
+    brain.send(c, 'M', mk)
+    await brain.until(() => c.frames.find((f) => f.type === 'M' && f.data.readUInt32LE(0) === 8), 1000, 'мітка 8 на порожній черзі')
+    eng.send({ cmd: 'audio_stop', call: d.call })
+    const cl = await eng.wait((e) => e.ev === 'audio' && e.call === d.call && e.state === 'closed', 2000, 'audio closed')
+    assert(cl.reason === 'stop', `audio closed ${JSON.stringify(cl)}`)
+    await brain.until(() => c.ended, 2000, 'рушій закрив сокет')
+    eng.send({ cmd: 'audio_stop', call: d.call })
+    await eng.wait((e) => e.ev === 'error' && e.cmd === 'audio_stop' && /no audio/.test(e.msg), 2000, 'error: потоку немає')
+    // другий потік того ж виклику (8 кГц), P1 кладе трубку — рушій закриває потік сам (reason hangup)
+    eng.send({ cmd: 'audio_start', call: d.call, sock, token: 'second' })
+    await eng.wait((e) => e.ev === 'audio' && e.call === d.call && e.state === 'started', 2000, 'audio started (2)')
+    const c2 = await brain.until(() => brain.conns.find((x) => x.hello?.token === 'second'), 2000, 'друге привітання')
+    assert(c2.hello.rate === 8000, `частота за замовчуванням ${c2.hello.rate}`)
+    await sleep(600)
+    const v2 = c2.frames.filter((f) => f.type === 'A')
+    assert(v2.length >= 20 && v2.every((f) => f.data.length === 320), `8 кГц: ${v2.length} кадрів, розмір ${v2[0]?.data.length}`)
+    p1.cmd('h')
+    await eng.wait((e) => e.ev === 'state' && e.call === d.call && e.state === 'DISCONNECTED', 5000, 'DISCONNECTED')
+    const cl2 = await eng.wait((e) => e.ev === 'audio' && e.call === d.call && e.state === 'closed', 2000, 'audio closed після відбою')
+    assert(cl2.reason === 'hangup', `audio closed ${JSON.stringify(cl2)}`)
+    await brain.until(() => c2.ended, 2000, 'сокет закрито після відбою')
+    await p1.quit()
+    peers = peers.filter((p) => p !== p1)
+    // P1 чув тон: у його записі є 1 кГц (16 кГц → міст 8 кГц → RTP пройшли без спотворень)
+    const share = toneShare(p1.recPath, 1000)
+    say(`  частка 1 кГц у записі P1: ${share.toFixed(2)}`)
+    assert(share > 0.8, `тону 1 кГц у записі P1 немає (${share.toFixed(2)})`)
+    const log = fs.readFileSync(eng.errLogPath, 'utf8')
+    assert(!log.includes(token) && !log.includes(dir), 'токен або шлях сокета в лозі рушія')
+    assert(/audio stream started \(16000 Hz\)/.test(log) && /audio stream closed \(stop/.test(log), 'у лозі рушія — старт і кінець потоку')
+  } finally {
+    brain.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 await step('6. quit: рушій виходить з кодом 0, stdout — лише JSON', async () => {
