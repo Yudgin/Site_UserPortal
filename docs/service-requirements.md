@@ -1137,11 +1137,11 @@ SMS), запись в журнал `notifications` с `meta.source` (`voice-gate
 у нас»).
 
 **«Відкрита».** В `isOpen()` добавлен источник `npDeliveredMs()` (экспорт): `npDelivery.deliveredAt` для текущей
-`returnTtn`, если после него не было новой отправки или возврата в работу (как у `currentDelivery`). Получение =
+`returnTtn`, если после него не было отправки другой посылки или возврата в работу. Запись `shipped` той же посылки (`note` «ТТН <№>») не перекрывает: номер часто вносят после отправки, иногда уже после получения. Получение =
 наиболее позднее из 1С, НП и «Видано клієнту». То же — в описании карточки Binotel («Клієнт отримав dd.mm»). Остальное
 правило не менялось.
 
-**Статус.** Код и тесты (`server/requestLink.test.js` 11, `server/returnTracking.test.js` 12; всего по серверу 126/126) —
+**Статус.** Код и тесты (`server/requestLink.test.js` 11, `server/returnTracking.test.js` 12; всего по серверу 127/127) —
 ветка `claude/resend-link-received`, в неё слита задеплоенная `origin/deploy/backend-2026-10-17` (00077-77n), НЕ задеплоено. До деплоя (только с «да» владельца): секрет
 `voice-gateway-token` в Secret Manager → env `VOICE_GATEWAY_TOKEN`; задание Cloud Scheduler на reconcile; согласовать
 текст SMS. Живых отправок и вызовов НП не было.
