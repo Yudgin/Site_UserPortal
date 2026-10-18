@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Дозаповнення serviceRequests.returnDelivery {ttn, shippedAt, deliveredAt} з історії зворотної ТТН у знімку 1С
+// Дозаповнення serviceRequests.returnDelivery {ttn, shippedAt, deliveredAt} і incomingDelivery (вхідна посилка: приїзд,
+// останній статус, «не знайдено» — фаза «чекаємо кораблик», власник 2026-10-18) з історії ТТН у знімку 1С
 // (serviceRequests/{id}/onec/snapshot.raw.returnTtnHistory). Далі поле підтримує нічна синхронізація (onecSync.js).
 // Потрібне для правила власника 2026-10-17 «заявка відкрита, доки клієнт не отримав кораблик, і ще 14 днів після»
 // (isOpen у binotelWebhook.js). Креди — ADC.
@@ -7,7 +8,7 @@
 //   node scripts/backfill-return-delivery.mjs --write   # записати лише поле returnDelivery (updatedAt не чіпаємо)
 import { initializeApp, applicationDefault } from 'firebase-admin/app'
 import { getFirestore } from 'firebase-admin/firestore'
-import { returnDeliveryOf } from '../onecSync.js'
+import { returnDeliveryOf, incomingDeliveryOf } from '../onecSync.js'
 import { isOpen, clientCategory, normalizeRouting } from '../binotelWebhook.js'
 
 const WRITE = process.argv.includes('--write')
@@ -31,7 +32,8 @@ const docs = (await db.collection('serviceRequests').get()).docs
 const routingSnap = await db.collection('system').doc('binotelRouting').get()
 const cfg = normalizeRouting(routingSnap.exists ? routingSnap.data() : {})
 const nowMs = Date.now()
-let scanned = 0, withRd = 0, delivered = 0, changed = 0, written = 0
+let scanned = 0, withRd = 0, delivered = 0, changed = 0, written = 0, incChanged = 0
+const sameInc = (a, b) => !!a && !!b && ['ttn', 'status', 'statusAt', 'arrivedAt', 'notFound'].every((k) => (a[k] ?? null) === (b[k] ?? null))
 const before = [], after = []
 for (const d of docs) {
   const sr = { id: d.id, ...d.data() }
@@ -40,15 +42,23 @@ for (const d of docs) {
   const snap = await withRetry(() => d.ref.collection('onec').doc('snapshot').get(), `snapshot ${d.id}`)
   if (scanned % 100 === 0) console.error(`… ${scanned} знімків`)
   scanned++
-  const rd = snap.exists && snap.data().raw ? returnDeliveryOf(snap.data().raw) : null
-  if (!rd) { after.push(sr); continue }
-  withRd++
-  if (rd.deliveredAt) delivered++
-  after.push({ ...sr, returnDelivery: rd })
-  if (!same(rd, sr.returnDelivery)) {
-    changed++
-    if (WRITE) { await withRetry(() => d.ref.update({ returnDelivery: rd }), `update ${d.id}`); written++ }
+  const raw = snap.exists ? snap.data().raw : null
+  const rd = raw ? returnDeliveryOf(raw) : null
+  const inc = raw ? incomingDeliveryOf(raw) : null
+  const patch = {}
+  const next = { ...sr }
+  if (rd) {
+    withRd++
+    if (rd.deliveredAt) delivered++
+    next.returnDelivery = rd
+    if (!same(rd, sr.returnDelivery)) { changed++; patch.returnDelivery = rd }
   }
+  // свіже опитування НП сервером (source 'np') для тієї ж ТТН новіше за історію 1С — не затираємо
+  if (inc && !sameInc(inc, sr.incomingDelivery) && !(sr.incomingDelivery?.source === 'np' && sr.incomingDelivery.ttn === inc.ttn)) {
+    incChanged++; patch.incomingDelivery = inc; next.incomingDelivery = inc
+  }
+  after.push(next)
+  if (WRITE && Object.keys(patch).length) { await withRetry(() => d.ref.update(patch), `update ${d.id}`); written++ }
 }
 const tally = (list) => {
   const byPhone = {}
@@ -58,7 +68,7 @@ const tally = (list) => {
   return t
 }
 const openCount = (list) => list.filter((s) => isOpen(s, nowMs, cfg)).length
-console.log(`snapshots scanned ${scanned}, with return TTN ${withRd}, delivered ${delivered}, would change ${changed}${WRITE ? `, written ${written}` : ' (dry run)'}`)
+console.log(`snapshots scanned ${scanned}, with return TTN ${withRd}, delivered ${delivered}, returnDelivery changes ${changed}, incomingDelivery changes ${incChanged}${WRITE ? `, docs written ${written}` : ' (dry run)'}`)
 console.log(`open requests: without returnDelivery ${openCount(before)}, with returnDelivery ${openCount(after)}`)
 console.log('categories by phone (requests only, no boat orders):', 'before', JSON.stringify(tally(before)), 'after', JSON.stringify(tally(after)))
 clearInterval(keepAlive)

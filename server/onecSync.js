@@ -145,6 +145,30 @@ export const returnDeliveryOf = (raw) => {
   const cycle = ev.slice(Math.max(start, 0))
   return { ttn, shippedAt: cycle[0].t, deliveredAt: cycle.find((e) => isDelivered(e.s))?.t || null }
 }
+// Вхідна посилка (клієнт → ми) за історією НП у 1С (raw.shipment: ttn, statusHistory). Для фази «чекаємо кораблик»
+// правила відкритої заявки (власник 2026-10-18: без ТТН клієнт привозить сам і це відмічають вручну; з ТТН — заявка
+// відкрита, поки посилка жива; «Номер не знайдено» — клієнт так і не відправив). arrivedAt — перше «отримано»,
+// status/statusAt — останній запис. notFound з 1С НЕ ставимо: опитування 1С 2026-10-12 о 16:10 дало «Номер не
+// знайдено» для 4 свіжих посилок, а жива НП того ж тижня — «Відправник створив накладну, але ще не надав до
+// відправки» (1С, схоже, питає чужі накладні без телефону). «Не знайдено» вирішує лише опитування НП сервером
+// (incomingRefresh.js, source 'np').
+export const incomingDeliveryOf = (raw) => {
+  const ttn = normTtn(raw?.shipment?.ttn) || null
+  if (!ttn) return null
+  const ev = events(raw?.shipment?.statusHistory)
+  // «отримано відправником» для вхідної = посилка повернулась до клієнта, а не приїхала до нас
+  const arrivedAt = ev.find((e) => isDelivered(e.s))?.t || null
+  const last = ev.length ? ev[ev.length - 1] : null
+  return {
+    ttn,
+    status: last ? last.s.slice(0, 120) : null,
+    statusAt: last ? last.t : null,
+    arrivedAt,
+    notFound: false,
+    source: '1c',
+  }
+}
+const sameIncoming = (a, b) => !!a && !!b && ['ttn', 'status', 'statusAt', 'arrivedAt', 'notFound'].every((k) => (a[k] ?? null) === (b[k] ?? null))
 const sameDelivery = (a, b) => !!a && !!b && (a.ttn || null) === (b.ttn || null) && (a.shippedAt || null) === (b.shippedAt || null)
   && (a.deliveredAt || null) === (b.deliveredAt || null)
 
@@ -269,6 +293,11 @@ export function registerOnecSync(app, deps) {
       // прогін не переписував заявку щоразу (Firestore повертає map в іншому порядку ключів).
       const rd = returnDeliveryOf(raw)
       if (rd && !sameDelivery(rd, exists ? cur.returnDelivery : null)) patch.returnDelivery = rd
+      // Вхідна посилка — лише якщо поточне значення з 1С (або порожнє): свіже опитування НП сервером (source 'np')
+      // новіше за історію 1С і його не затираємо, поки ТТН та сама.
+      const inc = incomingDeliveryOf(raw)
+      const curInc = exists ? cur.incomingDelivery : null
+      if (inc && !sameIncoming(inc, curInc) && !(curInc?.source === 'np' && curInc.ttn === inc.ttn)) patch.incomingDelivery = inc
       fill('serviceCenterId', centerId) // ручной выбор центра на карточке не затираем
       // Адрес НП 1С отдаёт текстом без Ref-ов — кладём текст, только если адреса нет совсем
       // (Ref при необходимости резолвится на карточке заявки/при создании ТТН).

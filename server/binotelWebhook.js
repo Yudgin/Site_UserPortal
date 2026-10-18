@@ -142,6 +142,7 @@ export const DEFAULT_ROUTING = {
   openMaxAgeDays: 180,
   doneGraceDays: 14, // днів ПІСЛЯ отримання кораблика клієнтом (правило власника 2026-10-17)
   transitMaxDays: 21, // відправлено, а отримання невідоме: ≈ до 7 днів доставки + 14 днів після отримання
+  awaitingMaxDays: 90, // кораблик ще не в нас (чекаємо посилку або що клієнт привезе сам): страховка від забутих заявок
   sendCustomerData: true,
   assignedToEmployeeNumber: null, // 1С зараз завжди шле 906
   mirrorCallEvents: false,
@@ -199,6 +200,7 @@ export function normalizeRouting(doc) {
     openMaxAgeDays: days(d.openMaxAgeDays, DEFAULT_ROUTING.openMaxAgeDays),
     doneGraceDays: days(d.doneGraceDays, DEFAULT_ROUTING.doneGraceDays),
     transitMaxDays: days(d.transitMaxDays, DEFAULT_ROUTING.transitMaxDays),
+    awaitingMaxDays: days(d.awaitingMaxDays, DEFAULT_ROUTING.awaitingMaxDays),
     sendCustomerData: d.sendCustomerData !== false,
     assignedToEmployeeNumber: assigned === '' ? null : /^\d+$/.test(assigned) ? Number(assigned) : assigned, // числом, як шле 1С
     mirrorCallEvents: d.mirrorCallEvents === true,
@@ -320,9 +322,20 @@ export function currentDelivery(sr) {
   if (shippedEventMs(sr, true) > anchor || reopenEventMs(sr) > anchor) return null
   return rd
 }
+// Кораблик уже потрапляв до нас: є етап або історія етапів (будь-якого походження, і 1c-sync), вхідна посилка
+// отримана (incomingDelivery.arrivedAt), або вже щось відправляли клієнту.
+export const boatArrived = (sr) => !!sr?.stage || (Array.isArray(sr?.stageHistory) && sr.stageHistory.length > 0)
+  || !!msOf(sr?.incomingDelivery?.arrivedAt) || !!normTtnDigits(sr?.returnTtn) || !!sr?.returnDelivery
 export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {
   if (!sr || sr.status === 'cancelled') return false
   const days = (t) => (nowMs - t) / DAY_MS
+  // 0. Кораблик ще не в нас (власник 2026-10-18): з ТТН — відкрита, поки посилка жива («Номер не знайдено» або
+  //    видалена — клієнт не відправив → закрита); без ТТН — клієнт привезе сам, відкрита до ручної відмітки
+  //    «Отримано». В обох випадках страховка awaitingMaxDays (90) від останньої дії.
+  if (sr.status !== 'done' && !boatArrived(sr)) {
+    if (sr.incomingDelivery?.notFound) return false
+    return days(lastActivityMs(sr)) <= cfg.awaitingMaxDays
+  }
   const rd = currentDelivery(sr)
   // Отримання: перше «отримано» останньої посилки з 1С або відмітка «Видано клієнту» — що пізніше.
   const deliveredMs = Math.max(msOf(rd?.deliveredAt), handedOverMs(sr))
@@ -396,7 +409,10 @@ export function buildCustomerData({ phone, requests, orders, profile, siteUrl, a
     const alive = main.status !== 'cancelled'
     const deliveredMs = alive ? msOf(currentDelivery(main)?.deliveredAt) : 0
     const handedMs = alive ? handedOverMs(main) : 0
-    const state = handedMs && handedMs >= deliveredMs
+    const awaiting = alive && main.status !== 'done' && !boatArrived(main)
+    const state = awaiting && mainOpen
+      ? normTtnDigits(main.waybillNumber) ? 'Чекаємо посилку' : 'Чекаємо кораблик (привезе сам)'
+      : handedMs && handedMs >= deliveredMs
       ? `Видано клієнту ${kyivDayMonth(new Date(handedMs).toISOString(), nowMs)}`
       : deliveredMs
         ? `Клієнт отримав ${kyivDayMonth(new Date(deliveredMs).toISOString(), nowMs)}`

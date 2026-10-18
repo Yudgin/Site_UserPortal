@@ -28,7 +28,7 @@ import { notificationApi } from '@/api/endpoints/notification'
 import { pricingService } from '@/api/pricingService'
 import { formatMoney } from '@/utils/pricing'
 import {
-  SERVICE_REQUEST_STATUS_LABELS, REPAIR_STAGE_LABELS, REPAIR_STAGE_ORDER, nextRepairStage,
+  SERVICE_REQUEST_STATUS_LABELS, REPAIR_STAGE_LABELS, REPAIR_STAGE_ORDER, nextRepairStage, isAwaitingBoat,
   type ServiceRequest, type ServiceRequestStatus, type RepairStage,
 } from '@/types/serviceRequest'
 import type { EstimateOffer, Estimate } from '@/types/pricing'
@@ -326,8 +326,23 @@ export default function ServiceRequestPage() {
             )
           })}
         </Stack>
+        {/* Кораблик ще не в нас (власник 2026-10-18): з ТТН — чекаємо посилку; без ТТН — клієнт привезе сам, і коли
+            привіз, це відмічають кнопкою «Отримано — клієнт привіз сам». */}
+        {isAwaitingBoat(req) && (
+          <Alert severity={req.incomingDelivery?.notFound ? 'error' : 'warning'} sx={{ mb: 1.5 }}>
+            {req.waybillNumber
+              ? <>Кораблик ще не в нас: чекаємо посилку ТТН {req.waybillNumber}
+                  {req.incomingDelivery?.status ? ` — ${req.incomingDelivery.status}` : ''}.
+                  {req.incomingDelivery?.notFound ? ' Нова Пошта не знаходить номер — схоже, клієнт не відправив.' : ' Коли отримаєте — позначте «Отримано».'}</>
+              : <>Кораблик ще не в нас: ТТН немає, клієнт привезе сам. Коли привезе — натисніть «Отримано — клієнт привіз сам».</>}
+          </Alert>
+        )}
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
-          {nextRepairStage(req.stage) && (
+          {isAwaitingBoat(req) && !req.waybillNumber ? (
+            <Button variant="contained" disabled={saving} onClick={() => applyStage('received', 'привіз сам')}>
+              {REPAIR_STAGE_LABELS.received} — клієнт привіз сам
+            </Button>
+          ) : nextRepairStage(req.stage) && (
             <Button variant="contained" disabled={saving} onClick={() => applyStage(nextRepairStage(req.stage)!)}>
               Наступний етап: {REPAIR_STAGE_LABELS[nextRepairStage(req.stage)!]}
             </Button>

@@ -2,7 +2,7 @@
 // отримав кораблик, і ще 14 днів після» (isOpen у binotelWebhook.js).
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { returnDeliveryOf } from './onecSync.js'
+import { returnDeliveryOf, incomingDeliveryOf } from './onecSync.js'
 
 test('returnDeliveryOf: дата відправки — перша подія, отримання — перше «отримано», за Києвом → UTC', () => {
   const r = returnDeliveryOf({ returnTtn: '20451234567890', returnTtnHistory: [
@@ -73,4 +73,21 @@ test('третє коло: приїзд і доставка з однією мі
     shipment: { statusHistory: [{ status: 'Відправлення отримано', timestamp: '2025-09-09T01:20:05' }] },
     returnTtnHistory: [{ status: 'Прибув у відділення', timestamp: '2025-09-09T01:20:05' }, { status: 'Відправлення отримано', timestamp: '2025-09-09T01:20:05' }] })
   assert.equal(r.deliveredAt, '2025-09-08T22:20:05.000Z')
+})
+
+test('incomingDeliveryOf: приїзд до нас, останній статус, «не знайдено»; «отримано відправником» — не приїзд', () => {
+  const arrived = incomingDeliveryOf({ shipment: { ttn: '20450001', statusHistory: [
+    { status: 'Створена', timestamp: '2026-10-01T10:00:00' }, { status: 'Відправлення отримано', timestamp: '2026-10-03T12:00:00' },
+    { status: 'Відправлення отримано', timestamp: '2026-10-03T12:15:00' } ] } })
+  assert.deepEqual(arrived, { ttn: '20450001', status: 'Відправлення отримано', statusAt: '2026-10-03T09:15:00.000Z', arrivedAt: '2026-10-03T09:00:00.000Z', notFound: false, source: '1c' })
+  // «Номер не знайдено» з опитування 1С ненадійне (жива НП того ж тижня бачила ці накладні) — notFound лише з НП
+  const gone = incomingDeliveryOf({ shipment: { ttn: '1', statusHistory: [{ status: 'Створена', timestamp: '2026-04-01T10:00:00' }, { status: 'Номер не знайдено', timestamp: '2026-10-01T10:00:00' }] } })
+  assert.equal(gone.notFound, false)
+  assert.equal(gone.status, 'Номер не знайдено')
+  assert.equal(gone.arrivedAt, null)
+  // отримано колись, а потім НП стерла номер — не «не знайдено»
+  assert.equal(incomingDeliveryOf({ shipment: { ttn: '1', statusHistory: [{ status: 'Відправлення отримано', timestamp: '2026-04-01T10:00:00' }, { status: 'Номер не знайдено', timestamp: '2026-10-01T10:00:00' }] } }).notFound, false)
+  assert.equal(incomingDeliveryOf({ shipment: { ttn: '1', statusHistory: [{ status: 'Відправлення отримано відправником', timestamp: '2026-04-01T10:00:00' }] } }).arrivedAt, null)
+  assert.equal(incomingDeliveryOf({ shipment: { ttn: 0 } }), null)
+  assert.equal(incomingDeliveryOf({}), null)
 })

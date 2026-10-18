@@ -22,6 +22,7 @@ import { registerCalls } from './calls.js'
 import { registerFmcCalls } from './fmcCalls.js'
 import { registerBinotelCalls } from './binotelCalls.js'
 import { registerBinotelWebhook } from './binotelWebhook.js'
+import { registerIncomingRefresh } from './incomingRefresh.js'
 import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
 import { registerVoiceTranscribe } from './voiceTranscribe.js'
@@ -1255,6 +1256,9 @@ if (process.env.BINOTEL_KEY && process.env.BINOTEL_SECRET) {
 // напрямую). Ответ {customerData, routeData} по нашей базе; маршрутизацию переключает Firestore
 // system/binotelRouting. Токен BINOTEL_WEBHOOK_TOKEN (Secret Manager binotel-webhook-token).
 registerBinotelWebhook(app, { adminDb, siteUrl: SITE_URL })
+// Статус вхідної посилки (клієнт → ми) для заявок, де кораблик ще не в нас: POST /api/service-requests/refresh-incoming
+// (x-admin-token, Cloud Scheduler раз на добу) — для фази «чекаємо кораблик» правила відкритої заявки.
+registerIncomingRefresh(app, { adminDb, npRequest })
 // Синхронизация картотеки ремонтов из 1С (admin/scheduler): upsert в serviceRequests.
 registerOnecSync(app, { adminDb })
 // Голосова надиктовка з застосунку сервісу: POST /api/ai/transcribe (staff, аудіо → текст; рушій у stt.js,

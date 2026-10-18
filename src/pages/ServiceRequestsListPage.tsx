@@ -15,7 +15,7 @@ import { serviceCenterService } from '@/api/serviceCenterService'
 import { syncRepairsFrom1C } from '@/api/onecSyncApi'
 import { useTtnStatuses, ttnChipColor } from '@/hooks/useTtnStatuses'
 import {
-  SERVICE_REQUEST_STATUS_LABELS, REPAIR_STAGE_LABELS, type ServiceRequest, type ServiceRequestStatus,
+  SERVICE_REQUEST_STATUS_LABELS, REPAIR_STAGE_LABELS, isAwaitingBoat, type ServiceRequest, type ServiceRequestStatus,
 } from '@/types/serviceRequest'
 import type { ServiceCenter } from '@/types/access'
 
@@ -194,6 +194,10 @@ export default function ServiceRequestsListPage() {
                     <TableCell>
                       <Chip size="small" color={statusColor(r.status)} label={SERVICE_REQUEST_STATUS_LABELS[r.status]} />
                       {r.stage && <Chip size="small" variant="outlined" color="primary" label={REPAIR_STAGE_LABELS[r.stage]} sx={{ ml: 0.5 }} />}
+                      {isAwaitingBoat(r) && (
+                        <Chip size="small" variant="outlined" color={r.incomingDelivery?.notFound ? 'error' : 'warning'} sx={{ ml: 0.5 }}
+                          label={r.incomingDelivery?.notFound ? 'Посилку не відправлено' : r.waybillNumber ? 'Чекаємо посилку' : 'Привезе сам'} />
+                      )}
                       {is1c6(r) && <Chip size="small" variant="outlined" label="1С6" sx={{ ml: 0.5 }} />}
                       {centerName(r.serviceCenterId) && (
                         <Chip size="small" variant="outlined" label={centerName(r.serviceCenterId)} sx={{ ml: 0.5, maxWidth: 140 }} />
