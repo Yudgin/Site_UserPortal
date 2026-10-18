@@ -322,13 +322,17 @@ export function currentDelivery(sr) {
 }
 // Третє джерело отримання — пряме опитування НП (returnTracking.js → npDelivery): для зворотних ТТН, яких 1С не знає
 // (створені порталом чи застосунком; у 1С номер майже завжди 0) і після вимкнення 1С. Лише для поточної returnTtn і
-// якщо після отримання не було нової відправки чи повернення в роботу — як у currentDelivery.
+// якщо після отримання не було нової відправки чи повернення в роботу — як у currentDelivery. Запис 'shipped' ТІЄЇ Ж
+// посилки (note «ТТН <№>», так пишуть застосунок і np-ttn) не перекриває: номер часто вносять пізніше, ніж посилка
+// пішла, іноді вже після отримання (сесія «Обратная доставка в приложении сервиса», 2026-10-18).
 export function npDeliveredMs(sr) {
   const nd = sr?.npDelivery
   const at = msOf(nd?.deliveredAt)
   const ttn = normTtnDigits(nd?.ttn)
   if (!at || !ttn || ttn !== normTtnDigits(sr.returnTtn)) return 0
-  if (shippedEventMs(sr, true) > at || reopenEventMs(sr) > at) return 0
+  const otherShipMs = Math.max(0, ...stageEvents(sr)
+    .filter((h) => h.stage === 'shipped' && h.by !== '1c-sync' && normTtnDigits(h.note) !== ttn).map((h) => msOf(h.at)))
+  if (otherShipMs > at || reopenEventMs(sr) > at) return 0
   return at
 }
 export function isOpen(sr, nowMs, cfg = DEFAULT_ROUTING) {

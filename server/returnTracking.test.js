@@ -114,8 +114,20 @@ test('npDeliveredMs: only for the current returnTtn and not superseded by a late
   assert.equal(npDeliveredMs(SR({ npDelivery: { ...nd, deliveredAt: null } })), 0)
   // гарантія: після отримання кораблик знову в роботі
   assert.equal(npDeliveredMs(SR({ npDelivery: nd, stageHistory: [shippedNp(25), { stage: 'received', at: daysAgo(2), by: 'm@x' }] })), 0)
-  // нова відправка порталом після отримання
-  assert.equal(npDeliveredMs(SR({ npDelivery: nd, stageHistory: [shippedNp(25), shippedNp(1)] })), 0)
+  // нова відправка порталом після отримання (інший номер)
+  const otherShip = { stage: 'shipped', at: daysAgo(1), by: 'np-ttn', note: 'ТТН 20450000000009' }
+  assert.equal(npDeliveredMs(SR({ npDelivery: nd, stageHistory: [shippedNp(25), otherShip] })), 0)
+})
+
+test('npDeliveredMs: the same parcel\'s TTN entered after the client already got it still counts', () => {
+  // майстер вніс номер у застосунку через день після доставки: запис 'shipped' пізніший за deliveredAt
+  const late = { stage: 'shipped', at: daysAgo(19), by: 'master@x', note: `ТТН ${T}` }
+  const sr = SR({ doneAt: daysAgo(21), stageHistory: [late], npDelivery: { ttn: T, code: '9', final: 'received', deliveredAt: daysAgo(20) } })
+  assert.equal(npDeliveredMs(sr), NOW - 20 * DAY)
+  assert.equal(isOpen(sr, NOW), false, '14 days from delivery, not 21 from entering the number')
+  // той самий сценарій, але номер внесено до доставки — так само
+  const early = SR({ doneAt: daysAgo(21), stageHistory: [{ ...late, at: daysAgo(21) }], npDelivery: { ttn: T, code: '9', final: 'received', deliveredAt: daysAgo(20) } })
+  assert.equal(isOpen(early, NOW), false)
 })
 
 test('isOpen: 1C delivery and handover still win when later than NP', () => {
