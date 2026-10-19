@@ -506,6 +506,24 @@ export default function ServiceRequestPage() {
             </Button>
           </Stack>
         )}
+        {/* Додаткові витрати поза прайсом (вносить Telegram-бот співробітників або редактор факту) */}
+        {(req.extraExpenses || []).length > 0 && (
+          <Box sx={{ mt: 2 }}>
+            <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Додаткові витрати (поза прайсом)</Typography>
+            <Stack spacing={0.5}>
+              {(req.extraExpenses || []).map((x) => (
+                <Stack key={x.id} direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Typography variant="body2">{x.title} — <b>{formatMoney(x.amount)}</b></Typography>
+                  <Chip size="small" variant="outlined" color={x.appliedToEstimateId ? 'success' : 'warning'}
+                    label={x.appliedToEstimateId ? 'у фактичному кошторисі' : 'очікує складання факту'} />
+                  <Typography variant="caption" color="text.secondary">
+                    {x.source === 'telegram-bot' ? 'Telegram-бот' : x.source === 'app' ? 'застосунок' : 'портал'}{x.by ? ` · ${x.by}` : ''} · {new Date(x.at).toLocaleString('uk-UA')}{x.note ? ` · ${x.note}` : ''}
+                  </Typography>
+                </Stack>
+              ))}
+            </Stack>
+          </Box>
+        )}
       </Paper>
 
       {/* Крок 3: Оплата */}

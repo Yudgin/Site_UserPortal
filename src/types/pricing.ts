@@ -183,6 +183,14 @@ export interface PricingSettings {
 
 export type EstimateLineType = 'labor' | 'material' | 'addon'
 
+// Посилання рядка кошторису на рядок калькуляції майстра (зеркало server/masterEstimates.js).
+export interface MasterLineRef {
+  masterEstimateId: string
+  index: number
+  masterAmount: number // сума майстру, грн (клієнту — з націнкою центру або вручну)
+  performerUid: string
+}
+
 // Одна строка детальной сметы
 export interface EstimateLine {
   type: EstimateLineType
@@ -196,6 +204,12 @@ export interface EstimateLine {
   lineTotal: number
   // Сума рядка ДО знижки кошторису (тільки для показу; чек/оплата — за lineTotal)
   grossLineTotal?: number // итог строки, грн (с учётом сезона для labor)
+  // Рядок ПОЗА прайсом (додаткова витрата: доставка, запчастина…; refId 'extra:<id>'). Редактор
+  // факту НЕ перебудовує такі рядки з каталогу, а зберігає як є (див. appendExtraLines).
+  extra?: boolean
+  // Рядок із калькуляції МАЙСТРА (сервер masterEstimates): за ним сервер відхиляє повторне дописування
+  // тієї ж калькуляції у факт. Редактор зберігає поле як є при засіві та збереженні.
+  fromMaster?: MasterLineRef
   sourceKitId?: string // из какого набора пришла работа (для группировки)
   fromWorkId?: string // к какой работе относится материал/доп.
   // Мульти-жалобы:
