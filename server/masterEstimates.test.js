@@ -4,6 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import express from 'express'
 import { createMasterEstimateActions, registerMasterEstimates, normalizeLines, clientAmountFor, WORK_KINDS } from './masterEstimates.js'
+import { createEstimateActions } from './estimateActions.js'
 
 // ---------- фейковый Firestore (хранение по полному пути) ----------
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)))
@@ -28,6 +29,15 @@ class FakeDb {
           collection: (sub) => db.collection(`${full}/${sub}`),
           async get() { const d = db.docs[full]; return { id: did, exists: !!d, data: () => clone(d) } },
           async set(v, opts) { db._set(full, v, opts) },
+        }
+      },
+      where(field, op, value) {
+        if (op !== '==') throw new Error(`fake where: ${op}`)
+        return {
+          async get() {
+            const docs = db.list(path).filter((d) => d[field] === value).map(({ id, ...rest }) => ({ id, data: () => clone(rest) }))
+            return { docs, empty: !docs.length, size: docs.length }
+          },
         }
       },
     }
@@ -121,7 +131,7 @@ test('master estimate from a master: create (auto work), edit, submit, return wi
   assert.equal(work.kind, 'repair')
   assert.equal(work.assigneeUid, 'u-m')
   // повтор — той самий документ
-  assert.equal((await a.createFromMaster(master, { requestId: 'sr-1', kind: 'actual', lines, clientKey: 'key-00000002' })).data.created, false)
+  assert.equal((await a.createFromMaster(master, { requestId: 'sr-1', kind: 'actual', lines, comment: 'по кермо', clientKey: 'key-00000002' })).data.created, false)
   // правка: історія версій
   const u = await a.updateMasterEstimate(master, { id: me.id, lines: [{ title: 'Заміна сервоприводу', amount: 600 }] })
   assert.equal(u.ok, true)
@@ -195,7 +205,7 @@ test('to client → NEW actual: markup from the centre, overrides, journal entri
   assert.equal(me.status, 'accepted')
   assert.equal(me.derived[0].type, 'actual')
   // повтор того самого запиту
-  const again = await a.toClient(director, { requestId: 'sr-1', sourceIds: [meId], target: 'actual', clientKey: 'key-00000013' })
+  const again = await a.toClient(director, { requestId: 'sr-1', sourceIds: [meId], target: 'actual', amounts: { [`${meId}:1`]: 300 }, clientKey: 'key-00000013' })
   assert.equal(again.ok, true)
   assert.equal(again.data.duplicate, true)
 })
@@ -269,12 +279,12 @@ test('from client → calculation TO the master: selected lines, manual amounts,
     ] },
   }))
   const a = createMasterEstimateActions({ adminDb: db })
-  const r = await a.fromClient(owner, { clientEstimateId: 'act-1', performerUid: 'u-m', lines: [{ index: 0, amount: 400 }], issue: true, clientKey: 'key-00000050' })
+  const r = await a.fromClient(owner, { clientEstimateId: 'act-1', performerUid: 'u-m', lines: [{ index: 0, amount: 400, refId: 'w1' }], issue: false, clientKey: 'key-00000050' })
   assert.equal(r.ok, true, JSON.stringify(r))
   const me = r.data.masterEstimate
   assert.equal(me.direction, 'to_master')
   assert.equal(me.kind, 'actual')
-  assert.equal(me.status, 'submitted')
+  assert.equal(me.status, 'submitted') // завжди виставлена, без чернетки (issue: false ігнорується)
   assert.equal(me.total, 400)
   assert.equal(me.lines[0].title, 'Ремонт керма')
   assert.deepEqual(me.lines[0].sourceLineRef, { estimateId: 'act-1', index: 0 })
@@ -282,9 +292,129 @@ test('from client → calculation TO the master: selected lines, manual amounts,
   assert.equal((await a.fromClient(master, { clientEstimateId: 'act-1', performerUid: 'u-m', lines: [{ index: 0, amount: 1 }], clientKey: 'key-00000051' })).code, 'NO_PERM')
   assert.equal((await a.fromClient(owner, { clientEstimateId: 'act-1', performerUid: 'u-x', lines: [{ index: 0, amount: 1 }], clientKey: 'key-00000052' })).code, 'BAD_ASSIGNEE')
   assert.equal((await a.fromClient(owner, { clientEstimateId: 'act-1', performerUid: 'u-m', lines: [{ index: 9, amount: 1 }], clientKey: 'key-00000053' })).code, 'BAD_LINES')
+  // індекс з застарілого екрана: refId не збігається → CONFLICT, а не назва чужого рядка
+  assert.equal((await a.fromClient(owner, { clientEstimateId: 'act-1', performerUid: 'u-m', lines: [{ index: 0, amount: 1, refId: 'm1' }], clientKey: 'key-00000054' })).code, 'CONFLICT')
+  // друга калькуляція майстру без workId — та сама робота «Ремонт» виконавця, без дубля
+  const r2 = await a.fromClient(owner, { clientEstimateId: 'act-1', performerUid: 'u-m', lines: [{ index: 1, amount: 100 }], clientKey: 'key-00000055' })
+  assert.equal(r2.data.masterEstimate.workId, me.workId)
+  assert.equal(db.list('serviceRequests/sr-1/works').length, 1)
+  // повтор того самого ключа з іншими сумами — не «той самий запит»
+  assert.equal((await a.fromClient(owner, { clientEstimateId: 'act-1', performerUid: 'u-m', lines: [{ index: 1, amount: 999 }], clientKey: 'key-00000055' })).code, 'CLIENT_KEY_REUSED')
   // калькуляцію ДО майстра майстер не редагує і не «приймає»
   assert.equal((await a.updateMasterEstimate(master, { id: me.id, comment: 'x' })).code, 'NO_PERM')
   assert.equal((await a.reviewMasterEstimate(owner, { id: me.id, decision: 'accept' })).code, 'BAD_DIRECTION')
+})
+
+test('to client → APPEND: lines of a master estimate already in the actual are refused (no double money)', async () => {
+  const db = new FakeDb(seed())
+  const a = createMasterEstimateActions({ adminDb: db })
+  const meA = await submitted(a)
+  const first = await a.toClient(owner, { requestId: 'sr-1', sourceIds: [meA], target: 'actual', clientKey: 'key-00000070' })
+  assert.equal(first.ok, true, JSON.stringify(first))
+  const total = db.get(`priceEstimates/${first.data.estimateId}`).total
+  const meB = await submitted(a, master, 'key-00000071', [{ title: 'Тест на воді', amount: 300 }])
+  // А вже «прийнята» і в факті — разом з Б дописати не можна
+  const again = await a.toClient(owner, { requestId: 'sr-1', sourceIds: [meA, meB], target: 'actual', clientKey: 'key-00000072' })
+  assert.equal(again.code, 'ALREADY_IN_ACTUAL')
+  assert.equal(db.get(`priceEstimates/${first.data.estimateId}`).total, total)
+  // лише Б — дописується
+  const onlyB = await a.toClient(owner, { requestId: 'sr-1', sourceIds: [meB], target: 'actual', clientKey: 'key-00000073' })
+  assert.equal(onlyB.ok, true, JSON.stringify(onlyB))
+  assert.equal(onlyB.data.appended, 1)
+})
+
+test('to client → NEW actual when the client chose a variant: child of that variant, reapproval, offer locked; open offer refused', async () => {
+  const db = new FakeDb(seed({
+    'serviceRequests/sr-1': { status: 'approved', serviceCenterId: 'kat', offerId: 'off-1', extraExpenses: [] },
+    'estimateOffers/off-1': { serviceRequestId: 'sr-1', variantIds: ['var-1'], selectedVariantId: null, status: 'pending_choice' },
+    'priceEstimates/var-1': { kind: 'preliminary', stage: 'proposed', offerId: 'off-1', serviceRequestId: 'sr-1', title: 'Ремонт керма', total: 1000, lines: [] },
+  }))
+  const a = createMasterEstimateActions({ adminDb: db })
+  const meId = await submitted(a)
+  // клієнт ще не обрав — факт «напряму» не складаємо
+  assert.equal((await a.toClient(owner, { requestId: 'sr-1', sourceIds: [meId], target: 'actual', clientKey: 'key-00000080' })).code, 'NO_CHOICE')
+  Object.assign(db.docs['estimateOffers/off-1'], { selectedVariantId: 'var-1', status: 'chosen' })
+  // 500 × 2 + 200 × 2 = 1400 → +40 % від погоджених 1000
+  const r = await a.toClient(owner, { requestId: 'sr-1', sourceIds: [meId], target: 'actual', markupPct: 100, clientKey: 'key-00000081' })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(r.data.total, 1400)
+  assert.equal(r.data.status, 'pending_approval')
+  assert.equal(r.data.reapproval.required, true)
+  const est = db.get(`priceEstimates/${r.data.estimateId}`)
+  assert.equal(est.parentEstimateId, 'var-1')
+  assert.equal(est.status, 'pending_approval')
+  assert.equal(est.title, 'Ремонт керма')
+  assert.equal(db.get('estimateOffers/off-1').status, 'locked')
+})
+
+test('to client → NEW actual: the client re-chose concurrently → PATH_CHANGED', async () => {
+  const db = new FakeDb(seed({
+    'serviceRequests/sr-1': { status: 'approved', serviceCenterId: 'kat', offerId: 'off-1', extraExpenses: [] },
+    'estimateOffers/off-1': { serviceRequestId: 'sr-1', variantIds: ['var-1', 'var-2'], selectedVariantId: 'var-1', status: 'chosen' },
+    'priceEstimates/var-1': { kind: 'preliminary', stage: 'proposed', offerId: 'off-1', total: 1000, lines: [] },
+    'priceEstimates/var-2': { kind: 'preliminary', stage: 'proposed', offerId: 'off-1', total: 900, lines: [] },
+  }))
+  const a = createMasterEstimateActions({ adminDb: db })
+  const meId = await submitted(a)
+  const orig = db.runTransaction.bind(db)
+  db.runTransaction = async (fn) => { db.docs['estimateOffers/off-1'].selectedVariantId = 'var-2'; db.runTransaction = orig; return orig(fn) }
+  assert.equal((await a.toClient(owner, { requestId: 'sr-1', sourceIds: [meId], target: 'actual', clientKey: 'key-00000082' })).code, 'PATH_CHANGED')
+  assert.equal(db.get('serviceRequests/sr-1').actualEstimateId, undefined)
+})
+
+test('to client → VARIANT: an offer created concurrently is not overwritten (CONFLICT)', async () => {
+  const db = new FakeDb(seed())
+  const a = createMasterEstimateActions({ adminDb: db })
+  const meId = await submitted(a, master, 'key-00000090', lines, 'preliminary')
+  const orig = db.runTransaction.bind(db)
+  db.runTransaction = async (fn) => { db.docs['serviceRequests/sr-1'].offerId = 'off-parallel'; db.runTransaction = orig; return orig(fn) }
+  assert.equal((await a.toClient(owner, { requestId: 'sr-1', sourceIds: [meId], target: 'variant', clientKey: 'key-00000091' })).code, 'CONFLICT')
+  assert.equal(db.get('serviceRequests/sr-1').offerId, 'off-parallel')
+})
+
+test('same clientKey with different content → CLIENT_KEY_REUSED (estimate, variant, work)', async () => {
+  const db = new FakeDb(seed())
+  const a = createMasterEstimateActions({ adminDb: db })
+  const c1 = await a.createFromMaster(master, { requestId: 'sr-1', lines, clientKey: 'key-00000100' })
+  assert.equal(c1.data.created, true)
+  assert.equal((await a.createFromMaster(master, { requestId: 'sr-1', lines, clientKey: 'key-00000100' })).data.created, false)
+  assert.equal((await a.createFromMaster(master, { requestId: 'sr-1', lines: [{ title: 'Інше', amount: 1 }], clientKey: 'key-00000100' })).code, 'CLIENT_KEY_REUSED')
+  // друга калькуляція майстра без роботи — той самий «Ремонт», без дубля
+  const c2 = await a.createFromMaster(master, { requestId: 'sr-1', lines, clientKey: 'key-00000101' })
+  assert.equal(c2.data.masterEstimate.workId, c1.data.masterEstimate.workId)
+  await a.submitMasterEstimate(master, { id: c1.data.masterEstimate.id })
+  const v = await a.toClient(owner, { requestId: 'sr-1', sourceIds: [c1.data.masterEstimate.id], target: 'variant', variantLabel: 'А', clientKey: 'key-00000102' })
+  assert.equal(v.ok, true, JSON.stringify(v))
+  assert.equal((await a.toClient(owner, { requestId: 'sr-1', sourceIds: [c1.data.masterEstimate.id], target: 'variant', variantLabel: 'А', clientKey: 'key-00000102' })).data.created, false)
+  assert.equal((await a.toClient(owner, { requestId: 'sr-1', sourceIds: [c1.data.masterEstimate.id], target: 'variant', variantLabel: 'Б', clientKey: 'key-00000102' })).code, 'CLIENT_KEY_REUSED')
+  const w = await a.addWork(master, { requestId: 'sr-1', kind: 'water_test', clientKey: 'key-00000103' })
+  assert.equal(w.data.created, true)
+  assert.equal((await a.addWork(master, { requestId: 'sr-1', kind: 'packing', clientKey: 'key-00000103' })).code, 'CLIENT_KEY_REUSED')
+})
+
+test('variant from masters → client chooses → actual from that variant: master lines journaled, removable', async () => {
+  const db = new FakeDb(seed())
+  const a = createMasterEstimateActions({ adminDb: db })
+  const meId = await submitted(a, master, 'key-00000110', lines, 'preliminary')
+  const v = await a.toClient(owner, { requestId: 'sr-1', sourceIds: [meId], target: 'variant', clientKey: 'key-00000111' })
+  assert.equal(v.ok, true, JSON.stringify(v))
+  Object.assign(db.docs[`estimateOffers/${v.data.offerId}`], { selectedVariantId: v.data.estimateId, status: 'chosen' })
+  const ea = createEstimateActions({ adminDb: db })
+  const act = await ea.createActualFromVariant(owner, { requestId: 'sr-1', clientKey: 'key-00000112' })
+  assert.equal(act.ok, true, JSON.stringify(act))
+  const est = db.get(`priceEstimates/${act.data.estimateId}`)
+  assert.equal(est.lines.length, 2)
+  const sr = db.get('serviceRequests/sr-1')
+  assert.equal(sr.extraExpenses.length, 2)
+  assert.deepEqual(sr.extraExpenses.map((x) => `extra:${x.id}`), est.lines.map((l) => l.refId))
+  assert.equal(sr.extraExpenses.every((x) => x.source === 'master' && x.appliedToEstimateId === act.data.estimateId), true)
+  assert.equal(sr.extraExpenses[0].masterRef.masterEstimateId, meId)
+  // ті самі рядки дописати у факт удруге не можна
+  assert.equal((await a.toClient(owner, { requestId: 'sr-1', sourceIds: [meId], target: 'actual', clientKey: 'key-00000113' })).code, 'ALREADY_IN_ACTUAL')
+  // рядок майстра з факту вилучається (раніше — NO_EXPENSE)
+  const rm = await ea.removeExtraExpense(owner, { requestId: 'sr-1', expenseId: sr.extraExpenses[1].id })
+  assert.equal(rm.ok, true, JSON.stringify(rm))
+  assert.equal(db.get(`priceEstimates/${act.data.estimateId}`).lines.length, 1)
 })
 
 // ---------- HTTP ----------

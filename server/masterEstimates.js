@@ -12,14 +12,17 @@
 // Все записи — только сервер (Admin SDK); приложение и портал читают Firestore по правилам.
 // Расчёты кошторису клиенту — ОБЩЕЕ ядро estimateEngine.js (не менять здесь: файл общий с ботом сотрудников).
 // Строки калькуляции клиенту из калькуляций мастера — строки вне прайса (extra:true, refId 'extra:<id>') с пометкой
-// fromMaster; в ФАКТЕ они ещё и записи журнала serviceRequests.extraExpenses (source 'master') — редактор факта портала
-// со сверкой витрат их сохраняет при пересохранении. Поля оплаты не трогаются.
+// fromMaster; в ФАКТЕ они ещё и записи журнала serviceRequests.extraExpenses (source 'master'), чтобы редактор факта
+// со сверкой витрат (src/utils/extraExpenseSync.ts) их сохранял, а бот/приложение могли вилучити рядок. ВНИМАНИЕ: редактор
+// факта портала без сверки (до неё) при пересохранении выбрасывает все строки extra — деплоить вместе со сверкой.
+// Факт из строк мастеров при выбранном клиентом варианте — потомок этого варианта (порог повторного погодження,
+// пропозиція → locked), как createActualFromVariant. Поля оплаты не трогаются.
 import crypto from 'crypto'
 import { verifyFirebaseStaff } from './adminAuth.js'
 import { rateLimit } from './rateLimit.js'
 import {
   round2, clip, newId, nowIso, tName, displayNo, extraLine, withLines, estimate2goods, estimatePatch,
-  estimateBlocked, requestVisible,
+  estimateBlocked, requestVisible, needsReapproval, NO_REAPPROVAL_DEVIATION_PCT,
 } from './estimateEngine.js'
 import { payOptionsFromCenter } from './estimateActions.js'
 import { statusTimes } from './statusTimes.js'
@@ -48,6 +51,12 @@ const ASSIGNEE_ROLES = ['owner', 'director', 'master']
 
 const fail = (status, code, message) => ({ ok: false, status, code, message })
 const ok = (data) => ({ ok: true, data })
+
+// Отпечаток содержимого запроса: повтор с тем же clientKey, но с другими строками/суммами/целью — это не «тот же
+// запрос», молча возвращать старый результат нельзя (ревью 2026-10-19). Документы без отпечатка — как раньше.
+export const reqHash = (obj) => crypto.createHash('sha256').update(JSON.stringify(obj)).digest('base64url').slice(0, 22)
+const sameRequest = (stored, h) => !stored || stored === h
+const KEY_REUSED = () => fail(409, 'CLIENT_KEY_REUSED', 'Ключ запиту вже використано для іншого запиту — спробуйте ще раз.')
 
 // Строки калькуляции мастера: назва ≤120, кількість 0.01–10 000 (за замовчуванням 1), сума рядка 0.01–1 000 000,
 // нотатка ≤300. amount — сума рядка (не ціна за одиницю), як у майстра в 1С.
@@ -120,6 +129,12 @@ export function createMasterEstimateActions({ adminDb }) {
     centerId: sr.serviceCenterId || null, status: 'planned', createdAt: now, createdBy: staff.email || null, createdByUid: staff.uid, updatedAt: now,
   })
 
+  // Работа «Ремонт» исполнителя по заявке, если уже есть: калькуляции без workId не плодят дубли работ.
+  const findRepairWork = async (srId, uid) => {
+    const s = await worksCol(srId).where('assigneeUid', '==', uid).get()
+    return s.docs.map((d) => ({ id: d.id, ...d.data() })).find((w) => w.kind === 'repair' && w.status !== 'cancelled') || null
+  }
+
   // ---- работы ----
 
   const addWork = async (staff, p) => {
@@ -140,10 +155,15 @@ export function createMasterEstimateActions({ adminDb }) {
     }
     const id = p.clientKey ? `w-${p.clientKey}` : newId(9)
     const ref = worksCol(sr.id).doc(id)
+    const h = reqHash({ kind, title, assignee: assignee ? assignee.uid : null })
     return adminDb.runTransaction(async (tx) => {
       const s = await tx.get(ref)
-      if (s.exists) return ok({ work: { id, ...s.data() }, created: false })
-      const work = newWork(sr, { kind, title, assignee }, staff, nowIso())
+      if (s.exists) {
+        const d = s.data()
+        if (d.createdByUid !== staff.uid || !sameRequest(d.requestHash, h)) return KEY_REUSED()
+        return ok({ work: { id, ...d }, created: false })
+      }
+      const work = { ...newWork(sr, { kind, title, assignee }, staff, nowIso()), ...(p.clientKey ? { requestHash: h } : {}) }
       tx.set(ref, work)
       return ok({ work: { id, ...work }, created: true })
     })
@@ -218,30 +238,39 @@ export function createMasterEstimateActions({ adminDb }) {
       work = await getWork(sr.id, p.workId)
       if (!work) return fail(404, 'NO_WORK', 'Роботу не знайдено.')
       if (work.assigneeUid && work.assigneeUid !== performer.uid) return fail(409, 'OTHER_PERFORMER', 'Робота призначена іншому виконавцю.')
+    } else {
+      // Без вказаної роботи — наявний «Ремонт» виконавця, інакше створимо новий (умовчання брифу §6 п. 4).
+      work = await findRepairWork(sr.id, performer.uid)
     }
     const id = `me-${p.clientKey}`
     const ref = col('masterEstimates').doc(id)
     const workRef = work ? worksCol(sr.id).doc(work.id) : worksCol(sr.id).doc(`w-${p.clientKey}`)
+    const comment = clip(p.comment, 1000).trim()
+    const h = reqHash({ kind, lines: norm.lines, workId: p.workId || null, comment, performer: performer.uid })
     return adminDb.runTransaction(async (tx) => {
       const s = await tx.get(ref)
       if (s.exists) {
         const d = s.data()
-        if (d.createdByUid !== staff.uid) return fail(409, 'CLIENT_KEY_REUSED', 'Ключ запиту вже використано — спробуйте ще раз.')
+        if (d.createdByUid !== staff.uid || !sameRequest(d.requestHash, h)) return KEY_REUSED()
         return ok({ masterEstimate: { id, ...d }, created: false })
       }
+      // Роботу перечитуємо в транзакції: її могли щойно призначити іншому.
+      const wS = work ? await tx.get(workRef) : null
+      const wFresh = wS && wS.exists ? wS.data() : null
+      if (work && !wFresh) return fail(404, 'NO_WORK', 'Роботу не знайдено.')
+      if (wFresh && wFresh.assigneeUid && wFresh.assigneeUid !== performer.uid) return fail(409, 'OTHER_PERFORMER', 'Робота призначена іншому виконавцю.')
       const now = nowIso()
       if (!work) {
-        // Без вказаної роботи — створюємо «Ремонт» на виконавця (умовчання брифу §6 п. 4).
         tx.set(workRef, newWork(sr, { kind: 'repair', title: WORK_KINDS.repair, assignee: performer }, staff, now))
-      } else if (!work.assigneeUid) {
+      } else if (!wFresh.assigneeUid) {
         tx.set(workRef, { assigneeUid: performer.uid, assigneeName: performer.name, updatedAt: now, updatedBy: staff.email || null }, { merge: true })
       }
       const doc = {
         serviceRequestId: sr.id, requestNo: String(displayNo(sr.id, sr)), serviceCenterId: sr.serviceCenterId || null,
         workId: workRef.id, kind, direction: 'from_master', performerUid: performer.uid, performerName: performer.name,
-        lines: norm.lines, total: norm.total, status: 'draft', comment: clip(p.comment, 1000).trim(),
+        lines: norm.lines, total: norm.total, status: 'draft', comment,
         basedOn: null, derived: [], history: [], createdAt: now, createdBy: staff.email || null, createdByUid: staff.uid,
-        updatedAt: now, updatedBy: staff.email || null, via: p.via || 'app',
+        updatedAt: now, updatedBy: staff.email || null, via: p.via || 'app', requestHash: h,
       }
       tx.set(ref, doc)
       return ok({ masterEstimate: { id, ...doc }, created: true })
@@ -358,6 +387,8 @@ export function createMasterEstimateActions({ adminDb }) {
     if (!picks.length) return fail(400, 'NO_LINES', 'Не обрано жодного рядка.')
     const key = String(p.clientKey)
     const marker = { at: nowIso(), by: staff.email || null }
+    const variantLabel = clip(p.variantLabel, 80).trim()
+    const h = reqHash({ target, ids: [...ids].sort(), picks: picks.map((x) => [x.me.id, x.index, x.clientAmount]), variantLabel })
 
     if (target === 'variant') {
       const offer = sr.offerId ? await getDoc('estimateOffers', sr.offerId) : null
@@ -369,13 +400,19 @@ export function createMasterEstimateActions({ adminDb }) {
       const srRef = col('serviceRequests').doc(sr.id)
       const r = await adminDb.runTransaction(async (tx) => {
         const vS = await tx.get(vRef)
-        if (vS.exists) return ok({ estimateId: variantId, offerId: vS.data().offerId, total: vS.data().total, created: false })
+        if (vS.exists) {
+          const v = vS.data()
+          if (!sameRequest(v.requestHash, h)) return KEY_REUSED()
+          return ok({ estimateId: variantId, offerId: v.offerId, total: v.total, created: false })
+        }
         const oS = await tx.get(oRef)
         const srS = await tx.get(srRef)
         const src = await readSources(tx, ids)
         if (src.err) return src.err
         const cur = srS.exists ? srS.data() : null
         if (!cur) return fail(404, 'NO_SR', 'Заявку не знайдено.')
+        // Пропозицію заявки могли щойно створити паралельно (портал, другий телефон) — не плодимо другу.
+        if ((cur.offerId || null) !== (offer ? offer.id : null)) return fail(409, 'CONFLICT', 'Пропозицію заявки щойно змінили — оновіть картку і спробуйте ще раз.')
         const o = oS.exists ? oS.data() : null
         if (o && ['chosen', 'locked'].includes(o.status)) return fail(409, 'OFFER_CLOSED', 'Клієнт уже обрав варіант — новий додати не можна.')
         const now = nowIso()
@@ -385,10 +422,10 @@ export function createMasterEstimateActions({ adminDb }) {
         const est = withLines(base, lines)
         tx.set(vRef, {
           ...est, id: variantId, kind: 'preliminary', stage: 'proposed', status: 'approved', offerId, serviceRequestId: sr.id,
-          variantLabel: clip(p.variantLabel, 80).trim() || `Варіант ${variantIds.length + 1}`, variantOrder: variantIds.length,
+          variantLabel: variantLabel || `Варіант ${variantIds.length + 1}`, variantOrder: variantIds.length,
           parentEstimateId: null, requestId: null, seasonId: null, seasonCoefficient: 1, seasonSurchargeApplied: false, laborRatePerHour: 0,
           createdAt: now, updatedAt: now, createdBy: staff.email || null, lastEditedBy: staff.email || null, lastEditedVia: 'app', history: [],
-          fromMasters: ids,
+          fromMasters: ids, requestHash: h,
         })
         if (o) {
           tx.set(oRef, { variantIds: [...variantIds, variantId], updatedAt: now }, { merge: true })
@@ -421,7 +458,10 @@ export function createMasterEstimateActions({ adminDb }) {
         const cur = srS.exists ? srS.data() : null
         if (!cur) return fail(404, 'NO_SR', 'Заявку не знайдено.')
         const dup = (cur.extraExpenses || []).find((x) => x && x.masterBatchKey === key)
-        if (dup) return ok({ estimateId: dup.appliedToEstimateId, created: false, appended: 0, duplicate: true })
+        if (dup) {
+          if (!sameRequest(dup.masterBatchHash, h)) return KEY_REUSED()
+          return ok({ estimateId: dup.appliedToEstimateId, created: false, appended: 0, duplicate: true })
+        }
         const src = await readSources(tx, ids)
         if (src.err) return src.err
         if ((cur.actualEstimateId || null) !== sr.actualEstimateId) return fail(409, 'CONFLICT', 'Заявку щойно змінили паралельно — спробуйте ще раз.')
@@ -429,8 +469,12 @@ export function createMasterEstimateActions({ adminDb }) {
         if (!e) return fail(409, 'NO_ESTIMATE', 'Фактичний кошторис заявки не знайдено.')
         const blocked = estimateBlocked(e)
         if (blocked) return fail(409, blocked.code === 'PAYING' ? 'PAY_IN_PROGRESS' : blocked.code, blocked.message)
+        // Рядок майстра, який уже є у факті (дописаний раніше або перенесений з варіанта), вдруге не дописуємо.
+        const inActual = new Set((e.lines || []).filter((l) => l && l.fromMaster).map((l) => `${l.fromMaster.masterEstimateId}:${l.fromMaster.index}`))
+        const again = picks.filter((x) => inActual.has(`${x.me.id}:${x.index}`))
+        if (again.length) return fail(409, 'ALREADY_IN_ACTUAL', `Рядки калькуляції «${again[0].me.performerName}» уже є у факті — зніміть їх і спробуйте ще раз.`)
         const now = nowIso()
-        const journal = picks.map((x) => journalEntry(x, staff, now, key, e.id))
+        const journal = picks.map((x) => journalEntry(x, staff, now, key, e.id, h))
         const newLines = journal.map((j, i) => clientLineFromMaster({ expId: j.id, ...picks[i] }))
         const { patch, next, reapproval, status } = estimatePatch(e, [...(e.lines || []), ...newLines], parent, staff, 'app')
         tx.set(estRef, patch, { merge: true })
@@ -440,7 +484,15 @@ export function createMasterEstimateActions({ adminDb }) {
       })
     }
 
-    // Нового факту ще немає — складаємо факт «напряму» з рядків майстрів (без варіанта, як «Скласти факт напряму» в порталі).
+    // Нового факту ще немає. Клієнт обрав варіант → факт — потомок цього варіанта: план/факт, порог повторного
+    // погодження і «заморожена» пропозиція, як createActualFromVariant (інакше оплата пройшла б мимо погодженої суми,
+    // а клієнт міг би перевибрати варіант і відкотити заявку — ревью 2026-10-19). Пропозиція є, але вибору ще немає —
+    // відмовляємо: спершу варіант клієнту. Пропозиції немає зовсім — факт «напряму», як у порталі.
+    const offer = sr.offerId ? await getDoc('estimateOffers', sr.offerId) : null
+    if (offer && !offer.selectedVariantId) return fail(409, 'NO_CHOICE', 'Клієнт ще не обрав варіант пропозиції — складіть варіант на основі калькуляцій майстрів або дочекайтеся вибору.')
+    const parent = offer ? await getDoc('priceEstimates', offer.selectedVariantId) : null
+    if (offer && !parent) return fail(404, 'NO_VARIANT', 'Обраний клієнтом варіант не знайдено.')
+    const offerRef = offer ? col('estimateOffers').doc(offer.id) : null
     const payOptions = payOptionsFromCenter(center)
     if (!payOptions.length) return fail(409, 'NO_FOP', 'Для центру не налаштовано ФОП за способами оплати — складіть факт у порталі.')
     const estId = crypto.randomBytes(12).toString('base64url')
@@ -450,24 +502,37 @@ export function createMasterEstimateActions({ adminDb }) {
       const cur = srS.exists ? srS.data() : null
       if (!cur) return fail(404, 'NO_SR', 'Заявку не знайдено.')
       const dup = (cur.extraExpenses || []).find((x) => x && x.masterBatchKey === key)
-      if (dup) return ok({ estimateId: dup.appliedToEstimateId, created: false, appended: 0, duplicate: true })
+      if (dup) {
+        if (!sameRequest(dup.masterBatchHash, h)) return KEY_REUSED()
+        return ok({ estimateId: dup.appliedToEstimateId, created: false, appended: 0, duplicate: true })
+      }
       const src = await readSources(tx, ids)
       if (src.err) return src.err
+      // Вибір клієнта перечитуємо в транзакції: /api/offers/:id/choose міг змінити варіант.
+      const oS = offerRef ? await tx.get(offerRef) : null
+      const o = oS && oS.exists ? oS.data() : null
+      if (offerRef && (!o || String(o.selectedVariantId || '') !== String(parent.id))) return fail(409, 'PATH_CHANGED', 'Клієнт змінив вибір варіанта — оновіть картку і спробуйте ще раз.')
+      if ((cur.offerId || null) !== (offer ? offer.id : null)) return fail(409, 'CONFLICT', 'Пропозицію заявки щойно змінили — оновіть картку і спробуйте ще раз.')
       if (cur.actualEstimateId) return fail(409, 'CONFLICT', 'Тим часом склали факт — оновіть картку і спробуйте ще раз.')
       if (cur.status === 'cancelled') return fail(409, 'CANCELLED', 'Заявку скасовано.')
       const now = nowIso()
       const pending = (cur.extraExpenses || []).filter((x) => x && x.id && !x.appliedToEstimateId)
-      const journal = picks.map((x) => journalEntry(x, staff, now, key, estId))
+      const journal = picks.map((x) => journalEntry(x, staff, now, key, estId, h))
       const lines = [...pending.map((x) => extraLine(x)), ...journal.map((j, i) => clientLineFromMaster({ expId: j.id, ...picks[i] }))]
-      const base = { title: clip(p.title, 200).trim() || 'Фактична калькуляція', complaint: cur.complaint || '', currency: 'UAH', source: 'manual', discount: null, lines: [], total: 0 }
+      const base = {
+        title: clip(p.title, 200).trim() || (parent && parent.title) || 'Фактична калькуляція', complaint: cur.complaint || '',
+        currency: 'UAH', source: 'manual', discount: null, lines: [], total: 0,
+      }
       const next = withLines(base, lines)
+      const reapproval = parent ? needsReapproval(parent, next) : { required: false, diffPercent: 0, thresholdPct: NO_REAPPROVAL_DEVIATION_PCT }
+      const status = reapproval.required ? 'pending_approval' : 'approved'
       tx.set(estRef, {
-        ...next, id: estId, kind: 'actual', stage: 'actual', status: 'approved', parentEstimateId: null, serviceRequestId: sr.id, requestId: null,
+        ...next, id: estId, kind: 'actual', stage: 'actual', status, parentEstimateId: parent ? parent.id : null, serviceRequestId: sr.id, requestId: null,
         seasonId: null, seasonCoefficient: 1, seasonSurchargeApplied: false, laborRatePerHour: 0,
         receiptGoods: estimate2goods(next),
         specialistPayouts: (cur.specialists || []).filter((s) => s && s.uid).map((s) => ({ uid: s.uid, name: s.name || '', specialistAmount: 0, centerAdminAmount: 0 })),
         payOptions, fopId: payOptions[0].fopId, createdAt: now, updatedAt: now, createdBy: staff.email || null, lastEditedBy: staff.email || null,
-        lastEditedVia: 'app', history: [], createdWithKey: key, fromMasters: ids,
+        lastEditedVia: 'app', history: [], createdWithKey: key, createdReapproval: reapproval, fromMasters: ids,
         paymentId: null, paidAt: null, taxUrl: null, fiscalCode: null, payInitiatedAt: null,
       })
       const srPatch = {
@@ -476,15 +541,17 @@ export function createMasterEstimateActions({ adminDb }) {
       }
       if (cur.status !== 'cancelled' && cur.status !== 'done' && !cur.paymentId) Object.assign(srPatch, { status: 'in_work' }, statusTimes(cur.status, 'in_work', now))
       tx.set(srRef, srPatch, { merge: true })
+      // Факт за вибраним варіантом → пропозицію «заморожуємо» (перевибір клієнтом заборонено).
+      if (offerRef) tx.set(offerRef, { status: 'locked', updatedAt: now }, { merge: true })
       for (const me of src.fresh) markDerived(tx, me, { type: 'actual', id: estId, ...marker }, staff)
-      return ok({ estimateId: estId, created: true, appended: journal.length, total: next.total, status: 'approved', appliedExpenses: pending.length })
+      return ok({ estimateId: estId, created: true, appended: journal.length, total: next.total, status, reapproval, appliedExpenses: pending.length, offerLocked: !!offerRef })
     })
   }
 
   // Запис журналу витрат заявки для рядка з калькуляції майстра (редактор факту портала зберігає такі рядки).
-  const journalEntry = (x, staff, now, key, estId) => ({
+  const journalEntry = (x, staff, now, key, estId, h) => ({
     id: newId(), title: x.line.qty !== 1 ? `${x.line.title} (${x.line.qty} шт)` : x.line.title, amount: x.clientAmount,
-    at: now, by: staff.email || null, byUid: staff.uid, source: 'master', appliedToEstimateId: estId, masterBatchKey: key,
+    at: now, by: staff.email || null, byUid: staff.uid, source: 'master', appliedToEstimateId: estId, masterBatchKey: key, masterBatchHash: h,
     masterRef: { masterEstimateId: x.me.id, index: x.index, masterAmount: x.line.amount, performerUid: x.me.performerUid },
   })
 
@@ -525,6 +592,8 @@ export function createMasterEstimateActions({ adminDb }) {
       const idx = Number(x && x.index)
       const src = Number.isInteger(idx) ? (est.lines || [])[idx] : null
       if (!src) return fail(400, 'BAD_LINES', 'Рядок калькуляції клієнту не знайдено.')
+      // Індекс — з екрана, який міг застаріти: refId рядка має збігтися, інакше назва була б від іншого рядка.
+      if (x.refId != null && String(x.refId) !== String(src.refId || '')) return fail(409, 'CONFLICT', 'Калькуляцію клієнту щойно змінили — оновіть екран і спробуйте ще раз.')
       raw.push({ title: clip(x.title, 120).trim() || tName(src.name), qty: src.qty || 1, amount: x.amount, note: x.note, sourceIndex: idx })
     }
     const norm = normalizeLines(raw)
@@ -534,28 +603,33 @@ export function createMasterEstimateActions({ adminDb }) {
     if (p.workId) {
       work = await getWork(sr.id, p.workId)
       if (!work) return fail(404, 'NO_WORK', 'Роботу не знайдено.')
+    } else {
+      work = await findRepairWork(sr.id, performer.uid)
     }
     const kind = ME_KINDS.includes(String(p.kind)) ? String(p.kind) : est.kind === 'actual' ? 'actual' : 'preliminary'
     const id = `me-${p.clientKey}`
     const ref = col('masterEstimates').doc(id)
     const workRef = work ? worksCol(sr.id).doc(work.id) : worksCol(sr.id).doc(`w-${p.clientKey}`)
+    const comment = clip(p.comment, 1000).trim()
+    const h = reqHash({ est: est.id, performer: performer.uid, lines: norm.lines, kind, workId: p.workId || null, comment })
     return adminDb.runTransaction(async (tx) => {
       const s = await tx.get(ref)
       if (s.exists) {
         const d = s.data()
-        if (d.createdByUid !== staff.uid) return fail(409, 'CLIENT_KEY_REUSED', 'Ключ запиту вже використано — спробуйте ще раз.')
+        if (d.createdByUid !== staff.uid || !sameRequest(d.requestHash, h)) return KEY_REUSED()
         return ok({ masterEstimate: { id, ...d }, created: false })
       }
       const now = nowIso()
       if (!work) tx.set(workRef, newWork(sr, { kind: 'repair', title: WORK_KINDS.repair, assignee: performer }, staff, now))
-      const issued = p.issue === true
+      // Калькуляцію майстру виставляємо одразу (без чернетки): чернетку виконавець бачив би (правила — за performerUid),
+      // а виставити її потім ні з застосунку, ні з порталу нема як (ревью 2026-10-19). Помилилися — скасувати і скласти знову.
       const doc = {
         serviceRequestId: sr.id, requestNo: String(displayNo(sr.id, sr)), serviceCenterId: sr.serviceCenterId || null,
         workId: workRef.id, kind, direction: 'to_master', performerUid: performer.uid, performerName: performer.name,
-        lines: norm.lines, total: norm.total, status: issued ? 'submitted' : 'draft', comment: clip(p.comment, 1000).trim(),
+        lines: norm.lines, total: norm.total, status: 'submitted', comment,
         basedOn: { type: 'clientEstimate', id: est.id }, derived: [], history: [],
         createdAt: now, createdBy: staff.email || null, createdByUid: staff.uid, updatedAt: now, updatedBy: staff.email || null, via: p.via || 'app',
-        ...(issued ? { submittedAt: now, submittedBy: staff.email || null } : {}),
+        submittedAt: now, submittedBy: staff.email || null, requestHash: h,
       }
       tx.set(ref, doc)
       return ok({ masterEstimate: { id, ...doc }, created: true })

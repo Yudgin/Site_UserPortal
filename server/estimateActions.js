@@ -9,7 +9,7 @@
 import crypto from 'crypto'
 import {
   createEstimateOps, round2, nowIso, requestVisible, canEditRequest, canEditEstimate, withLines, needsReapproval,
-  estimate2goods, extraLine, validateExpense,
+  estimate2goods, extraLine, validateExpense, tName,
 } from './estimateEngine.js'
 import { statusTimes } from './statusTimes.js'
 
@@ -174,7 +174,22 @@ export function createEstimateActions({ adminDb, ops: injectedOps } = {}) {
       // Политика статуса (1): как редактор факта — заявка → «в роботі», но не воскрешаем
       // скасовану/виконану и не откатываем оплаченную.
       if (cur.status !== 'cancelled' && cur.status !== 'done' && !cur.paymentId) Object.assign(srPatch, { status: 'in_work' }, statusTimes(cur.status, 'in_work', now))
-      if (pending.length) srPatch.extraExpenses = (cur.extraExpenses || []).map((x) => (x && x.id && !x.appliedToEstimateId ? { ...x, appliedToEstimateId: estId } : x))
+      // Рядки калькуляцій майстрів, що прийшли з варіанта (masterEstimates → варіант), у журналі ще не записані:
+      // записуємо їх застосованими до нового факту — інакше редактор факту зі сверкою їх не зберіг би, а бот і
+      // застосунок не змогли б вилучити (NO_EXPENSE). Ревью калькуляцій майстра 2026-10-19.
+      const knownIds = new Set((cur.extraExpenses || []).map((x) => x && x.id))
+      const fromVariant = (parent.lines || [])
+        .filter((l) => l && l.extra && l.fromMaster && String(l.refId || '').startsWith('extra:') && !knownIds.has(String(l.refId).slice(6)))
+        .map((l) => ({
+          id: String(l.refId).slice(6), title: tName(l.name), amount: round2(l.grossLineTotal ?? l.lineTotal), at: now,
+          by: staff.email || null, byUid: staff.uid || null, source: 'master', appliedToEstimateId: estId, masterRef: l.fromMaster,
+        }))
+      if (pending.length || fromVariant.length) {
+        srPatch.extraExpenses = [
+          ...(cur.extraExpenses || []).map((x) => (x && x.id && !x.appliedToEstimateId ? { ...x, appliedToEstimateId: estId } : x)),
+          ...fromVariant,
+        ]
+      }
       tx.set(srRef, srPatch, { merge: true })
       // Факт собран по выбранному варианту → «замораживаем» пропозицію (переизбор клиентом запрещён).
       if (offerRef) tx.set(offerRef, { status: 'locked', updatedAt: now }, { merge: true })
