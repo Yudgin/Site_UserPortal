@@ -1,6 +1,7 @@
 // Керування доступом (тільки власник): сервісні центри (зони) + співробітники з ролями та
 // правами по центрах. Мастери самі реєструються при вході (identity), тут власник призначає роль
-// і, для майстра, права по кожному центру (перегляд / попередні / фактичні / виставлення на оплату).
+// і, для майстра, права по кожному центру (перегляд / попередні / фактичні / виставлення на оплату), а також
+// відмітки видимості калькуляцій/контактів (calcVisibility) і націнку центру на калькуляції майстрів (markupPct).
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -19,13 +20,27 @@ import { npTemplateService } from '@/api/npTemplateService'
 import { SCENARIO_LABELS, type NpTemplate } from '@/types/npTemplate'
 import { PAY_METHOD_KEYS, PAY_METHOD_LABELS, type PayMethodKey } from '@/types/pricing'
 import {
-  CENTER_PERMISSIONS, CENTER_PERMISSION_LABELS, ROLE_LABELS,
+  CENTER_PERMISSIONS, CENTER_PERMISSION_LABELS, ROLE_LABELS, CALC_VISIBILITY_KEYS, CALC_VISIBILITY_LABELS,
+  resolveCalcVisibility,
   type ServiceCenter, type UserProfile, type Role, type CenterPermission, type CenterAccess,
+  type CalcVisibility, type CalcVisibilityKey,
 } from '@/types/access'
 
 // Назначаемые роли. 'owner' пока не назначается: делегированный владелец заработает на уровне
 // данных лише у фазі 1b (правила/сервер почнуть читати роль); власник — акаунт за email.
 const ROLES: Role[] = ['director', 'accountant', 'master', 'operator']
+// Межі націнки центру — як перевіряє сервер (server/masterEstimates.js, BAD_MARKUP).
+const MARKUP_MIN = -50
+const MARKUP_MAX = 1000
+
+// Текст поля націнки → число | null (порожньо = не задано) | undefined (некоректно).
+const parseMarkup = (text: string): number | null | undefined => {
+  const t = text.trim().replace(',', '.')
+  if (!t) return null
+  const n = Number(t)
+  if (!Number.isFinite(n) || n < MARKUP_MIN || n > MARKUP_MAX) return undefined
+  return Math.round(n * 100) / 100
+}
 
 export default function AccessAdminPage() {
   const navigate = useNavigate()
@@ -42,11 +57,15 @@ export default function AccessAdminPage() {
 
   // редактор центра
   const [centerEdit, setCenterEdit] = useState<Partial<ServiceCenter> | null>(null)
+  const [centerMarkup, setCenterMarkup] = useState('') // «Націнка на калькуляції майстрів, %» (текст поля)
   // редактор доступа пользователя
   const [userEdit, setUserEdit] = useState<UserProfile | null>(null)
   const [uRole, setURole] = useState<Role>('master')
   const [uActive, setUActive] = useState(false)
   const [uCenters, setUCenters] = useState<Record<string, CenterPermission[]>>({})
+  // Відмітки видимості калькуляцій: явні значення (з профілю + змінені тут); незадані — за умовчаннями.
+  const [uCalcVis, setUCalcVis] = useState<CalcVisibility>({})
+  const [uCalcVisDirty, setUCalcVisDirty] = useState(false) // пишемо calcVisibility лише якщо власник щось змінив
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -73,8 +92,15 @@ export default function AccessAdminPage() {
     )
   }
 
+  const openCenter = (c: Partial<ServiceCenter>) => {
+    setCenterEdit(c)
+    setCenterMarkup(c.markupPct != null ? String(c.markupPct) : '')
+  }
+  const markupParsed = parseMarkup(centerMarkup)
+
   const saveCenter = async () => {
     if (!centerEdit || !centerEdit.name?.trim()) { notify('Вкажіть назву центру', 'error'); return }
+    if (markupParsed === undefined) { notify(`Націнка від ${MARKUP_MIN} до ${MARKUP_MAX} %`, 'error'); return }
     const ok = await serviceCenterService.save({
       id: centerEdit.id,
       name: centerEdit.name.trim(),
@@ -84,6 +110,7 @@ export default function AccessAdminPage() {
       defaultFopByMethod: centerEdit.defaultFopByMethod || {},
       incomingTtnTemplateId: centerEdit.incomingTtnTemplateId || null,
       returnTtnTemplateId: centerEdit.returnTtnTemplateId || null,
+      markupPct: markupParsed, // null — не задано (сервер рахує 0 %)
       active: centerEdit.active !== false,
     })
     if (ok) { notify('Центр збережено'); setCenterEdit(null); await load(); await reloadCenters() }
@@ -97,6 +124,15 @@ export default function AccessAdminPage() {
     const map: Record<string, CenterPermission[]> = {}
     ;(u.centers || []).forEach((c) => { map[c.centerId] = [...c.perms] })
     setUCenters(map)
+    setUCalcVis({ ...(u.calcVisibility || {}) })
+    setUCalcVisDirty(false)
+  }
+
+  // Перемкнути відмітку видимості: стає явною (решта незаданих і далі йде за умовчаннями — напр. «Партнер»
+  // вимикає «бачить», поки їх не змінено).
+  const toggleCalcVis = (key: CalcVisibilityKey) => {
+    setUCalcVis((prev) => ({ ...prev, [key]: !resolveCalcVisibility(prev)[key] }))
+    setUCalcVisDirty(true)
   }
 
   const togglePerm = (centerId: string, perm: CenterPermission) => {
@@ -123,7 +159,11 @@ export default function AccessAdminPage() {
       : uRole === 'director'
         ? Object.entries(uCenters).filter(([, perms]) => perms.length).map(([centerId]) => ({ centerId, perms: [...CENTER_PERMISSIONS] }))
         : []
-    const ok = await userProfileService.setAccess(userEdit.uid, { role: uRole, active: uActive, centers: centersArr })
+    const ok = await userProfileService.setAccess(userEdit.uid, {
+      role: uRole, active: uActive, centers: centersArr,
+      // Відмітки видимості — лише якщо власник їх змінював; пишемо повний набір (явно, без умовчань).
+      ...(uCalcVisDirty && uRole === 'master' ? { calcVisibility: resolveCalcVisibility(uCalcVis) } : {}),
+    })
     if (ok) { notify('Доступ збережено'); setUserEdit(null); await load() }
     else notify('Не вдалося зберегти', 'error')
   }
@@ -141,7 +181,7 @@ export default function AccessAdminPage() {
       <Paper sx={{ p: 2, mb: 3 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
           <Stack direction="row" spacing={1} alignItems="center"><CenterIcon color="primary" /><Typography variant="subtitle1">Сервісні центри (зони)</Typography></Stack>
-          <Button size="small" startIcon={<AddIcon />} onClick={() => setCenterEdit({ active: true })}>Додати центр</Button>
+          <Button size="small" startIcon={<AddIcon />} onClick={() => openCenter({ active: true })}>Додати центр</Button>
         </Stack>
         {centers.length === 0 ? (
           <Typography variant="body2" color="text.secondary">Ще немає центрів. Додайте перший.</Typography>
@@ -153,7 +193,8 @@ export default function AccessAdminPage() {
                 {c.zone && <Chip size="small" variant="outlined" label={c.zone} />}
                 {c.externalId && <Typography variant="caption" color="text.secondary">1С: {c.externalId}</Typography>}
                 {!c.active && <Chip size="small" color="default" label="неактивний" />}
-                <IconButton size="small" sx={{ ml: 'auto' }} onClick={() => setCenterEdit(c)}><EditIcon fontSize="small" /></IconButton>
+                {c.markupPct != null && <Typography variant="caption" color="text.secondary">націнка {c.markupPct}%</Typography>}
+                <IconButton size="small" sx={{ ml: 'auto' }} onClick={() => openCenter(c)}><EditIcon fontSize="small" /></IconButton>
               </Stack>
             ))}
           </Stack>
@@ -176,6 +217,7 @@ export default function AccessAdminPage() {
                 <Chip size="small" color={u.role === 'owner' ? 'secondary' : u.role === 'accountant' ? 'info' : 'default'} label={ROLE_LABELS[u.role] || u.role} />
                 <Chip size="small" color={u.active ? 'success' : 'default'} label={u.active ? 'активний' : 'без доступу'} />
                 {u.role === 'master' && <Typography variant="caption" color="text.secondary">центрів: {(u.centers || []).length}</Typography>}
+                {u.calcVisibility?.partner && <Chip size="small" variant="outlined" color="warning" label="партнер" />}
                 <Button size="small" sx={{ ml: 'auto' }} onClick={() => openUser(u)}>Налаштувати</Button>
               </Stack>
             ))}
@@ -192,6 +234,12 @@ export default function AccessAdminPage() {
             <TextField label="Зона / регіон (опц.)" value={centerEdit?.zone || ''} onChange={(e) => setCenterEdit((c) => ({ ...c, zone: e.target.value }))} fullWidth />
             <TextField label="ID у 1С (опц.)" value={centerEdit?.externalId || ''} onChange={(e) => setCenterEdit((c) => ({ ...c, externalId: e.target.value }))} fullWidth helperText="Для звʼязку з довідником сервісних центрів 1С" />
             <FormControlLabel control={<Switch checked={centerEdit?.active !== false} onChange={(e) => setCenterEdit((c) => ({ ...c, active: e.target.checked }))} />} label="Активний" />
+            <TextField label="Націнка на калькуляції майстрів, %" value={centerMarkup} onChange={(e) => setCenterMarkup(e.target.value)}
+              fullWidth size="small" type="number" inputProps={{ min: MARKUP_MIN, max: MARKUP_MAX, step: 1 }}
+              error={markupParsed === undefined}
+              helperText={markupParsed === undefined
+                ? `Від ${MARKUP_MIN} до ${MARKUP_MAX} %`
+                : 'Підставляється, коли калькуляцію клієнту складають на основі калькуляцій майстрів. Порожньо — не задано (0 %).'} />
 
             <Divider textAlign="left"><Typography variant="caption">ФОП за замовчуванням по способах оплати</Typography></Divider>
             <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
@@ -300,6 +348,21 @@ export default function AccessAdminPage() {
                     </Table>
                   </Box>
                 )}
+              </Box>
+            )}
+            {/* Лише для майстра: директор керує калькуляціями центру, відмітки на нього не діють (ні тут, ні в застосунку). */}
+            {uRole === 'master' && (
+              <Box>
+                <Divider textAlign="left" sx={{ mb: 0.5 }}><Typography variant="caption">Калькуляції та контакти клієнта</Typography></Divider>
+                <Stack>
+                  {CALC_VISIBILITY_KEYS.map((k) => (
+                    <FormControlLabel key={k} label={CALC_VISIBILITY_LABELS[k]}
+                      control={<Checkbox size="small" checked={resolveCalcVisibility(uCalcVis)[k]} onChange={() => toggleCalcVis(k)} />} />
+                  ))}
+                </Stack>
+                <Typography variant="caption" color="text.secondary">
+                  Відмітки «бачить» для партнера за замовчуванням вимкнені; для своїх майстрів — увімкнені, доки не змінено
+                </Typography>
               </Box>
             )}
           </Stack>

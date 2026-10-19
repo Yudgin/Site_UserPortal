@@ -83,6 +83,35 @@ export const cardVisibility = (role: ViewRole): CardVisibility => {
   }
 }
 
+// Видимость калькуляций/контактов в карточке мастера (бриф master-estimates §3.4). RBAC-поле: пишет ТОЛЬКО
+// владелец (firestore.rules). clientPreliminary/clientActual — видит ли калькуляции клиенту (варианты/факт),
+// clientContacts — имя и телефон клиента, partner — внешний исполнитель (партнёрский центр).
+// Этап 1 — только UX; настоящая граница в правилах — этап 2.
+export interface CalcVisibility {
+  clientPreliminary?: boolean
+  clientActual?: boolean
+  clientContacts?: boolean
+  partner?: boolean
+}
+export const CALC_VISIBILITY_KEYS = ['clientPreliminary', 'clientActual', 'clientContacts', 'partner'] as const
+export type CalcVisibilityKey = (typeof CALC_VISIBILITY_KEYS)[number]
+export const CALC_VISIBILITY_LABELS: Record<CalcVisibilityKey, string> = {
+  clientPreliminary: 'Бачить попередні калькуляції клієнту',
+  clientActual: 'Бачить фактичні калькуляції клієнту',
+  clientContacts: 'Бачить контакти клієнта',
+  partner: 'Партнер (зовнішній виконавець)',
+}
+// Умолчания, пока поле не задано: не партнёр; «бачить» — да для своих мастеров, нет для партнёра.
+export const resolveCalcVisibility = (v?: CalcVisibility | null): Required<CalcVisibility> => {
+  const partner = v?.partner === true
+  return {
+    clientPreliminary: v?.clientPreliminary ?? !partner,
+    clientActual: v?.clientActual ?? !partner,
+    clientContacts: v?.clientContacts ?? !partner,
+    partner,
+  }
+}
+
 // Профиль сотрудника (роль-документ). Ключ документа = Firebase uid. Пишет только владелец.
 export interface UserProfile {
   uid: string
@@ -90,6 +119,7 @@ export interface UserProfile {
   displayName?: string
   role: Role
   centers?: CenterAccess[] // для master (и опционально для scoped-бухгалтера); owner — все центры
+  calcVisibility?: CalcVisibility // отметки видимости (только владелец); нет поля — умолчания resolveCalcVisibility
   active: boolean
   createdAt: string
   updatedAt: string
@@ -109,6 +139,9 @@ export interface ServiceCenter {
   // Шаблоны ТТН Новой Почты для этого центра по направлениям (id из npTemplates):
   incomingTtnTemplateId?: string | null // клиент → сервіс («на ремонт»)
   returnTtnTemplateId?: string | null // сервіс → клієнт («з ремонту»)
+  // Наценка центра % (−50…1000) по умолчанию, когда владелец складывает калькуляцию клиенту на основе калькуляций
+  // мастеров (server/masterEstimates.js). null/нет поля — не задана (сервер считает 0 %).
+  markupPct?: number | null
   active: boolean
   createdAt: string
   updatedAt: string

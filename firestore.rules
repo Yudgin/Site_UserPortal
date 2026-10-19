@@ -108,7 +108,7 @@ service cloud.firestore {
     // сотрудник мог бы назначить себе чужую линию. Свой мобильный (pbxPhone) сотрудник пишет сам.
     function touchesRbacKeys() {
       return request.resource.data.diff(resource.data).affectedKeys()
-        .hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine']);
+        .hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine', 'calcVisibility']);
     }
     match /users/{userId} {
       allow get: if isPriceAdmin() || (request.auth != null && request.auth.uid == userId);
@@ -119,7 +119,7 @@ service cloud.firestore {
       // Создание: владелец — что угодно; сам пользователь — только БЕЗ RBAC-полей.
       allow create: if isPriceAdmin()
         || (request.auth != null && request.auth.uid == userId
-            && !request.resource.data.keys().hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine']));
+            && !request.resource.data.keys().hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine', 'calcVisibility']));
       // Обновление: владелец — что угодно; сам пользователь — только не меняя RBAC-полей.
       allow update: if isPriceAdmin()
         || (request.auth != null && request.auth.uid == userId && !touchesRbacKeys());
@@ -149,6 +149,16 @@ service cloud.firestore {
 
     // Предложения клиенту (наборы вариантов сметы). Прямой доступ — только администратор; клиент
     // видит варианты и выбирает путь через backend (/api/offers/:id/public, /choose) — Admin SDK.
+    // Калькуляції майстрів (виконавців, у т.ч. партнерських центрів): пише ТІЛЬКИ бекенд (/api/master-estimates).
+    // Власник, директор, бухгалтер читають усі; майстер — лише свої (запит застосунку обов'язково фільтрує
+    // where('performerUid', '==', uid), інакше список відхиляється).
+    match /masterEstimates/{meId} {
+      allow get, list: if isPriceAdmin()
+        || (hasStaffDoc() && staffDoc().active == true && staffDoc().role in ['owner', 'director', 'accountant'])
+        || (isStaff() && resource.data.performerUid == request.auth.uid);
+      allow write: if false;
+    }
+
     match /estimateOffers/{offerId} {
       allow read, list: if isStaff();
       allow create, update: if isServiceStaff();
@@ -173,6 +183,12 @@ service cloud.firestore {
       // Дзвінки по заявці через АТС (Binotel): стан, запис, розшифровка, резюме. Пише ТОЛЬКО
       // backend (/api/calls/originate + конвейер). Персонал читает (телефон клиента уже в заявке).
       match /calls/{callId} {
+        allow read, list: if isStaff();
+        allow write: if false;
+      }
+      // Роботи по заявці (хто що робить: доставка, прийом, ремонт, тест на воді). Пише ТІЛЬКИ бекенд
+      // (/api/service-requests/:id/works). Персонал читає (як і саму заявку).
+      match /works/{workId} {
         allow read, list: if isStaff();
         allow write: if false;
       }

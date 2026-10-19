@@ -27,6 +27,7 @@ import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
 import { registerVoiceTranscribe } from './voiceTranscribe.js'
 import { registerEstimates } from './estimates.js'
+import { registerMasterEstimates } from './masterEstimates.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
 import { registerUserProfiles } from './userProfiles.js'
@@ -1230,6 +1231,8 @@ const { notifyClient } = registerNotifications(app, { adminDb, senders: messenge
 // Фактичний кошторис із застосунку сервісу: створити за обраним варіантом, витрата поза прайсом,
 // вилучити витрату (ядро розрахунків — estimateEngine.js, спільне з Telegram-ботом співробітників).
 registerEstimates(app, { adminDb, notifyClient })
+// Роботи по заявці і калькуляції майстра (виконавці, партнерські центри): «на основі» в обидва боки.
+registerMasterEstimates(app, { adminDb, notifyClient })
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 registerPayments(app, { adminDb })
