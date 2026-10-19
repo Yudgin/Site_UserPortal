@@ -1,3 +1,4 @@
+import type { MasterLineRef } from './pricing'
 // Заявка на обслуживание — НАША локальная сущность-хаб (система-источник на сайте).
 // Формируется из обращения (ChatSession) и связывает предварительные калькуляции (предложение
 // с вариантами), фактическую калькуляцию и оплату. Ссылка на 1С — через externalRequestId
@@ -81,6 +82,24 @@ export interface RequestSpecialist {
   name: string
 }
 
+// Додаткова витрата поза прайсом (доставка, запчастина, послуга третьої сторони). Вноситься
+// Telegram-ботом співробітників або редактором факту. Якщо є фактичний кошторис — рядок
+// type='addon' refId 'extra:<id>' (extra=true) додається в нього і appliedToEstimateId вказує
+// на кошторис; інакше витрата чекає складання факту (редактор підставить її автоматично).
+export interface ExtraExpense {
+  id: string
+  title: string
+  amount: number // грн
+  note?: string
+  at: string
+  by: string | null // email співробітника
+  byUid?: string
+  source: 'telegram-bot' | 'portal' | 'app' | 'master' // бот / редактор факту / застосунок / калькуляція майстра
+  masterRef?: MasterLineRef // для source='master': який рядок якої калькуляції майстра (зеркало EstimateLine.fromMaster)
+  appliedToEstimateId?: string | null
+  clientKey?: string // ключ ідемпотентності застосунку (повтор запиту не додає другий витрату)
+}
+
 export interface ServiceRequest {
   id: string
   createdAt: string
@@ -125,6 +144,7 @@ export interface ServiceRequest {
   // Telegram-сессия клиента (пишет бот при клике; оповещения идут в неё приоритетно).
   tgLinkToken?: string | null
   tgSessionId?: string | null
+  extraExpenses?: ExtraExpense[] // додаткові витрати поза прайсом (бот/редактор факту)
   // Привязанные калькуляции и оплата:
   aiEstimateId?: string | null // материализованная предварительная оценка ИИ (stage='ai')
   offerId?: string | null // предложение с вариантами (предварительные калькуляции)

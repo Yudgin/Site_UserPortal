@@ -27,6 +27,7 @@ import type {
   ServiceKind,
   Work,
   WorkCategory,
+  MasterLineRef,
 } from '@/types/pricing'
 import type { ServiceAuthorization } from '@/types/chat'
 import { NO_REAPPROVAL_DEVIATION_PCT } from '@/types/chat'
@@ -898,16 +899,20 @@ export const applyEstimateDiscount = (est: Estimate, d?: EstimateDiscountInput |
   const value = Number(d?.value) || 0
   if (!d || value <= 0) return est
   const grossKop = Math.round(est.total * 100)
-  if (grossKop <= 0) return est
+  // Нічого знижувати (підсумок 0, знижка < 1 коп., немає додатних рядків): рядки не чіпаємо, але НАМІР
+  // знижки зберігаємо (amount 0) — інакше рядок, доданий пізніше ботом/застосунком (server/estimateEngine.js
+  // withLines), пройшов би без знижки, яку ввів майстер. Дзеркало — applyEstimateDiscount у estimateEngine.js.
+  const keepIntent = (): Estimate => ({ ...est, discount: { value, kind: d.kind, amount: 0, grossTotal: round2(grossKop / 100) } })
+  if (grossKop <= 0) return keepIntent()
   const offKop = Math.min(d.kind === 'pct' ? Math.round((grossKop * value) / 100) : Math.round(value * 100), grossKop)
-  if (offKop <= 0) return est
+  if (offKop <= 0) return keepIntent()
   const targetKop = grossKop - offKop
 
   const idxs = est.lines
     .map((l, i) => ({ i, kop: Math.round(l.lineTotal * 100) }))
     .filter((x) => x.kop > 0)
   const sumKop = idxs.reduce((acc, x) => acc + x.kop, 0)
-  if (!idxs.length || sumKop <= 0) return est
+  if (!idxs.length || sumKop <= 0) return keepIntent()
 
   const lines = est.lines.map((l) => ({ ...l }))
   let acc = 0
@@ -931,6 +936,29 @@ export const applyEstimateDiscount = (est: Estimate, d?: EstimateDiscountInput |
     total: round2(targetKop / 100),
     discount: { value, kind: d.kind, amount: round2(offKop / 100), grossTotal: round2(grossKop / 100) },
   }
+}
+
+// ==== Додаткові витрати поза прайсом ====
+//
+// Рядки extra=true (доставка, запчастина, послуга третьої сторони; refId 'extra:<id>') не походять
+// з каталогу, тому buildMultiEstimate їх не знає. Редактор факту тримає їх окремо і дописує до
+// зібраного кошторису ДО застосування знижки (знижка потім вшивається і в них — як у бота на сервері,
+// див. server/staffBotCore.js withLines). Рядок extra — type='addon', qty=1, без сезону.
+export const extraExpenseLine = (exp: { id: string; title: string; amount: number; masterRef?: MasterLineRef }): EstimateLine => ({
+  type: 'addon', refId: `extra:${exp.id}`, code: 'EXTRA', name: { uk: exp.title }, qty: 1,
+  unitPrice: round2(exp.amount), seasonApplied: false, lineTotal: round2(exp.amount), extra: true,
+  ...(exp.masterRef ? { fromMaster: exp.masterRef } : {}),
+})
+
+export const appendExtraLines = (est: Estimate, extra: EstimateLine[]): Estimate => {
+  if (!extra.length) return est
+  const lines = [...est.lines, ...extra.map((l) => ({ ...l, extra: true }))]
+  const sumBy = (type: EstimateLine['type']) =>
+    round2(lines.filter((l) => l.type === type).reduce((a, l) => a + l.lineTotal, 0))
+  const laborTotal = sumBy('labor')
+  const materialsTotal = sumBy('material')
+  const addonsTotal = sumBy('addon')
+  return { ...est, lines, laborTotal, materialsTotal, addonsTotal, total: round2(laborTotal + materialsTotal + addonsTotal) }
 }
 
 // Итог по позициям чека (грн) — для сверки/отображения
