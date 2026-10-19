@@ -162,7 +162,7 @@ export default function AccessAdminPage() {
     const ok = await userProfileService.setAccess(userEdit.uid, {
       role: uRole, active: uActive, centers: centersArr,
       // Відмітки видимості — лише якщо власник їх змінював; пишемо повний набір (явно, без умовчань).
-      ...(uCalcVisDirty ? { calcVisibility: resolveCalcVisibility(uCalcVis) } : {}),
+      ...(uCalcVisDirty && uRole === 'master' ? { calcVisibility: resolveCalcVisibility(uCalcVis) } : {}),
     })
     if (ok) { notify('Доступ збережено'); setUserEdit(null); await load() }
     else notify('Не вдалося зберегти', 'error')
@@ -350,7 +350,8 @@ export default function AccessAdminPage() {
                 )}
               </Box>
             )}
-            {(uRole === 'master' || uRole === 'director') && (
+            {/* Лише для майстра: директор керує калькуляціями центру, відмітки на нього не діють (ні тут, ні в застосунку). */}
+            {uRole === 'master' && (
               <Box>
                 <Divider textAlign="left" sx={{ mb: 0.5 }}><Typography variant="caption">Калькуляції та контакти клієнта</Typography></Divider>
                 <Stack>
