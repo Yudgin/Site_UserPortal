@@ -182,7 +182,8 @@ export function createEstimateActions({ adminDb, ops: injectedOps } = {}) {
         .filter((l) => l && l.extra && l.fromMaster && String(l.refId || '').startsWith('extra:') && !knownIds.has(String(l.refId).slice(6)))
         .map((l) => ({
           id: String(l.refId).slice(6), title: tName(l.name), amount: round2(l.grossLineTotal ?? l.lineTotal), at: now,
-          by: staff.email || null, byUid: staff.uid || null, source: 'master', appliedToEstimateId: estId, masterRef: l.fromMaster,
+          by: staff.email || null, byUid: staff.uid || null, source: 'master', appliedToEstimateId: estId,
+          masterRef: { masterEstimateId: String(l.fromMaster.masterEstimateId), index: Number(l.fromMaster.index) },
         }))
       if (pending.length || fromVariant.length) {
         srPatch.extraExpenses = [

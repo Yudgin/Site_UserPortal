@@ -183,13 +183,15 @@ export interface PricingSettings {
 
 export type EstimateLineType = 'labor' | 'material' | 'addon'
 
-// Посилання рядка кошторису на рядок калькуляції майстра (зеркало server/masterEstimates.js).
+// Посилання рядка кошторису на рядок калькуляції майстра (зеркало masterLineRef у server/masterEstimates.js).
+// Лише id і індекс: кошторис і журнал заявки читає весь персонал, а сума майстру і виконавець — тільки в
+// masterEstimates (правила: власник/директор/бухгалтер і сам виконавець).
 export interface MasterLineRef {
   masterEstimateId: string
   index: number
-  masterAmount: number // сума майстру, грн (клієнту — з націнкою центру або вручну)
-  performerUid: string
 }
+
+export const masterLineRef = (r: MasterLineRef): MasterLineRef => ({ masterEstimateId: String(r.masterEstimateId), index: Number(r.index) })
 
 // Одна строка детальной сметы
 export interface EstimateLine {

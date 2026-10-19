@@ -9,7 +9,7 @@
 //  • відомі, але майстер прибрав у редакторі → свідоме видалення — у журналі прибираємо.
 // Чисті функції без React/Firestore — їх перевіряє тест на справжньому коді.
 import { round2, tName, extraExpenseLine } from '@/utils/pricing'
-import type { Estimate, EstimateLine } from '@/types/pricing'
+import { masterLineRef, type Estimate, type EstimateLine } from '@/types/pricing'
 import type { ServiceRequest, ExtraExpense } from '@/types/serviceRequest'
 
 export const extraRef = (id: string): string => `extra:${id}`
@@ -20,6 +20,7 @@ export const grossExtraLine = (l: EstimateLine): EstimateLine => {
   const full = l.grossLineTotal ?? l.lineTotal
   const line: EstimateLine = { ...l, lineTotal: full, unitPrice: l.qty ? round2(full / l.qty) : full, extra: true }
   delete line.grossLineTotal
+  if (line.fromMaster) line.fromMaster = masterLineRef(line.fromMaster) // без суми майстру (див. MasterLineRef)
   return line
 }
 
@@ -105,7 +106,7 @@ export const syncRequestExtras = (p: {
   const added: ExtraExpense[] = p.editorLines.filter((l) => !known.has(l.refId)).map((l) => ({
     id: l.refId.replace(/^extra:/, ''), title: tName(l.name, 'uk'), amount: round2(l.lineTotal), at,
     by: p.by, source: l.fromMaster ? 'master' : 'portal', appliedToEstimateId: p.estimateId,
-    ...(l.fromMaster ? { masterRef: l.fromMaster } : {}),
+    ...(l.fromMaster ? { masterRef: masterLineRef(l.fromMaster) } : {}),
   }))
   return [...kept, ...foreign, ...added]
 }

@@ -190,7 +190,8 @@ test('to client → NEW actual: markup from the centre, overrides, journal entri
   assert.deepEqual(est.payOptions, [{ method: 'liqpayCard', fopId: 'fop-1' }])
   assert.equal(est.lines.length, 3)
   assert.equal(est.lines.every((l) => l.extra && l.refId.startsWith('extra:')), true)
-  assert.equal(est.lines[1].fromMaster.masterAmount, 500)
+  // у копіях (читає весь персонал) — лише id і індекс, без суми майстру й виконавця
+  assert.deepEqual(est.lines[1].fromMaster, { masterEstimateId: meId, index: 0 })
   assert.equal(est.lines[2].name.uk, 'Ремкомплект (2 шт)')
   assert.equal(est.receiptGoods.length, 3)
   const sr = db.get('serviceRequests/sr-1')
@@ -200,7 +201,7 @@ test('to client → NEW actual: markup from the centre, overrides, journal entri
   assert.equal(sr.extraExpenses.length, 3)
   assert.equal(sr.extraExpenses.every((x) => x.appliedToEstimateId === r.data.estimateId), true)
   assert.equal(sr.extraExpenses[1].source, 'master')
-  assert.equal(sr.extraExpenses[1].masterRef.masterEstimateId, meId)
+  assert.deepEqual(sr.extraExpenses[1].masterRef, { masterEstimateId: meId, index: 0 })
   const me = db.get(`masterEstimates/${meId}`)
   assert.equal(me.status, 'accepted')
   assert.equal(me.derived[0].type, 'actual')
@@ -390,6 +391,11 @@ test('same clientKey with different content → CLIENT_KEY_REUSED (estimate, var
   const w = await a.addWork(master, { requestId: 'sr-1', kind: 'water_test', clientKey: 'key-00000103' })
   assert.equal(w.data.created, true)
   assert.equal((await a.addWork(master, { requestId: 'sr-1', kind: 'packing', clientKey: 'key-00000103' })).code, 'CLIENT_KEY_REUSED')
+  // ключ і id роботи потрапляють у шлях документа — «/» та інше відхиляються
+  assert.equal((await a.addWork(master, { requestId: 'sr-1', kind: 'packing', clientKey: 'a/b/c/d/e/f' })).code, 'BAD_CLIENT_KEY')
+  assert.equal((await a.createFromMaster(master, { requestId: 'sr-1', workId: 'x/y', lines, clientKey: 'key-00000104' })).code, 'BAD_ID')
+  const viaDoc = await a.createFromMaster(master, { requestId: 'sr-1', lines, via: '<script>', clientKey: 'key-00000105' })
+  assert.equal(viaDoc.data.masterEstimate.via, 'app')
 })
 
 test('variant from masters → client chooses → actual from that variant: master lines journaled, removable', async () => {

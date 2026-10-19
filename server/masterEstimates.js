@@ -56,6 +56,8 @@ const ok = (data) => ({ ok: true, data })
 // запрос», молча возвращать старый результат нельзя (ревью 2026-10-19). Документы без отпечатка — как раньше.
 export const reqHash = (obj) => crypto.createHash('sha256').update(JSON.stringify(obj)).digest('base64url').slice(0, 22)
 const sameRequest = (stored, h) => !stored || stored === h
+const VIA = ['app', 'portal', 'bot']
+const viaOf = (p) => (VIA.includes(p && p.via) ? p.via : 'app')
 const KEY_REUSED = () => fail(409, 'CLIENT_KEY_REUSED', 'Ключ запиту вже використано для іншого запиту — спробуйте ще раз.')
 
 // Строки калькуляции мастера: назва ≤120, кількість 0.01–10 000 (за замовчуванням 1), сума рядка 0.01–1 000 000,
@@ -77,6 +79,11 @@ export const normalizeLines = (raw) => {
   return { lines, total: round2(lines.reduce((s, l) => s + l.amount, 0)) }
 }
 
+// Ссылка строки клиенту на строку калькуляции мастера — ТОЛЬКО id и индекс. Копии лежат в priceEstimates и в журнале
+// serviceRequests.extraExpenses, которые читает весь персонал; сумма мастеру и исполнитель — лишь в masterEstimates
+// (там правила: владелец/директор/бухгалтер и сам исполнитель). Ревью деплоя 2026-10-19: «суммы Катрины видят все».
+export const masterLineRef = (ref) => ({ masterEstimateId: String(ref && ref.masterEstimateId), index: Number(ref && ref.index) })
+
 // Сумма клиенту за строку мастера: явная правка или наценка %.
 export const clientAmountFor = (masterAmount, markupPct, override) => {
   if (override != null && override !== '') return round2(Number(override))
@@ -86,7 +93,7 @@ export const clientAmountFor = (masterAmount, markupPct, override) => {
 // Строка калькуляции клиенту из строки мастера: строка вне прайса (общее ядро extraLine) + пометка источника.
 export const clientLineFromMaster = ({ expId, me, index, line, clientAmount }) => ({
   ...extraLine({ id: expId, title: line.qty !== 1 ? `${line.title} (${line.qty} шт)` : line.title, amount: clientAmount }),
-  fromMaster: { masterEstimateId: me.id, index, masterAmount: line.amount, performerUid: me.performerUid },
+  fromMaster: masterLineRef({ masterEstimateId: me.id, index }),
 })
 
 // Владелец — всё; директор — заявки своих центров.
@@ -105,7 +112,7 @@ export function createMasterEstimateActions({ adminDb }) {
   }
   const worksCol = (srId) => col('serviceRequests').doc(String(srId)).collection('works')
   const getWork = async (srId, workId) => {
-    if (!workId) return null
+    if (!workId || !ID_RE.test(String(workId))) return null
     const s = await worksCol(srId).doc(String(workId)).get()
     return s.exists ? { id: s.id, ...s.data() } : null
   }
@@ -153,6 +160,7 @@ export function createMasterEstimateActions({ adminDb }) {
       assignee = await loadAssignee(String(p.assigneeUid), sr)
       if (!assignee) return fail(400, 'BAD_ASSIGNEE', 'Виконавця не знайдено або він не має доступу до центру заявки.')
     }
+    if (p.clientKey != null && !CLIENT_KEY_RE.test(String(p.clientKey))) return fail(400, 'BAD_CLIENT_KEY', 'Некоректний clientKey.')
     const id = p.clientKey ? `w-${p.clientKey}` : newId(9)
     const ref = worksCol(sr.id).doc(id)
     const h = reqHash({ kind, title, assignee: assignee ? assignee.uid : null })
@@ -234,6 +242,7 @@ export function createMasterEstimateActions({ adminDb }) {
       if (!performer) return fail(400, 'BAD_ASSIGNEE', 'Виконавця не знайдено або він не має доступу до центру заявки.')
     }
     let work = null
+    if (p.workId != null && p.workId !== '' && !ID_RE.test(String(p.workId))) return fail(400, 'BAD_ID', 'Некоректний id роботи.')
     if (p.workId) {
       work = await getWork(sr.id, p.workId)
       if (!work) return fail(404, 'NO_WORK', 'Роботу не знайдено.')
@@ -270,7 +279,7 @@ export function createMasterEstimateActions({ adminDb }) {
         workId: workRef.id, kind, direction: 'from_master', performerUid: performer.uid, performerName: performer.name,
         lines: norm.lines, total: norm.total, status: 'draft', comment,
         basedOn: null, derived: [], history: [], createdAt: now, createdBy: staff.email || null, createdByUid: staff.uid,
-        updatedAt: now, updatedBy: staff.email || null, via: p.via || 'app', requestHash: h,
+        updatedAt: now, updatedBy: staff.email || null, via: viaOf(p), requestHash: h,
       }
       tx.set(ref, doc)
       return ok({ masterEstimate: { id, ...doc }, created: true })
@@ -552,7 +561,7 @@ export function createMasterEstimateActions({ adminDb }) {
   const journalEntry = (x, staff, now, key, estId, h) => ({
     id: newId(), title: x.line.qty !== 1 ? `${x.line.title} (${x.line.qty} шт)` : x.line.title, amount: x.clientAmount,
     at: now, by: staff.email || null, byUid: staff.uid, source: 'master', appliedToEstimateId: estId, masterBatchKey: key, masterBatchHash: h,
-    masterRef: { masterEstimateId: x.me.id, index: x.index, masterAmount: x.line.amount, performerUid: x.me.performerUid },
+    masterRef: masterLineRef({ masterEstimateId: x.me.id, index: x.index }),
   })
 
   // Перечитати калькуляції-основи в транзакції (до першого запису): їх могли скасувати чи повернути паралельно.
@@ -600,6 +609,7 @@ export function createMasterEstimateActions({ adminDb }) {
     if (norm.error) return fail(400, 'BAD_LINES', norm.error)
     norm.lines.forEach((l, i) => { l.sourceLineRef = { estimateId: est.id, index: raw[i].sourceIndex } })
     let work = null
+    if (p.workId != null && p.workId !== '' && !ID_RE.test(String(p.workId))) return fail(400, 'BAD_ID', 'Некоректний id роботи.')
     if (p.workId) {
       work = await getWork(sr.id, p.workId)
       if (!work) return fail(404, 'NO_WORK', 'Роботу не знайдено.')
@@ -628,7 +638,7 @@ export function createMasterEstimateActions({ adminDb }) {
         workId: workRef.id, kind, direction: 'to_master', performerUid: performer.uid, performerName: performer.name,
         lines: norm.lines, total: norm.total, status: 'submitted', comment,
         basedOn: { type: 'clientEstimate', id: est.id }, derived: [], history: [],
-        createdAt: now, createdBy: staff.email || null, createdByUid: staff.uid, updatedAt: now, updatedBy: staff.email || null, via: p.via || 'app',
+        createdAt: now, createdBy: staff.email || null, createdByUid: staff.uid, updatedAt: now, updatedBy: staff.email || null, via: viaOf(p),
         submittedAt: now, submittedBy: staff.email || null, requestHash: h,
       }
       tx.set(ref, doc)

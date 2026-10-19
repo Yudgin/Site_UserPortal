@@ -29,6 +29,7 @@ import type {
   WorkCategory,
   MasterLineRef,
 } from '@/types/pricing'
+import { masterLineRef } from '@/types/pricing'
 import type { ServiceAuthorization } from '@/types/chat'
 import { NO_REAPPROVAL_DEVIATION_PCT } from '@/types/chat'
 
@@ -947,7 +948,7 @@ export const applyEstimateDiscount = (est: Estimate, d?: EstimateDiscountInput |
 export const extraExpenseLine = (exp: { id: string; title: string; amount: number; masterRef?: MasterLineRef }): EstimateLine => ({
   type: 'addon', refId: `extra:${exp.id}`, code: 'EXTRA', name: { uk: exp.title }, qty: 1,
   unitPrice: round2(exp.amount), seasonApplied: false, lineTotal: round2(exp.amount), extra: true,
-  ...(exp.masterRef ? { fromMaster: exp.masterRef } : {}),
+  ...(exp.masterRef ? { fromMaster: masterLineRef(exp.masterRef) } : {}),
 })
 
 export const appendExtraLines = (est: Estimate, extra: EstimateLine[]): Estimate => {
