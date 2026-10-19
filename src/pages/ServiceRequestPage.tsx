@@ -42,6 +42,7 @@ import { telegramLinkApi } from '@/api/endpoints/telegramLink'
 import NpAddressPicker from '@/components/NpAddressPicker'
 import type { NpAddress } from '@/types/npTemplate'
 import CreateTtnDialog from '@/components/CreateTtnDialog'
+import MasterWorksSection from '@/components/MasterWorksSection'
 import ViewAsButton from '@/components/ViewAsButton'
 import { canonicalPhone } from '@/utils/phone'
 import { secureId } from '@/utils/id'
@@ -460,6 +461,15 @@ export default function ServiceRequestPage() {
           noOptionsText={staff.length ? 'Усі додані' : 'Немає співробітників (додайте у «Доступ та центри»)'}
           renderInput={(p) => <TextField {...p} label="Додати спеціаліста" />} />
       </Paper>
+      )}
+
+      {/* Роботи і калькуляції майстрів (етап 1 — лише перегляд; складають у застосунку «RunFerry Сервіс»).
+          Майстер бачить лише свої калькуляції (правила), власник/директор/бухгалтер — усі. */}
+      {vis.internal && (
+        <MasterWorksSection serviceRequestId={id}
+          performerUid={access.role === 'master' ? user?.id || null : null}
+          offerId={req.offerId} actualEstimateId={req.actualEstimateId}
+          actualPaid={actual?.status === 'paid' || !!req.paymentId} />
       )}
 
       {/* Крок 1: Предложение (предварительные калькуляции) */}
