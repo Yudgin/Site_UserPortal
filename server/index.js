@@ -1245,7 +1245,8 @@ const { notifyClient } = registerNotifications(app, { adminDb, senders: messenge
 // Приглашение в чат с ИИ по теме: POST /api/chat-invites (персонал) — тема по-украински, первое сообщение ИИ,
 // ссылка ${SITE_URL}/c/<id> и SMS; POST /api/chat-invites/open — отметка «відкрито». Из бота — chatInviteActions.createInvite.
 chatInviteActions = registerChatInvites(app, {
-  adminDb, notifyClient, siteUrl: SITE_URL, core: createMessengerCore(messengerDeps),
+  // CHAT_INVITE_SITE_URL — сайт для ссылок в SMS-приглашениях, если не основной (тестовая копия сайта при проверке).
+  adminDb, notifyClient, siteUrl: (process.env.CHAT_INVITE_SITE_URL || SITE_URL).replace(/\/$/, ''), core: createMessengerCore(messengerDeps),
   anthropic, AI_MODEL, KNOWLEDGE_SYSTEM, buildUsage,
 }).actions
 // Фактичний кошторис із застосунку сервісу: створити за обраним варіантом, витрата поза прайсом,
