@@ -214,3 +214,9 @@ test('relatedPartsLine names only published, active parts', () => {
   assert.equal(relatedPartsLine(['V2-LID-H'], [draftPart]), '')
   assert.equal(relatedPartsLine(undefined, [pubPart]), '')
 })
+
+test('planDraft refuses a second draft with the same SKU under another slug', () => {
+  const p = planDraft({ spec: spec(), priceList: pl(), draftsWithSku: [{ slug: 'old-slug', sku: 'V2-LID-R' }], nowIso: NOW, newMaterialId: 'm' })
+  assert.ok(p.errors.some((e) => e.includes('«old-slug»')))
+  assert.deepEqual(planDraft({ spec: spec(), priceList: pl(), draftsWithSku: [{ slug: 'solo-v2-lid-rect', sku: 'V2-LID-R' }], nowIso: NOW, newMaterialId: 'm' }).errors, [])
+})

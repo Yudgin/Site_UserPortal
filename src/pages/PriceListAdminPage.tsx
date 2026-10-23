@@ -90,14 +90,15 @@ export default function PriceListAdminPage() {
   const [params] = useSearchParams()
   const focusCode = params.get('code')
   const focusedOnce = useRef(false)
+  // Ждём настоящий прайс из базы: до загрузки в черновике лежит стартовый сид без этих позиций.
   useEffect(() => {
-    if (!focusCode || focusedOnce.current || !draft) return
+    if (!focusCode || focusedOnce.current || !draft || !persisted || isLoading) return
     focusedOnce.current = true
     if (draft.materials.some((m) => m.code === focusCode)) {
       setTab(2)
       setTimeout(() => document.getElementById(`mat-row-${focusCode}`)?.scrollIntoView({ block: 'center' }), 100)
     }
-  }, [focusCode, draft])
+  }, [focusCode, draft, persisted, isLoading])
 
   useEffect(() => { loadFromServer() }, [loadFromServer])
 
@@ -160,15 +161,20 @@ export default function PriceListAdminPage() {
 
   const handleSave = async () => {
     setSaving(true)
+    const sent = draft
+    // draft.updatedAt — версия, от которой начата правка (в т.ч. у черновика из бекапа или у сида, если
+    // прайс не загрузился): сервис сверяет её с базой и не даёт затереть более новую версию
     const res = await savePriceList({
-      categories: draft.categories, works: draft.works, kits: draft.kits,
-      materials: draft.materials, addons: draft.addons, settings: draft.settings,
-    // draft.updatedAt — версия, от которой начата правка (в т.ч. у черновика, восстановленного из бекапа)
-    }, persisted ? draft.updatedAt : undefined)
+      categories: sent.categories, works: sent.works, kits: sent.kits,
+      materials: sent.materials, addons: sent.addons, settings: sent.settings,
+    }, sent.updatedAt)
     setSaving(false)
     if (res.ok) {
       try { localStorage.removeItem(BACKUP_KEY) } catch { /* ignore */ }
-      setDraft(structuredClone(usePricingStore.getState().catalog)) // новая база для следующей сверки
+      // Новая база для следующей сверки; правки, сделанные во время сохранения, не теряем
+      setDraft((d) => (!d || d === sent
+        ? structuredClone(usePricingStore.getState().catalog)
+        : { ...d, updatedAt: res.updatedAt, updatedBy: res.updatedBy }))
     }
     if (!res.ok && res.conflict) { setSaveConflict(res.conflict); return }
     notify(res.ok ? 'Прайс-лист сохранён' : 'Не удалось сохранить (нужны права администратора)', res.ok ? 'success' : 'error')
@@ -178,7 +184,9 @@ export default function PriceListAdminPage() {
   // локальные правки пропадают (их видно в черновике до нажатия — можно переписать).
   const reloadAfterConflict = async () => {
     await loadFromServer()
-    setDraft(structuredClone(usePricingStore.getState().catalog))
+    const st = usePricingStore.getState()
+    if (st.error || !st.persisted) { notify('Не удалось загрузить прайс — проверьте связь и повторите', 'error'); return }
+    setDraft(structuredClone(st.catalog))
     try { localStorage.removeItem(BACKUP_KEY) } catch { /* ignore */ }
     setSaveConflict(null)
     notify('Загружен актуальный прайс')

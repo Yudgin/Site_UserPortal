@@ -147,8 +147,8 @@ const DEFAULT_UNIT = { uk: 'шт', ru: 'шт', en: 'pcs' }
 
 // План команды draft: позиция в прайсе портала (создать неактивной или привязать существующую)
 // + черновик карточки на сайте. Ничего не пишет.
-// productsWithSku — карточки products с этим sku (любой slug).
-export function planDraft({ spec, priceList, draft, product, productsWithSku = [], nowIso, newMaterialId }) {
+// productsWithSku / draftsWithSku — карточки products и черновики productDrafts с этим sku (любой slug).
+export function planDraft({ spec, priceList, draft, product, productsWithSku = [], draftsWithSku = [], nowIso, newMaterialId }) {
   const errors = []
   const warnings = []
   if (!isObj(spec)) return { errors: ['описание: не объект'], warnings }
@@ -193,6 +193,8 @@ export function planDraft({ spec, priceList, draft, product, productsWithSku = [
   }
   const others = productsWithSku.filter((p) => p.slug !== slug)
   if (others.length) errors.push(`артикул ${sku} уже стоит у товара «${others[0].slug}» на сайте`)
+  const otherDrafts = draftsWithSku.filter((d) => d.slug !== slug)
+  if (otherDrafts.length) errors.push(`артикул ${sku} уже стоит у черновика «${otherDrafts[0].slug}» на сайте`)
   if (draft && draft.sku && draft.sku !== sku) errors.push(`черновик «${slug}» принадлежит артикулу ${draft.sku}`)
 
   const draftAfter = buildDraftDoc(spec, { nowIso, existingDraft: draft })

@@ -100,9 +100,10 @@ export const pricingService = {
   },
 
   // Сохранить каталог целиком (доступно только администратору — см. firestore.rules).
-  // expectedUpdatedAt — updatedAt прайса, который открыт на странице: если в базе другой (правка из
+  // expectedUpdatedAt — updatedAt версии, от которой начата правка: если в базе другая (правка из
   // другой вкладки или инструментом агента server/scripts/site-catalog.mjs), не перезаписываем — иначе
-  // документ целиком затёр бы чужие позиции. Без него проверки нет (как раньше).
+  // документ целиком затёр бы чужие позиции. Сверка, архив прежней версии и запись — одна транзакция:
+  // без связи или при ошибке чтения не сохраняем вовсе (раньше запись уходила в очередь вслепую).
   savePriceList: async (
     data: Omit<PriceListDoc, 'updatedAt' | 'updatedBy'>,
     expectedUpdatedAt?: string,
@@ -111,37 +112,27 @@ export const pricingService = {
       console.error('Firestore not configured or user not authenticated')
       return { ok: false }
     }
+    const firestore = db
+    const email = auth.currentUser.email
     try {
-      // Архив: перед перезаписью снимаем снимок текущей версии (история цен).
-      // Ошибка архивирования не должна срывать основное сохранение — изолируем.
-      try {
-        const prev = await getDoc(doc(db, PRICE_COLLECTION, PRICE_DOC))
-        if (prev.exists() && expectedUpdatedAt !== undefined) {
+      return await runTransaction(firestore, async (tx): Promise<SavePriceListResult> => {
+        const priceRef = doc(firestore, PRICE_COLLECTION, PRICE_DOC)
+        const prev = await tx.get(priceRef)
+        const now = new Date().toISOString()
+        if (prev.exists()) {
           const cur = prev.data() as PriceListDoc
-          if (cur.updatedAt !== expectedUpdatedAt) {
+          if (expectedUpdatedAt !== undefined && cur.updatedAt !== expectedUpdatedAt) {
             return { ok: false, conflict: { updatedAt: cur.updatedAt, updatedBy: cur.updatedBy ?? null } }
           }
-        }
-        if (prev.exists()) {
+          // Архив: снимок вытесняемой версии (история цен)
           const archiveId = generateId()
-          const entry: PriceArchiveEntry = {
-            ...(prev.data() as PriceListDoc),
-            archiveId,
-            archivedAt: new Date().toISOString(),
-            supersededBy: auth.currentUser.email,
-          }
-          await setDoc(doc(db, PRICE_ARCHIVE_COLLECTION, archiveId), entry)
+          const entry: PriceArchiveEntry = { ...cur, archiveId, archivedAt: now, supersededBy: email }
+          tx.set(doc(firestore, PRICE_ARCHIVE_COLLECTION, archiveId), entry)
         }
-      } catch (archiveErr) {
-        console.error('Error archiving previous price list:', archiveErr)
-      }
-      const payload: PriceListDoc = {
-        ...data,
-        updatedAt: new Date().toISOString(),
-        updatedBy: auth.currentUser.email,
-      }
-      await setDoc(doc(db, PRICE_COLLECTION, PRICE_DOC), payload)
-      return { ok: true, updatedAt: payload.updatedAt, updatedBy: payload.updatedBy }
+        const payload: PriceListDoc = { ...data, updatedAt: now, updatedBy: email }
+        tx.set(priceRef, payload)
+        return { ok: true, updatedAt: payload.updatedAt, updatedBy: payload.updatedBy }
+      })
     } catch (error) {
       console.error('Error saving price list:', error)
       return { ok: false }

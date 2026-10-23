@@ -77,11 +77,12 @@ const getDoc = async (db, path) => {
   return s.exists ? s.data() : null
 }
 const listAll = async (db, col) => (await db.collection(col).get()).docs.map((d) => d.data())
-const productsWithSku = async (sku) => (await siteDb.collection('products').where('sku', '==', sku).get()).docs.map((d) => d.data())
+const withSku = async (col, sku) => (await siteDb.collection(col).where('sku', '==', sku).get()).docs.map((d) => d.data())
 
 // Записать позицию прайса: транзакция перечитывает прайс, перестраивает план на свежих данных и архивирует прежнюю версию.
+// Журнал — только после фиксации (функция транзакции может выполниться несколько раз).
 async function writeMaterial(replan) {
-  return portalDb.runTransaction(async (tx) => {
+  const done = await portalDb.runTransaction(async (tx) => {
     const snap = await tx.get(priceRef())
     if (!snap.exists) throw new Error('priceList/current не найден')
     const prev = snap.data()
@@ -91,9 +92,10 @@ async function writeMaterial(replan) {
     const archiveId = crypto.randomBytes(12).toString('base64url')
     tx.set(portalDb.collection('priceArchive').doc(archiveId), { ...prev, archiveId, archivedAt: nowIso(), supersededBy: ACTOR })
     tx.set(priceRef(), { ...prev, materials: replaceMaterial(prev, after), updatedAt: nowIso(), updatedBy: ACTOR })
-    journal({ project: PORTAL_PROJECT, path: 'priceList/current#materials/' + after.id, before: plan.material.before, after, archiveId })
-    return after
+    return { before: plan.material.before, after, archiveId }
   })
+  journal({ project: PORTAL_PROJECT, path: 'priceList/current#materials/' + done.after.id, ...done })
+  return done.after
 }
 
 function printMaterialChange(material) {
@@ -146,14 +148,15 @@ async function cmdDraft(file) {
   const spec = JSON.parse(readFileSync(file, 'utf8'))
   const sku = spec.sku
   const slug = spec.slug
-  const [priceList, draft, product, withSku] = await Promise.all([
+  const [priceList, draft, product, prodsWithSku, draftsWithSku] = await Promise.all([
     loadPriceList(),
     slug ? getDoc(siteDb, `productDrafts/${slug}`) : null,
     slug ? getDoc(siteDb, `products/${slug}`) : null,
-    sku ? productsWithSku(sku) : [],
+    sku ? withSku('products', sku) : [],
+    sku ? withSku('productDrafts', sku) : [],
   ])
   const id = newMaterialId()
-  const plan = planDraft({ spec, priceList, draft, product, productsWithSku: withSku, nowIso: nowIso(), newMaterialId: id })
+  const plan = planDraft({ spec, priceList, draft, product, productsWithSku: prodsWithSku, draftsWithSku, nowIso: nowIso(), newMaterialId: id })
   report(plan)
   printMaterialChange(plan.material)
   console.log(`Сайт ${SITE_PROJECT}: productDrafts/${slug} — ${draft ? 'ОБНОВИТЬ' : 'СОЗДАТЬ'} (витрина черновики не видит)`)
@@ -164,7 +167,7 @@ async function cmdDraft(file) {
   await siteDb.doc(`productDrafts/${slug}`).set(plan.draftAfter)
   journal({ project: SITE_PROJECT, path: `productDrafts/${slug}`, before: draft, after: plan.draftAfter })
   await writeMaterial((fresh) => planDraft({
-    spec, priceList: fresh, draft: plan.draftAfter, product: null, productsWithSku: withSku, nowIso: plan.draftAfter.updatedAt, newMaterialId: id,
+    spec, priceList: fresh, draft: plan.draftAfter, product: null, productsWithSku: prodsWithSku, draftsWithSku, nowIso: plan.draftAfter.updatedAt, newMaterialId: id,
   }))
   console.log(`Записано. Журнал: ${journalFile}`)
   reminder()
@@ -183,18 +186,23 @@ async function cmdPublish(sku) {
   printMaterialChange(plan.material)
   if (!APPLY) return console.log('\nРежим просмотра. Опубликовать: та же команда с --apply (только по слову владельца)')
 
+  let published = plan.productAfter
   if (plan.siteOp === 'publish') {
-    await siteDb.runTransaction(async (tx) => {
+    // Публикуем тот черновик, что лежит в базе в момент записи (его могли поправить после просмотра)
+    published = await siteDb.runTransaction(async (tx) => {
       const dRef = siteDb.doc(`productDrafts/${slug}`)
       const pRef = siteDb.doc(`products/${slug}`)
       const [d, p] = await Promise.all([tx.get(dRef), tx.get(pRef)])
       if (!d.exists || p.exists) throw new Error('черновик или карточка изменились во время публикации — запустите ещё раз')
-      tx.create(pRef, plan.productAfter)
+      const fresh = planPublish({ sku, priceList, draft: d.data(), product: null, nowIso: plan.material.after.site.syncedAt, allowNoPhoto: flags.has('--allow-no-photo') })
+      if (fresh.errors.length) throw new Error('черновик изменился и не проходит проверку: ' + fresh.errors.join('; '))
+      tx.create(pRef, fresh.productAfter)
       tx.delete(dRef)
+      return fresh.productAfter
     })
-    journal({ project: SITE_PROJECT, path: `products/${slug}`, before: null, after: plan.productAfter, movedFrom: `productDrafts/${slug}` })
+    journal({ project: SITE_PROJECT, path: `products/${slug}`, before: null, after: published, movedFrom: `productDrafts/${slug}` })
   }
-  await writeMaterial((fresh) => planPublish({ sku, priceList: fresh, draft: null, product: plan.productAfter, nowIso: plan.material.after.site.syncedAt }))
+  await writeMaterial((fresh) => planPublish({ sku, priceList: fresh, draft: null, product: published, nowIso: plan.material.after.site.syncedAt }))
   console.log(`Опубликовано: ${plan.material.after.site.url}\nЖурнал: ${journalFile}`)
   reminder()
 }
@@ -212,18 +220,23 @@ async function cmdUnpublish(sku) {
   printMaterialChange(plan.material)
   if (!APPLY) return console.log('\nРежим просмотра. Снять с витрины: та же команда с --apply')
 
+  let draftNow = plan.draftAfter || draft
   if (plan.siteOp === 'unpublish') {
-    await siteDb.runTransaction(async (tx) => {
+    draftNow = await siteDb.runTransaction(async (tx) => {
       const dRef = siteDb.doc(`productDrafts/${slug}`)
       const pRef = siteDb.doc(`products/${slug}`)
       const [d, p] = await Promise.all([tx.get(dRef), tx.get(pRef)])
       if (d.exists || !p.exists) throw new Error('черновик или карточка изменились — запустите ещё раз')
-      tx.set(dRef, { ...p.data(), updatedAt: plan.draftAfter.updatedAt })
+      // Свежая карточка снова проверяется: снимаем только заведённую инструментом (sku и portalRef)
+      const fresh = planUnpublish({ sku, priceList, draft: null, product: p.data(), nowIso: plan.material.after.site.syncedAt })
+      if (fresh.errors.length) throw new Error('карточка изменилась: ' + fresh.errors.join('; '))
+      tx.set(dRef, fresh.draftAfter)
       tx.delete(pRef)
+      return fresh.draftAfter
     })
-    journal({ project: SITE_PROJECT, path: `productDrafts/${slug}`, before: null, after: plan.draftAfter, movedFrom: `products/${slug}` })
+    journal({ project: SITE_PROJECT, path: `productDrafts/${slug}`, before: null, after: draftNow, movedFrom: `products/${slug}` })
   }
-  await writeMaterial((fresh) => planUnpublish({ sku, priceList: fresh, draft: plan.draftAfter || draft, product: null, nowIso: plan.material.after.site.syncedAt }))
+  await writeMaterial((fresh) => planUnpublish({ sku, priceList: fresh, draft: draftNow, product: null, nowIso: plan.material.after.site.syncedAt }))
   console.log(`Снято с витрины, карточка снова черновик. Журнал: ${journalFile}`)
   reminder()
 }

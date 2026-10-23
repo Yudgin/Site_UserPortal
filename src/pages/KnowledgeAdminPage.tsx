@@ -213,6 +213,7 @@ function ArticleDialog({ article, onClose, onSaved, onError }: {
   const [saving, setSaving] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [uploadErr, setUploadErr] = useState('')
+  const [saveErr, setSaveErr] = useState('')
 
   const handleUpload = async (files: FileList | null) => {
     if (!files || !files.length) return
@@ -244,7 +245,10 @@ function ArticleDialog({ article, onClose, onSaved, onError }: {
     setSaving(true)
     const res = await knowledgeService.save(a)
     setSaving(false)
-    if (res) onSaved({ ...a, id: res.id })
+    if (res && 'conflict' in res) {
+      setSaveErr(`Не сохранено: статью изменили после открытия (${new Date(res.conflict.updatedAt).toLocaleString('ru-RU')}`
+        + `${res.conflict.updatedBy ? `, ${res.conflict.updatedBy}` : ''}). Закройте окно, обновите страницу и внесите правку заново.`)
+    } else if (res) onSaved({ ...a, id: res.id, updatedAt: res.updatedAt, updatedBy: res.updatedBy })
     else onError()
   }
 
@@ -253,6 +257,7 @@ function ArticleDialog({ article, onClose, onSaved, onError }: {
       <DialogTitle>Статья базы знаний</DialogTitle>
       <DialogContent dividers>
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {saveErr && <Alert severity="error">{saveErr}</Alert>}
           <LocalizedField label="Заголовок" value={a.title} onChange={(title) => setA({ ...a, title })} />
 
           <Box>
