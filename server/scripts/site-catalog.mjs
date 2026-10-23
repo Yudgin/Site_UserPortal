@@ -9,6 +9,7 @@
 //   node scripts/site-catalog.mjs publish <АРТИКУЛ> [--apply] [--allow-no-photo]
 //   node scripts/site-catalog.mjs unpublish <АРТИКУЛ> [--apply]
 //   node scripts/site-catalog.mjs link-article <idСтатьи> <АРТИКУЛ…> [--remove] [--apply]
+//   node scripts/site-catalog.mjs set-site-price <АРТИКУЛ> <€ без НДС> [--apply]   — цена карточки на сайте
 //
 // Без --apply — только показывает, что изменится. publish — ТОЛЬКО по слову владельца «публікуй <артикул>».
 // Каждая запись идёт в журнал scripts/out/site-catalog-<время>.jsonl (было → стало) — для проверки и отката.
@@ -22,7 +23,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import {
-  planDraft, planPublish, planUnpublish, planLinkArticle, statusReport, findMatches, replaceMaterial, SKU_RE,
+  planDraft, planPublish, planUnpublish, planLinkArticle, planSitePrice, statusReport, findMatches, replaceMaterial, SKU_RE,
 } from '../siteCatalog.js'
 
 const args = process.argv.slice(2)
@@ -256,6 +257,26 @@ async function cmdLinkArticle(articleId, skus) {
   console.log(`Записано. Журнал: ${journalFile}`)
 }
 
+async function cmdSetSitePrice(sku, priceArg) {
+  const price = Number(String(priceArg ?? '').replace(',', '.'))
+  if (!SKU_RE.test(sku || '') || !priceArg) die('set-site-price <АРТИКУЛ> <€ без НДС>')
+  const priceList = await loadPriceList()
+  const slug = (priceList.materials || []).find((m) => m.code === sku)?.site?.slug
+  const [draft, product] = slug ? await Promise.all([getDoc(siteDb, `productDrafts/${slug}`), getDoc(siteDb, `products/${slug}`)]) : [null, null]
+  const plan = planSitePrice({ sku, priceList, draft, product, price, nowIso: nowIso() })
+  report(plan)
+  console.log(`Сайт ${SITE_PROJECT}: ${plan.collection}/${plan.slug} basePrice ${plan.before} € → ${price} € (без НДС; цена на портале не меняется)`)
+  if (!APPLY) return console.log('\nРежим просмотра. Записать: та же команда с --apply')
+  await siteDb.runTransaction(async (tx) => {
+    const ref = siteDb.doc(`${plan.collection}/${plan.slug}`)
+    const snap = await tx.get(ref)
+    if (!snap.exists || snap.data().sku !== sku) throw new Error('карточка изменилась — запустите ещё раз')
+    tx.update(ref, plan.after)
+  })
+  journal({ project: SITE_PROJECT, path: `${plan.collection}/${plan.slug}#basePrice`, before: plan.before, after: price })
+  console.log(`Записано. Журнал: ${journalFile}`)
+}
+
 const commands = {
   find: () => cmdFind(rest.join(' ')),
   status: () => cmdStatus(rest[0]),
@@ -264,7 +285,8 @@ const commands = {
   publish: () => cmdPublish(rest[0]),
   unpublish: () => cmdUnpublish(rest[0]),
   'link-article': () => cmdLinkArticle(rest[0], rest.slice(1)),
+  'set-site-price': () => cmdSetSitePrice(rest[0], rest[1]),
 }
-if (!commands[cmd]) die(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').filter((l) => l.startsWith('//')).slice(0, 13).join('\n'))
+if (!commands[cmd]) die(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').filter((l) => l.startsWith('//')).slice(0, 14).join('\n'))
 await commands[cmd]()
 process.exit(0)

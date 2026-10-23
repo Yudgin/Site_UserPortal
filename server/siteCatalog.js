@@ -269,6 +269,30 @@ export function planUnpublish({ sku, priceList, draft, product, nowIso }) {
   return { errors, warnings, siteOp, slug, draftAfter, material: { mode: 'update', before: m, after } }
 }
 
+// План команды set-site-price: цена карточки на сайте (€ без НДС) — у опубликованной карточки, иначе у черновика.
+// Цену позиции на портале (₴) не трогает: её правят на странице прайса.
+export function planSitePrice({ sku, priceList, draft, product, price, nowIso }) {
+  const errors = []
+  if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0 || Math.abs(Math.round(price * 100) - price * 100) > 1e-6) {
+    errors.push('цена: число > 0, не больше двух знаков после запятой (€ без НДС)')
+  }
+  const m = findMaterial(priceList, sku, errors)
+  if (!m) return { errors: [...errors, `в прайсе нет позиции ${sku}`] }
+  const slug = m.site && m.site.slug
+  if (!slug) return { errors: [...errors, `у позиции ${sku} нет карточки на сайте`] }
+  const target = product || draft
+  if (!target) return { errors: [...errors, `на сайте нет ни карточки, ни черновика «${slug}»`] }
+  if (target.sku !== sku) errors.push(`«${slug}» на сайте принадлежит артикулу ${target.sku || '—'}`)
+  if (errors.length) return { errors }
+  return {
+    errors,
+    slug,
+    collection: product ? 'products' : 'productDrafts',
+    before: target.basePrice,
+    after: { basePrice: price, updatedAt: nowIso },
+  }
+}
+
 // План команды link-article: relatedSkus статьи базы знаний. При добавлении артикул должен быть в прайсе.
 export function planLinkArticle({ article, skus, priceList, remove = false }) {
   const errors = []

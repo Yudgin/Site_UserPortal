@@ -3,7 +3,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   SKU_RE, siteProductUrl, portalPriceUrl, validateSiteProduct, buildDraftDoc, planDraft, planPublish,
-  planUnpublish, planLinkArticle, statusReport, findMatches, replaceMaterial, relatedPartsLine,
+  planUnpublish, planLinkArticle, planSitePrice, statusReport, findMatches, replaceMaterial, relatedPartsLine,
 } from './siteCatalog.js'
 
 const NOW = '2026-10-23T12:00:00.000Z'
@@ -219,4 +219,20 @@ test('planDraft refuses a second draft with the same SKU under another slug', ()
   const p = planDraft({ spec: spec(), priceList: pl(), draftsWithSku: [{ slug: 'old-slug', sku: 'V2-LID-R' }], nowIso: NOW, newMaterialId: 'm' })
   assert.ok(p.errors.some((e) => e.includes('«old-slug»')))
   assert.deepEqual(planDraft({ spec: spec(), priceList: pl(), draftsWithSku: [{ slug: 'solo-v2-lid-rect', sku: 'V2-LID-R' }], nowIso: NOW, newMaterialId: 'm' }).errors, [])
+})
+
+test('planSitePrice changes the published card first, else the draft; validates the price', () => {
+  const { priceList, draft } = draftedList()
+  const onDraft = planSitePrice({ sku: 'V2-LID-R', priceList, draft, price: 13.18, nowIso: NOW })
+  assert.deepEqual(onDraft.errors, [])
+  for (const ok of [14.83, 0.07, 19.99, 14]) assert.deepEqual(planSitePrice({ sku: 'V2-LID-R', priceList, draft, price: ok, nowIso: NOW }).errors, [], String(ok))
+  assert.equal(onDraft.collection, 'productDrafts')
+  assert.deepEqual(onDraft.after, { basePrice: 13.18, updatedAt: NOW })
+  const product = { ...draft, basePrice: 23 }
+  const onProduct = planSitePrice({ sku: 'V2-LID-R', priceList, draft: null, product, price: 13.18, nowIso: NOW })
+  assert.equal(onProduct.collection, 'products')
+  assert.equal(onProduct.before, 23)
+  for (const bad of [0, -1, 13.185, NaN]) assert.ok(planSitePrice({ sku: 'V2-LID-R', priceList, draft, price: bad, nowIso: NOW }).errors.length, String(bad))
+  assert.ok(planSitePrice({ sku: 'V2-LID-R', priceList, draft: { ...draft, sku: 'X' }, price: 13, nowIso: NOW }).errors.length)
+  assert.ok(planSitePrice({ sku: 'M-SERVO', priceList, draft, price: 13, nowIso: NOW }).errors.some((e) => e.includes('нет карточки')))
 })
