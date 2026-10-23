@@ -15,6 +15,7 @@ import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { chatSessionService } from '@/api/chatSessionService'
 import ChatInviteDialog from '@/components/ChatInviteDialog'
+import LinkifiedText from '@/components/LinkifiedText'
 import { chatInviteApi } from '@/api/endpoints/chatInvites'
 import { messengerApi } from '@/api/endpoints/messenger'
 import { pricingService } from '@/api/pricingService'
@@ -435,7 +436,7 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
                 {m.internal ? '🔒 внутренняя заметка' : m.role === 'client' ? 'Клиент' : m.role === 'manager' ? 'Менеджер' : 'ИИ'}
                 {' · '}{new Date(m.at).toLocaleString('ru-RU')}
               </Typography>
-              <Typography variant="body2">{m.text}</Typography>
+              <Typography variant="body2"><LinkifiedText text={m.text} /></Typography>
             </Box>
           ))}
         </Box>

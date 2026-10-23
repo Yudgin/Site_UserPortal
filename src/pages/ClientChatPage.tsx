@@ -21,6 +21,7 @@ import { serviceTaskService } from '@/api/serviceTaskService'
 import { clientProfileService } from '@/api/clientProfileService'
 import { aiApi } from '@/api/endpoints/ai'
 import { chatInviteApi } from '@/api/endpoints/chatInvites'
+import LinkifiedText from '@/components/LinkifiedText'
 import { buildPriceContext, buildKnowledgeContext, buildComplaintContext, activeCorrections } from '@/utils/aiContext'
 import { escalationDueDate } from '@/utils/workdays'
 import type { ChatSession, ChatMessage, ChatAiUsage, ChatOutcome } from '@/types/chat'
@@ -376,7 +377,7 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
             color: isClient ? 'primary.contrastText' : 'text.primary',
           }}
         >
-          <Typography variant="body2">{msg.text}</Typography>
+          <Typography variant="body2"><LinkifiedText text={msg.text} /></Typography>
         </Paper>
       </Box>
     </Box>
