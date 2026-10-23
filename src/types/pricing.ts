@@ -23,16 +23,29 @@ export interface WorkCategory {
   order: number
 }
 
-// Материал (расходник), привязывается к работе. Цена фиксированная (без сезона).
+// Карточка товара на сайте (runferry.ua / runferry.de…), связанная с материалом по артикулу.
+// Артикул = Material.code (решение владельца 2026-10-23, runferry-briefs/catalog/site-portal-parts-link-2026-10-23.md).
+// Пишет инструмент агента server/scripts/site-catalog.mjs; здесь — копия для показа.
+export interface MaterialSiteLink {
+  slug: string
+  status: 'draft' | 'published'
+  url?: string // ссылка на карточку — только у опубликованной
+  syncedAt: string
+}
+
+// Материал (расходник или запчасть), привязывается к работе. Цена фиксированная (без сезона).
 export interface Material {
   id: string
-  code: string
+  code: string // артикул: для запчастей с карточкой на сайте — общий ключ с сайтом, не менять
   name: LocalizedText
   unit: LocalizedText // единица измерения: шт, мл, компл.
   price: number // цена за единицу, грн
   // Отметка «продажа нового оборудования»: если этот материал попал в смету,
   // наценка высокого сезона снимается со ВСЕЙ сметы (достаточно одной такой позиции).
   waivesHighSeasonSurcharge?: boolean
+  // Модели, к которым подходит запчасть (строки из BOAT_MODELS: «Solo V2»…); нет — не указано
+  compatibleModels?: string[]
+  site?: MaterialSiteLink // карточка на сайте (если заведена)
   active: boolean
 }
 

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { buildCatalog, PriceCatalog } from '@/utils/pricing'
-import { pricingService, PriceListDoc, seedPriceListDoc } from '@/api/pricingService'
+import { pricingService, PriceListDoc, seedPriceListDoc, type SavePriceListResult } from '@/api/pricingService'
 
 interface PricingState {
   // Каталог всегда заполнен: из Firestore, либо стартовый сид как локальный fallback
@@ -14,7 +14,7 @@ interface PricingState {
 
   loadFromServer: () => Promise<void>
   refreshSilent: () => Promise<void>
-  savePriceList: (data: Omit<PriceListDoc, 'updatedAt' | 'updatedBy'>) => Promise<boolean>
+  savePriceList: (data: Omit<PriceListDoc, 'updatedAt' | 'updatedBy'>, expectedUpdatedAt?: string) => Promise<SavePriceListResult>
 }
 
 const toIndex = (doc: PriceListDoc): PriceCatalog =>
@@ -69,12 +69,13 @@ export const usePricingStore = create<PricingState>()((set) => ({
     } catch { /* тихо: работаем на текущем каталоге */ }
   },
 
-  savePriceList: async (data) => {
-    const ok = await pricingService.savePriceList(data)
-    if (ok) {
-      const doc: PriceListDoc = { ...data, updatedAt: new Date().toISOString(), updatedBy: null }
+  savePriceList: async (data, expectedUpdatedAt) => {
+    const res = await pricingService.savePriceList(data, expectedUpdatedAt)
+    if (res.ok) {
+      // updatedAt — ровно тот, что записан в базу: по нему сверяется следующее сохранение.
+      const doc: PriceListDoc = { ...data, updatedAt: res.updatedAt, updatedBy: res.updatedBy }
       set({ catalog: doc, indexed: toIndex(doc), persisted: true })
     }
-    return ok
+    return res
   },
 }))

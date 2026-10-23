@@ -5,6 +5,7 @@
 // Персистенция — через firebase-admin (доверенный backend, минуя клиентские правила).
 import { FieldValue } from 'firebase-admin/firestore'
 import { inviteSystemBlock, withInviteLead } from './chatInvitePrompt.js'
+import { relatedPartsLine } from './siteCatalog.js'
 
 const round2 = (n) => Math.round(n * 100) / 100
 export const nowIso = () => new Date().toISOString()
@@ -121,6 +122,12 @@ export function createMessengerCore(deps) {
       const snap = await adminDb.collection('knowledgeArticles').limit(300).get()
       const arts = snap.docs.map((d) => d.data()).filter((a) => a.active && !a.forMasters)
       if (!arts.length) return ''
+      // Связанные запчасти (relatedSkus) — из прайса: название, цена, ссылка на карточку сайта
+      let materials = []
+      if (arts.some((a) => Array.isArray(a.relatedSkus) && a.relatedSkus.length)) {
+        const pl = await adminDb.doc('priceList/current').get()
+        materials = (pl.exists && pl.data().materials) || []
+      }
       const lines = []
       for (const a of arts) {
         const flags = [a.forConsultation ? 'консультація' : '', a.forSelfService ? 'самодопомога' : ''].filter(Boolean).join('/')
@@ -128,6 +135,8 @@ export function createMessengerCore(deps) {
         lines.push((a.body && a.body.uk) || '')
         if (Array.isArray(a.videos) && a.videos.length) lines.push('Відео: ' + a.videos.map((v) => `${v.title} — ${v.url}`).join('; '))
         if (Array.isArray(a.links) && a.links.length) lines.push('Посилання: ' + a.links.join('; '))
+        const parts = relatedPartsLine(a.relatedSkus, materials)
+        if (parts) lines.push(parts)
         lines.push('')
       }
       return lines.join('\n')

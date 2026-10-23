@@ -75,10 +75,10 @@ export default function ClientChatPage() {
         const cc = buildComplaintContext(complaints, priceDoc, 'uk')
         if (cc) priceCtx.current += '\n\n' + cc
         // Самопомощь и в режиме оценки: если проблему можно решить самому — предлагаем.
-        const selfHelp = buildKnowledgeContext(articles.filter((a) => a.forSelfService && !a.forMasters), 'uk')
+        const selfHelp = buildKnowledgeContext(articles.filter((a) => a.forSelfService && !a.forMasters), 'uk', priceDoc.materials)
         if (selfHelp) priceCtx.current += '\n\nМОЖЛИВА САМОДОПОМОГА (якщо проблему реально вирішити самостійно — доброзичливо запропонуй це перед платним ремонтом; наша мета — допомогти):\n' + selfHelp
       }
-      knowledgeCtx.current = buildKnowledgeContext(articles, 'uk')
+      knowledgeCtx.current = buildKnowledgeContext(articles, 'uk', priceDoc?.materials ?? [])
       corrections.current = {
         estimate: activeCorrections(corr, 'estimate'),
         consultation: activeCorrections(corr, 'consultation'),
