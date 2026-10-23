@@ -53,12 +53,14 @@ export interface EstimateChatParams {
   priceContext?: string // компактный прайс для контекста оценки
   knowledgeContext?: string // выжимка базы знаний (самопомощь — предлагать бесплатное решение первым)
   corrections?: string[] // активные правки поведения ИИ (scope estimate/all)
+  sessionId?: string // беседа-приглашение: сервер подмешает тему приглашения (server/chatInvites.js)
 }
 
 export interface KnowledgeChatParams {
   messages: ChatMsgInput[]
   knowledgeContext?: string // выжимка базы знаний
   corrections?: string[] // активные правки поведения ИИ
+  sessionId?: string // беседа-приглашение: сервер подмешает тему приглашения (server/chatInvites.js)
 }
 
 // ==== AI-конструктор услуг прайса ====

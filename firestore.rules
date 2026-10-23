@@ -212,7 +212,9 @@ service cloud.firestore {
     match /chatSessions/{sessionId} {
       allow get: if true;
       allow list: if isPriceAdmin();
-      allow create: if true;
+      // Блок invite (беседа-приглашение, server/chatInvites.js) создаёт только сервер — клиент не может
+      // сам «назначить» себе приглашение и не меняет его тему (блок неизменяем и для сервера).
+      allow create: if !('invite' in request.resource.data);
       // Клиент дополняет свою сессию по знанию id, но не может подменить id/дату создания,
       // не может УКОРОТИТЬ историю (size только растёт) и не может менять серверо/менеджеро-
       // контролируемые поля: паузу бота и канал/адресата мессенджера. (aiUsage НЕ закрепляем —
@@ -225,8 +227,20 @@ service cloud.firestore {
             && request.resource.data.get('botPaused', false) == resource.data.get('botPaused', false)
             && request.resource.data.get('channel', '') == resource.data.get('channel', '')
             && request.resource.data.get('channelUserId', '') == resource.data.get('channelUserId', '')
-            && request.resource.data.get('businessConnectionId', '') == resource.data.get('businessConnectionId', ''));
+            && request.resource.data.get('businessConnectionId', '') == resource.data.get('businessConnectionId', '')
+            && request.resource.data.get('invite', null) == resource.data.get('invite', null));
       allow delete: if isPriceAdmin();
+    }
+
+    // Служебные записи приглашений в чат (тема, заметка для ИИ, кто пригласил, телефон, статус SMS, ссылка).
+    // Пишет только сервер (Admin SDK). Читают: владелец и директор — все; остальные сотрудники (мастер,
+    // оператор…) — только свои (запрос обязан фильтровать по by.uid). Ключи идемпотентности и счётчики
+    // лимитов (chatInviteKeys, chatInviteCounters) — без правил, т.е. клиентам закрыты полностью.
+    match /chatInvites/{sessionId} {
+      allow get, list: if isPriceAdmin()
+        || (hasStaffDoc() && staffDoc().active == true && staffDoc().role in ['owner', 'director'])
+        || (hasStaffDoc() && staffDoc().active == true && resource.data.by.uid == request.auth.uid);
+      allow write: if false;
     }
 
     // База знаний (консультации, самопомощь) — публичное чтение, запись администратору

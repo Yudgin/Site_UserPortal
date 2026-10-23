@@ -183,6 +183,8 @@ export const AppRoutes = () => {
       {/* Client AI chat - public (session protected by unguessable id) */}
       <Route path="/chat" element={<ClientChatPage />} />
       <Route path="/chat/:sessionId" element={<ClientChatPage />} />
+      {/* Короткая ссылка из SMS-приглашения в чат (server/chatInvites.js) */}
+      <Route path="/c/:sessionId" element={<ClientChatPage />} />
 
       {/* Manager inbox (escalated chats) - requires auth (email-gated inside) */}
       <Route
