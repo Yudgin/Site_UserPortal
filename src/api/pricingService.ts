@@ -26,6 +26,11 @@ const PRICE_ARCHIVE_COLLECTION = 'priceArchive'
 const ESTIMATES_COLLECTION = 'priceEstimates'
 const OFFERS_COLLECTION = 'estimateOffers'
 
+// Итог сохранения прайса. conflict — в базе уже другая версия (кто и когда сохранил её).
+export type SavePriceListResult =
+  | { ok: true; updatedAt: string; updatedBy: string | null }
+  | { ok: false; conflict?: { updatedAt: string; updatedBy: string | null } }
+
 // Запись архива цен: снимок предыдущей версии каталога, сделанный перед перезаписью.
 export interface PriceArchiveEntry extends PriceListDoc {
   archiveId: string
@@ -94,17 +99,29 @@ export const pricingService = {
     }
   },
 
-  // Сохранить каталог целиком (доступно только администратору — см. firestore.rules)
-  savePriceList: async (data: Omit<PriceListDoc, 'updatedAt' | 'updatedBy'>): Promise<boolean> => {
+  // Сохранить каталог целиком (доступно только администратору — см. firestore.rules).
+  // expectedUpdatedAt — updatedAt прайса, который открыт на странице: если в базе другой (правка из
+  // другой вкладки или инструментом агента server/scripts/site-catalog.mjs), не перезаписываем — иначе
+  // документ целиком затёр бы чужие позиции. Без него проверки нет (как раньше).
+  savePriceList: async (
+    data: Omit<PriceListDoc, 'updatedAt' | 'updatedBy'>,
+    expectedUpdatedAt?: string,
+  ): Promise<SavePriceListResult> => {
     if (!db || !auth?.currentUser) {
       console.error('Firestore not configured or user not authenticated')
-      return false
+      return { ok: false }
     }
     try {
       // Архив: перед перезаписью снимаем снимок текущей версии (история цен).
       // Ошибка архивирования не должна срывать основное сохранение — изолируем.
       try {
         const prev = await getDoc(doc(db, PRICE_COLLECTION, PRICE_DOC))
+        if (prev.exists() && expectedUpdatedAt !== undefined) {
+          const cur = prev.data() as PriceListDoc
+          if (cur.updatedAt !== expectedUpdatedAt) {
+            return { ok: false, conflict: { updatedAt: cur.updatedAt, updatedBy: cur.updatedBy ?? null } }
+          }
+        }
         if (prev.exists()) {
           const archiveId = generateId()
           const entry: PriceArchiveEntry = {
@@ -124,10 +141,10 @@ export const pricingService = {
         updatedBy: auth.currentUser.email,
       }
       await setDoc(doc(db, PRICE_COLLECTION, PRICE_DOC), payload)
-      return true
+      return { ok: true, updatedAt: payload.updatedAt, updatedBy: payload.updatedBy }
     } catch (error) {
       console.error('Error saving price list:', error)
-      return false
+      return { ok: false }
     }
   },
 

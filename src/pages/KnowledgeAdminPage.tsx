@@ -4,7 +4,7 @@ import {
   Box, Container, Paper, Typography, Button, Table, TableBody, TableCell, TableContainer,
   TableHead, TableRow, IconButton, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, Switch, FormControlLabel, Collapse, Chip, Alert, Snackbar, CircularProgress,
-  Divider, Tabs, Tab,
+  Divider, Tabs, Tab, Autocomplete,
 } from '@mui/material'
 import {
   Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Save as SaveIcon,
@@ -12,6 +12,8 @@ import {
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
+import { usePricingStore } from '@/store/pricingStore'
+import { tName, formatMoney } from '@/utils/pricing'
 import AiTextEditor from '@/components/common/AiTextEditor'
 import { knowledgeService, newKnowledgeId } from '@/api/knowledgeService'
 import { AiHistoryEntry } from '@/api/endpoints/ai'
@@ -169,6 +171,35 @@ export default function KnowledgeAdminPage() {
   )
 }
 
+// Связанные запчасти статьи: артикулы материалов прайса (= артикул карточки на сайте).
+// ИИ называет клиенту только активные позиции с опубликованной карточкой — со ссылкой на сайт.
+function RelatedSkusField({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+  const { catalog, loadFromServer, persisted } = usePricingStore()
+  useEffect(() => { if (!persisted) loadFromServer() }, [persisted, loadFromServer])
+  const byCode = new Map(catalog.materials.map((m) => [m.code, m]))
+  return (
+    <Box>
+      <Autocomplete multiple size="small" options={catalog.materials.map((m) => m.code)} value={value}
+        getOptionLabel={(code) => { const m = byCode.get(code); return m ? `${code} — ${tName(m.name, 'uk')}` : code }}
+        onChange={(_, v) => onChange(v)}
+        renderInput={(p) => <TextField {...p} label="Связанные запчасти (артикулы прайса)" />} />
+      {value.map((code) => {
+        const m = byCode.get(code)
+        if (!m) return <Typography key={code} variant="caption" color="error" display="block">{code}: нет в прайсе — ИИ его не увидит</Typography>
+        const site = m.site
+        const state = !m.active ? 'позиция неактивна — ИИ не назовёт'
+          : site?.status === 'published' ? 'на сайте' : site ? 'черновик на сайте — ИИ пока не назовёт' : 'карточки на сайте нет — ИИ не назовёт'
+        return (
+          <Typography key={code} variant="caption" color="text.secondary" display="block">
+            {code} — {tName(m.name, 'uk')} — {formatMoney(m.price)} — {state}
+            {site?.status === 'published' && site.url && <> (<a href={site.url} target="_blank" rel="noopener noreferrer">открыть</a>)</>}
+          </Typography>
+        )
+      })}
+    </Box>
+  )
+}
+
 // ==== Диалог статьи ====
 function ArticleDialog({ article, onClose, onSaved, onError }: {
   article: KnowledgeArticle
@@ -255,6 +286,7 @@ function ArticleDialog({ article, onClose, onSaved, onError }: {
           <TextField label="Связанные коды работ (через запятую)" size="small" value={a.relatedWorkCodes.join(', ')}
             onChange={(e) => setA({ ...a, relatedWorkCodes: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
             helperText="Коды работ прайса, к которым относится статья (напр. W-AUTO)" />
+          <RelatedSkusField value={a.relatedSkus ?? []} onChange={(relatedSkus) => setA({ ...a, relatedSkus })} />
 
           <Divider textAlign="left"><Typography variant="caption">Иллюстрации</Typography></Divider>
           {uploadErr && <Alert severity="error" sx={{ py: 0 }}>{uploadErr}</Alert>}

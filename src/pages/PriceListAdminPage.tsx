@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Box, Container, Paper, Typography, Button, Tabs, Tab, Table, TableBody, TableCell,
   TableContainer, TableHead, TableRow, IconButton, Dialog, DialogTitle, DialogContent,
   DialogActions, TextField, MenuItem, Switch, FormControlLabel, Collapse, Chip, Alert,
-  Snackbar, CircularProgress, Divider, Tooltip,
+  Snackbar, CircularProgress, Divider, Tooltip, Autocomplete,
 } from '@mui/material'
 import {
   Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Save as SaveIcon,
@@ -17,6 +17,7 @@ import { pricingService, PriceListDoc, type PriceArchiveEntry } from '@/api/pric
 import { aiApi, BuildPricingResult } from '@/api/endpoints/ai'
 import type { Lang, LocalizedText, Work, Kit, Material, Addon, WorkCategory, SeasonRule, RateComponent, ServiceKind, KitSeasonMode } from '@/types/pricing'
 import { KIT_SEASON_LABELS } from '@/types/pricing'
+import { BOAT_MODELS } from '@/types/clientBoat'
 import { tName, formatMoney, buildCatalog, workTurnkeyPrice, computeLaborRate, resolveLaborRate } from '@/utils/pricing'
 
 const LANGS: { code: Lang; label: string }[] = [
@@ -83,6 +84,20 @@ export default function PriceListAdminPage() {
   const [editCategory, setEditCategory] = useState<WorkCategory | null>(null)
   const [aiOpen, setAiOpen] = useState(false)
   const [archiveOpen, setArchiveOpen] = useState(false)
+  const [saveConflict, setSaveConflict] = useState<{ updatedAt: string; updatedBy: string | null } | null>(null)
+
+  // ?code=<артикул> — ссылка с карточки сайта (portalRef.url): открыть вкладку материалов и подсветить позицию
+  const [params] = useSearchParams()
+  const focusCode = params.get('code')
+  const focusedOnce = useRef(false)
+  useEffect(() => {
+    if (!focusCode || focusedOnce.current || !draft) return
+    focusedOnce.current = true
+    if (draft.materials.some((m) => m.code === focusCode)) {
+      setTab(2)
+      setTimeout(() => document.getElementById(`mat-row-${focusCode}`)?.scrollIntoView({ block: 'center' }), 100)
+    }
+  }, [focusCode, draft])
 
   useEffect(() => { loadFromServer() }, [loadFromServer])
 
@@ -145,13 +160,28 @@ export default function PriceListAdminPage() {
 
   const handleSave = async () => {
     setSaving(true)
-    const ok = await savePriceList({
+    const res = await savePriceList({
       categories: draft.categories, works: draft.works, kits: draft.kits,
       materials: draft.materials, addons: draft.addons, settings: draft.settings,
-    })
+    // draft.updatedAt — версия, от которой начата правка (в т.ч. у черновика, восстановленного из бекапа)
+    }, persisted ? draft.updatedAt : undefined)
     setSaving(false)
-    if (ok) { try { localStorage.removeItem(BACKUP_KEY) } catch { /* ignore */ } }
-    notify(ok ? 'Прайс-лист сохранён' : 'Не удалось сохранить (нужны права администратора)', ok ? 'success' : 'error')
+    if (res.ok) {
+      try { localStorage.removeItem(BACKUP_KEY) } catch { /* ignore */ }
+      setDraft(structuredClone(usePricingStore.getState().catalog)) // новая база для следующей сверки
+    }
+    if (!res.ok && res.conflict) { setSaveConflict(res.conflict); return }
+    notify(res.ok ? 'Прайс-лист сохранён' : 'Не удалось сохранить (нужны права администратора)', res.ok ? 'success' : 'error')
+  }
+
+  // Прайс изменили после открытия страницы: сохранять поверх нельзя. Загружаем актуальный,
+  // локальные правки пропадают (их видно в черновике до нажатия — можно переписать).
+  const reloadAfterConflict = async () => {
+    await loadFromServer()
+    setDraft(structuredClone(usePricingStore.getState().catalog))
+    try { localStorage.removeItem(BACKUP_KEY) } catch { /* ignore */ }
+    setSaveConflict(null)
+    notify('Загружен актуальный прайс')
   }
 
   // Универсальные upsert/remove по массиву каталога
@@ -257,6 +287,20 @@ export default function PriceListAdminPage() {
           {dirty && <Chip size="small" color="warning" label="є незбережені зміни" />}
         </Box>
       </Box>
+
+      {saveConflict && (
+        <Alert severity="error" sx={{ mx: 2, mb: 1 }}
+          action={
+            <Box sx={{ display: 'flex', gap: 1 }}>
+              <Button size="small" variant="contained" color="error" onClick={reloadAfterConflict}>Загрузить актуальный</Button>
+              <Button size="small" color="inherit" onClick={() => setSaveConflict(null)}>Скрыть</Button>
+            </Box>
+          }>
+          Не сохранено: прайс изменили после открытия страницы
+          ({new Date(saveConflict.updatedAt).toLocaleString('ru-RU')}{saveConflict.updatedBy ? `, ${saveConflict.updatedBy}` : ''}).
+          Сохранение поверх затёрло бы чужие позиции. Загрузите актуальный прайс и внесите свои правки заново.
+        </Alert>
+      )}
 
       {/* Відновлення незбереженої чернетки (бекап у localStorage переживає закриття вкладки) */}
       {draftBackup && (
@@ -379,19 +423,31 @@ export default function PriceListAdminPage() {
               <TableContainer>
                 <Table size="small">
                   <TableHead><TableRow>
-                    <TableCell>Код</TableCell><TableCell>Название</TableCell><TableCell>Ед.</TableCell>
+                    <TableCell>Код (артикул)</TableCell><TableCell>Название</TableCell><TableCell>Ед.</TableCell>
+                    <TableCell>Сайт</TableCell>
                     <TableCell align="right">Цена</TableCell><TableCell align="right">Действия</TableCell>
                   </TableRow></TableHead>
                   <TableBody>
                     {draft.materials.map((m) => (
-                      <TableRow key={m.id} sx={{ opacity: m.active ? 1 : 0.5 }}>
+                      <TableRow key={m.id} id={`mat-row-${m.code}`} selected={m.code === focusCode} sx={{ opacity: m.active ? 1 : 0.5 }}>
                         <TableCell><code>{m.code}</code></TableCell>
-                        <TableCell>{tName(m.name, 'uk')}</TableCell>
+                        <TableCell>
+                          {tName(m.name, 'uk')}
+                          {!!m.compatibleModels?.length && (
+                            <Typography variant="caption" color="text.secondary" display="block">
+                              Подходит: {m.compatibleModels.join(', ')}
+                            </Typography>
+                          )}
+                        </TableCell>
                         <TableCell>{tName(m.unit, 'uk')}</TableCell>
+                        <TableCell><MaterialSiteChip material={m} /></TableCell>
                         <TableCell align="right">{formatMoney(m.price)}</TableCell>
                         <TableCell align="right">
                           <IconButton size="small" onClick={() => setEditMaterial(structuredClone(m))}><EditIcon fontSize="small" /></IconButton>
-                          <IconButton size="small" onClick={() => remove('materials', m.id)}><DeleteIcon fontSize="small" /></IconButton>
+                          <IconButton size="small" onClick={() => {
+                            if (m.site && !window.confirm(`Позиция ${m.code} связана с карточкой «${m.site.slug}» на сайте. Удаление разорвёт связь (карточка на сайте останется). Удалить?`)) return
+                            remove('materials', m.id)
+                          }}><DeleteIcon fontSize="small" /></IconButton>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -732,15 +788,45 @@ function KitDialog({ kit, categories, works, onClose, onSave }: {
   )
 }
 
+// Карточка позиции на сайте: опубликована (ссылка) или черновик. Пишет инструмент агента site-catalog.
+function MaterialSiteChip({ material }: { material: Material }) {
+  const s = material.site
+  if (!s) return <Typography variant="caption" color="text.disabled">—</Typography>
+  if (s.status === 'published' && s.url) {
+    return (
+      <Chip size="small" color="success" variant="outlined" label="на сайте ↗" clickable component="a"
+        href={s.url} target="_blank" rel="noopener noreferrer" />
+    )
+  }
+  return (
+    <Tooltip title={`Черновик карточки «${s.slug}» на сайте: покупатели его не видят. Публикует агент по слову владельца.`}>
+      <Chip size="small" color="warning" variant="outlined" label="черновик" />
+    </Tooltip>
+  )
+}
+
 // ==== Диалог материала ====
 function MaterialDialog({ material, onClose, onSave }: { material: Material; onClose: () => void; onSave: (m: Material) => void }) {
   const [m, setM] = useState<Material>(material)
+  // Код связанной с сайтом позиции — общий ключ (артикул): смена разорвала бы связь
+  const linked = !!material.site
   return (
     <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>Материал</DialogTitle>
       <DialogContent dividers>
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <TextField label="Код" size="small" value={m.code} onChange={(e) => setM({ ...m, code: e.target.value })} />
+          {linked && (
+            <Alert severity="info">
+              Связана с карточкой «{material.site!.slug}» на сайте ({material.site!.status === 'published' ? 'опубликована' : 'черновик'}).
+              Код — общий артикул с сайтом, его не меняют.
+            </Alert>
+          )}
+          <TextField label="Код (артикул)" size="small" value={m.code} disabled={linked}
+            onChange={(e) => setM({ ...m, code: e.target.value })} />
+          <Autocomplete multiple freeSolo size="small" options={BOAT_MODELS as readonly string[]}
+            value={m.compatibleModels ?? []}
+            onChange={(_, v) => setM({ ...m, compatibleModels: v.map((x) => String(x).trim()).filter(Boolean) })}
+            renderInput={(p) => <TextField {...p} label="Подходит к моделям" placeholder="Solo V2…" />} />
           <LocalizedField label="Название" value={m.name} required onChange={(name) => setM({ ...m, name })} />
           <LocalizedField label="Единица" value={m.unit} required onChange={(unit) => setM({ ...m, unit })} />
           <TextField label="Цена за единицу, ₴" type="number" size="small" value={m.price} inputProps={{ min: 0, step: 0.01 }} onChange={(e) => setM({ ...m, price: Math.max(0, Number(e.target.value)) })} />
