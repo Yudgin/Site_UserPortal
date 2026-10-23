@@ -263,7 +263,22 @@ test('повтор с тем же ключом — то же приглашен�
   assert.equal((await b.createInvite(owner, { ...p2, topic: 'Інша тема' })).code, 'KEY_REUSED')
 })
 
-test('SMS на номер: мастер — только номер своей заявки или недавнего звонка; оператор — недавнего звонка', async () => {
+test('SMS на любой номер — все роли приглашения (решение владельца 2026-10-23), дневной лимит сотрудника действует', async () => {
+  const db = new FakeDb()
+  const a = make(db)
+  const base = { topic: 'Кришка для Solo V2', topicConfirmed: true }
+  for (const who of [owner, master, operator, { uid: 'u-d', email: 'd@x', role: 'director', centers: [] }]) {
+    const r = await a.createInvite(who, { ...base, phone: nextPhone() })
+    assert.equal(r.ok, true, `${who.role}: ${JSON.stringify(r)}`)
+    assert.equal(r.data.sms.status, 'sent')
+  }
+  const day = new Date().toISOString().slice(0, 10)
+  db.docs[`chatInviteCounters/staff_u-m_${day}`] = { count: LIMITS.staffPerDay }
+  assert.equal((await a.createInvite(master, { ...base, phone: nextPhone() })).code, 'DAILY_LIMIT')
+  assert.equal((await a.createInvite(accountant, { ...base, phone: nextPhone() })).code, 'FORBIDDEN')
+})
+
+test('суженное правило (CHAT_INVITE_ANY_PHONE_ROLES=owner): мастер — номер своей заявки или недавнего входящего; оператор — входящего', async () => {
   const callPhone = nextPhone()
   const oldCallPhone = nextPhone()
   const outPhone = nextPhone() // наш исходящий звонок не открывает SMS на номер
@@ -277,7 +292,7 @@ test('SMS на номер: мастер — только номер своей �
     'serviceRequests/sr-1': { serviceCenterId: 'kat', clientPhone: srPhone.replace('+380', '0') },
     'serviceRequests/sr-k': { serviceCenterId: 'kyiv', clientPhone: nextPhone() },
   })
-  const a = make(db)
+  const a = make(db, { anyPhoneRoles: ['owner'] })
   const base = { topic: 'Кришка для Solo V2', topicConfirmed: true }
   assert.equal((await a.createInvite(master, { ...base, phone: nextPhone() })).code, 'PHONE_NOT_ALLOWED')
   assert.equal((await a.createInvite(master, { ...base, phone: oldCallPhone })).code, 'PHONE_NOT_ALLOWED')

@@ -16,8 +16,9 @@
 //   • chatInviteKeys/{uid}_{clientKey} — идемпотентность: повтор запроса возвращает то же приглашение (и досылает
 //     SMS, если она не ушла), а не создаёт второе;
 //   • chatInviteCounters/{…}_{день} — дневные лимиты (сотрудник, номер, все SMS), общие для инстансов Cloud Run.
-// SMS — платный шлюз с альфа-именем RUNFERRY: на произвольный номер — только роли CHAT_INVITE_ANY_PHONE_ROLES
-// (по умолчанию владелец), остальным — номер клиента заявки своего центра или номер, звонивший нам недавно.
+// SMS — платный шлюз с альфа-именем RUNFERRY. На любой номер шлют роли CHAT_INVITE_ANY_PHONE_ROLES — по решению
+// владельца 2026-10-23 все, кто приглашает (владелец, директор, мастер, оператор); сдерживают дневные лимиты ниже.
+// Если сузить список ролей в env, остальным останется номер клиента заявки своего центра или номер, звонивший нам недавно.
 // Вызов из бота в этом же процессе — actions.createInvite(staff, params); из приложения/портала — POST /api/chat-invites.
 import crypto from 'crypto'
 import { verifyFirebaseStaff } from './adminAuth.js'
@@ -55,7 +56,10 @@ export const LIMITS = {
   smsPerDay: envInt('CHAT_INVITE_SMS_PER_DAY', 150), // все SMS-приглашения за сутки (бюджет шлюза)
   recentCallHours: envInt('CHAT_INVITE_RECENT_CALL_HOURS', 48),
 }
-const ANY_PHONE_ROLES = String(process.env.CHAT_INVITE_ANY_PHONE_ROLES || 'owner').split(',').map((s) => s.trim()).filter(Boolean)
+const envRoles = (name, def) => {
+  const list = String(process.env[name] || '').split(',').map((s) => s.trim()).filter(Boolean)
+  return list.length ? list : def
+}
 
 // Зеркало src/utils/id.ts secureId: 16 символов base62 (crypto) — ссылка защищена самим id.
 const CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
@@ -173,13 +177,15 @@ const minuteAllow = (key, max) => {
 // deps: { adminDb, notifyClient?, siteUrl, core?: { buildKnowledgeContext }, anthropic?, AI_MODEL, KNOWLEDGE_SYSTEM, buildUsage }
 export function createChatInviteActions(deps) {
   const { adminDb, notifyClient, siteUrl = 'https://my.runferry.com', core, anthropic, AI_MODEL, KNOWLEDGE_SYSTEM = '', buildUsage = () => null } = deps
+  // Кто шлёт SMS на любой номер (решение владельца 2026-10-23 — все роли приглашения); env/deps могут сузить.
+  const anyPhoneRoles = deps.anyPhoneRoles || envRoles('CHAT_INVITE_ANY_PHONE_ROLES', INVITE_ROLES)
   const invites = () => adminDb.collection('chatInvites')
   const sessions = () => adminDb.collection('chatSessions')
   const counters = () => adminDb.collection('chatInviteCounters')
 
   // Можно ли этому сотруднику слать SMS на этот номер (см. шапку файла).
   async function smsPhoneAllowed(staff, phone, phoneDigits, sr) {
-    if (ANY_PHONE_ROLES.includes(staff.role)) return true
+    if (anyPhoneRoles.includes(staff.role)) return true
     if (sr && normalizePhone(sr.clientPhone) === phoneDigits) return true
     try {
       const snap = await adminDb.collection('callEvents').where('phone', '==', phone).get()
@@ -349,7 +355,7 @@ export function createChatInviteActions(deps) {
     if (p.deliver === 'sms') {
       if (!phoneDigits) return fail(400, 'NO_PHONE', 'Вкажіть номер телефону, на який надіслати SMS.')
       if (!(await smsPhoneAllowed(staff, phone, phoneDigits, sr))) {
-        return fail(403, 'PHONE_NOT_ALLOWED', `SMS на довільний номер надсилає лише власник. Вкажіть заявку свого центру або номер, який дзвонив нам за останні ${LIMITS.recentCallHours} год, — або створіть посилання без SMS.`)
+        return fail(403, 'PHONE_NOT_ALLOWED', `Вам не можна надсилати SMS на довільний номер. Вкажіть заявку свого центру або номер, який дзвонив нам за останні ${LIMITS.recentCallHours} год, — або створіть посилання без SMS.`)
       }
     }
 
