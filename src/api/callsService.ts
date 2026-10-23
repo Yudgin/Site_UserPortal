@@ -33,6 +33,7 @@ export interface CallEvent {
   source?: string | null // 'kyivstar' — прямий вебхук Віртуальної АТС; інакше — зеркало бота (1С)
   direction?: 'incoming' | 'outgoing' | null
   owners?: string[] // Kyivstar: номери співробітників, яким дзвонило (груповий дзвінок)
+  serviceRequestId?: string | null // Binotel: заявка клієнта, знайдена за номером (або з якої дзвонили з застосунку)
   workflowStatus?: CallWorkflowStatus | null // явний стан канбану (без нього — виводиться з результатів)
   notes?: CallNote[] // дії/коментарі власника
 }
