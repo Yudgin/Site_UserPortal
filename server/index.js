@@ -9,6 +9,9 @@ import { getFirestore } from 'firebase-admin/firestore'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { registerTelegramBot } from './telegram.js'
+import { createMessengerCore } from './messengerCore.js'
+import { registerChatInvites } from './chatInvites.js'
+import { inviteSystemBlock, withInviteLead } from './chatInvitePrompt.js'
 import { registerViberBot } from './viber.js'
 import { registerManagerReply } from './managerReply.js'
 import { registerServiceRequests } from './serviceRequests.js'
@@ -700,6 +703,11 @@ app.post('/api/ai/improve-text', aiPublicOrStaffLimiter, async (req, res) => {
   }
 })
 
+// Приглашения в чат (server/chatInvites.js): регистрируются ниже, вместе с остальными модулями; здесь —
+// чтобы чаты оценки/консультации по sessionId подмешивали тему приглашения (из служебной записи, не от клиента).
+let chatInviteActions = null
+const inviteForSession = async (sessionId) => (sessionId && chatInviteActions ? chatInviteActions.inviteFor(String(sessionId)) : null)
+
 // Системный промпт диалогового консультанта (оценка стоимости с эскалацией)
 const CHAT_SYSTEM = [
   'Ти — консультант сервісного центру RunFerry, що обслуговує прикормочні рибальські кораблики.',
@@ -725,7 +733,7 @@ const CHAT_SYSTEM = [
 
 app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
   try {
-    const { messages = [], priceContext = '', knowledgeContext = '', corrections = [] } = req.body
+    const { messages = [], priceContext = '', knowledgeContext = '', corrections = [], sessionId = null } = req.body
 
     if (!anthropic) {
       return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
@@ -742,6 +750,9 @@ app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
         .slice(-40)
         .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text).slice(0, 8000) }))
     )
+    // Беседа-приглашение начинается с приветствия ИИ — перед ним служебная реплика «человек открыл приглашение».
+    const invite = await inviteForSession(sessionId)
+    if (invite) chatMessages = withInviteLead(chatMessages, invite)
     // После среза окно могло начаться с ответа ассистента — убираем ведущие assistant (Anthropic
     // требует, чтобы диалог начинался с user), иначе длинные диалоги ловили бы 400.
     while (chatMessages.length && chatMessages[0].role !== 'user') chatMessages = chatMessages.slice(1)
@@ -756,6 +767,7 @@ app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
       ? `\n\nСАМОДОПОМОГА (безкоштовні рішення з бази знань). ЯКЩО проблема клієнта збігається з якимось матеріалом — СПЕРШУ доброзичливо запропонуй це безкоштовне рішення (стисло, по кроках), і лише потім платний ремонт:\n${knowledgeContext}`
       : ''
     const system = CHAT_SYSTEM + corrText + (priceContext ? `\n\nПРАЙС (лише ці позиції можна використовувати для оцінки):\n${priceContext}` : '') + selfHelp
+      + (invite ? inviteSystemBlock(invite) : '')
 
     const message = await anthropic.messages.create({
       model: AI_MODEL,
@@ -932,7 +944,7 @@ const KNOWLEDGE_SYSTEM = [
 
 app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
   try {
-    const { messages = [], knowledgeContext = '', corrections = [] } = req.body
+    const { messages = [], knowledgeContext = '', corrections = [], sessionId = null } = req.body
 
     if (!anthropic) {
       return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
@@ -948,6 +960,8 @@ app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
         .slice(-40)
         .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text).slice(0, 8000) }))
     )
+    const invite = await inviteForSession(sessionId)
+    if (invite) chatMessages = withInviteLead(chatMessages, invite)
     while (chatMessages.length && chatMessages[0].role !== 'user') chatMessages = chatMessages.slice(1)
     if (chatMessages.length === 0) {
       return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
@@ -958,7 +972,7 @@ app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
       ? `\n\nДОДАТКОВІ ПРАВИЛА (корекції поведінки, дотримуйся їх):\n${corrections.map((c, i) => `${i + 1}. ${c}`).join('\n')}`
       : ''
     const knowledgeText = knowledgeContext ? `\n\nБАЗА ЗНАНЬ (використовуй лише ці матеріали):\n${knowledgeContext}` : ''
-    const system = KNOWLEDGE_SYSTEM + knowledgeText + correctionText
+    const system = KNOWLEDGE_SYSTEM + knowledgeText + correctionText + (invite ? inviteSystemBlock(invite) : '')
 
     const message = await anthropic.messages.create({
       model: AI_MODEL,
@@ -1215,7 +1229,7 @@ const MESSENGER_SYSTEM = MESSENGER_PREAMBLE + '\n' + CHAT_SYSTEM
 
 // Канальные отправители (заполняются транспортами) — для доставки ответа менеджера клиенту.
 const messengerSenders = {}
-const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM: MESSENGER_SYSTEM, mergeConsecutiveMessages, buildUsage, senders: messengerSenders }
+const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM: MESSENGER_SYSTEM, mergeConsecutiveMessages, buildUsage, senders: messengerSenders, inviteFor: inviteForSession }
 registerTelegramBot(app, messengerDeps)
 registerViberBot(app, messengerDeps)
 // Ответ менеджера из веб-инбокса → доставка в канал + возврат бота при упоминании.
@@ -1228,6 +1242,12 @@ registerClientProfiles(app, { adminDb })
 registerUserProfiles(app, { adminDb })
 // Журнал информирования клиента: авто-выбор канала (мессенджер в окне / иначе SMS).
 const { notifyClient } = registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUrl: SITE_URL })
+// Приглашение в чат с ИИ по теме: POST /api/chat-invites (персонал) — тема по-украински, первое сообщение ИИ,
+// ссылка ${SITE_URL}/c/<id> и SMS; POST /api/chat-invites/open — отметка «відкрито». Из бота — chatInviteActions.createInvite.
+chatInviteActions = registerChatInvites(app, {
+  adminDb, notifyClient, siteUrl: SITE_URL, core: createMessengerCore(messengerDeps),
+  anthropic, AI_MODEL, KNOWLEDGE_SYSTEM, buildUsage,
+}).actions
 // Фактичний кошторис із застосунку сервісу: створити за обраним варіантом, витрата поза прайсом,
 // вилучити витрату (ядро розрахунків — estimateEngine.js, спільне з Telegram-ботом співробітників).
 registerEstimates(app, { adminDb, notifyClient })

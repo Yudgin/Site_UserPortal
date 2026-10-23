@@ -20,6 +20,7 @@ import { complaintTemplateService } from '@/api/complaintTemplateService'
 import { serviceTaskService } from '@/api/serviceTaskService'
 import { clientProfileService } from '@/api/clientProfileService'
 import { aiApi } from '@/api/endpoints/ai'
+import { chatInviteApi } from '@/api/endpoints/chatInvites'
 import { buildPriceContext, buildKnowledgeContext, buildComplaintContext, activeCorrections } from '@/utils/aiContext'
 import { escalationDueDate } from '@/utils/workdays'
 import type { ChatSession, ChatMessage, ChatAiUsage, ChatOutcome } from '@/types/chat'
@@ -56,6 +57,7 @@ export default function ClientChatPage() {
   const knowledgeCtx = useRef('')
   const corrections = useRef<{ estimate: string[]; consultation: string[] }>({ estimate: [], consultation: [] })
   const autoFired = useRef<string | null>(null) // чтобы авто-ответ на интейк из опросника сработал один раз
+  const openFired = useRef<string | null>(null) // отметка «відкрито» для приглашения — один раз за загрузку
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -92,6 +94,8 @@ export default function ClientChatPage() {
       if (sessionId) {
         const s = await chatSessionService.load(sessionId)
         setSession(s)
+        // Приглашение по теме — помощник в режиме, который выбрал сотрудник (по умолчанию база знаний)
+        if (s?.invite) setMode(s.invite.mode === 'estimate' ? 'estimate' : 'knowledge')
       } else {
         const s = await chatSessionService.create({ lang: 'uk' })
         if (s) navigate(`/chat/${s.id}`, { replace: true })
@@ -103,6 +107,14 @@ export default function ClientChatPage() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [session?.messages.length, sending])
+
+  // Беседа-приглашение: приветствие ИИ с вопросами по теме уже в сессии (готовит сервер при создании);
+  // здесь только отметка «відкрито» для пригласившего сотрудника.
+  useEffect(() => {
+    if (!session?.invite || openFired.current === session.id) return
+    openFired.current = session.id
+    chatInviteApi.open(session.id)
+  }, [session])
 
   // Авто-ответ на интейк из опросника: сессия пришла с одним сообщением клиента и без ответа ИИ.
   // Хук должен стоять до ранних return, иначе нарушается порядок хуков (Rules of Hooks).
@@ -134,6 +146,8 @@ export default function ClientChatPage() {
   }
 
   const visibleMessages = session.messages.filter((m) => !m.internal)
+  // Беседа-приглашение: сервер подмешивает в промпт тему приглашения по id сессии
+  const inviteSessionId = session.invite ? session.id : undefined
   const escalated = session.status === 'escalated'
   const resolved = session.status === 'resolved'
 
@@ -142,12 +156,12 @@ export default function ClientChatPage() {
     const emptyEstimate = { lines: [] as { label: string; price: number }[], total: 0 }
     const fail = { reply: 'Не вдалося отримати відповідь. Спробуйте ще раз.', needsManager: false, usage: undefined as AiUsage | undefined, offeredSelfRepair: false, warranty: 'unknown' as const, parts: [] as { name: string; qty: number }[], estimate: emptyEstimate }
     if (mode === 'estimate') {
-      const res = await aiApi.estimateChat({ messages: history, priceContext: priceCtx.current, knowledgeContext: knowledgeCtx.current, corrections: corrections.current.estimate })
+      const res = await aiApi.estimateChat({ messages: history, priceContext: priceCtx.current, knowledgeContext: knowledgeCtx.current, corrections: corrections.current.estimate, sessionId: inviteSessionId })
       if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: res.data.offeredSelfRepair, warranty: res.data.warranty, parts: res.data.parts || [], estimate: res.data.estimate || emptyEstimate }
       return { ...fail, reply: res.error?.message || fail.reply }
     }
     const res = await aiApi.knowledgeChat({
-      messages: history, knowledgeContext: knowledgeCtx.current, corrections: corrections.current.consultation,
+      messages: history, knowledgeContext: knowledgeCtx.current, corrections: corrections.current.consultation, sessionId: inviteSessionId,
     })
     if (res.success && res.data) return { reply: res.data.reply, needsManager: res.data.needsManager, usage: res.data.usage, offeredSelfRepair: false, warranty: 'unknown' as const, parts: [] as { name: string; qty: number }[], estimate: emptyEstimate }
     return { ...fail, reply: res.error?.message || fail.reply }
@@ -230,6 +244,11 @@ export default function ClientChatPage() {
             <ToggleButton value="estimate">Оцінка вартості</ToggleButton>
             <ToggleButton value="knowledge">Консультація</ToggleButton>
           </ToggleButtonGroup>
+          {session.invite && (
+            <Typography variant="body2" sx={{ mb: 1 }}>
+              Тема розмови: <b>{session.invite.topic}</b>
+            </Typography>
+          )}
           <Alert severity="info" icon={false} sx={{ py: 0.5, fontSize: 13 }}>{DISCLAIMER}</Alert>
           {escalated && session.escalation && (
             <Alert severity="warning" sx={{ mt: 1 }}>

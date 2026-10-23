@@ -8,18 +8,20 @@ import {
 import {
   Home as HomeIcon, SupportAgent as InboxIcon, Send as SendIcon, NoteAdd as NoteIcon,
   CheckCircle as ResolveIcon, ContentCopy as CopyIcon, Refresh as RefreshIcon,
-  NotificationsActive as ReminderIcon, LocalOffer as OfferIcon,
+  NotificationsActive as ReminderIcon, LocalOffer as OfferIcon, PersonAdd as InviteIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { usePricingStore } from '@/store/pricingStore'
 import { isAdminEmail } from '@/config/access'
 import { chatSessionService } from '@/api/chatSessionService'
+import ChatInviteDialog from '@/components/ChatInviteDialog'
+import { chatInviteApi } from '@/api/endpoints/chatInvites'
 import { messengerApi } from '@/api/endpoints/messenger'
 import { pricingService } from '@/api/pricingService'
 import { serviceRequestService } from '@/api/serviceRequestService'
 import { buildEstimate, aiEstimateToWorkInputs } from '@/utils/pricing'
 import { NO_REAPPROVAL_DEVIATION_PCT, OUTCOME_LABELS, CHANNEL_LABELS, TOPIC_LABELS } from '@/types/chat'
-import type { ChatSession, ChatMessage, ChatReminder } from '@/types/chat'
+import type { ChatSession, ChatMessage, ChatReminder, ChatInviteRecord } from '@/types/chat'
 
 const genId = (): string => Math.random().toString(36).slice(2, 10)
 
@@ -50,6 +52,7 @@ export default function ManagerInboxPage() {
   const [snackbar, setSnackbar] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'escalated' | 'resolved' | 'overdue'>('all')
   const [q, setQ] = useState('')
+  const [inviteOpen, setInviteOpen] = useState(false)
 
   const reload = async () => {
     setLoading(true)
@@ -94,6 +97,7 @@ export default function ManagerInboxPage() {
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
           <Chip variant="outlined" color="secondary"
             label={`ИИ: $${sessions.reduce((a, s) => a + usdCost(s), 0).toFixed(3)} за ${sessions.length} сессий`} />
+          <Button variant="contained" startIcon={<InviteIcon />} onClick={() => setInviteOpen(true)}>Запросити в чат</Button>
           <Button startIcon={<RefreshIcon />} onClick={reload}>Обновить</Button>
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>Главная</Button>
         </Box>
@@ -146,6 +150,10 @@ export default function ManagerInboxPage() {
                         {s.channel && s.channel !== 'web' && (
                           <Chip size="small" color="info" variant="outlined" sx={{ mr: 0.5 }} label={CHANNEL_LABELS[s.channel]} />
                         )}
+                        {s.invite && (
+                          <Chip size="small" color="secondary" variant="outlined" sx={{ mr: 0.5 }}
+                            label={`Запрошення: ${s.invite.topic}`} />
+                        )}
                         {s.topic && s.topic !== 'service' && (
                           <Chip size="small" color={s.topic === 'sales' ? 'success' : 'default'} variant="outlined" sx={{ mr: 0.5 }} label={TOPIC_LABELS[s.topic]} />
                         )}
@@ -187,6 +195,9 @@ export default function ManagerInboxPage() {
           onNotify={setSnackbar}
         />
       )}
+      {inviteOpen && (
+        <ChatInviteDialog open source="portal" onClose={() => setInviteOpen(false)} onCreated={() => { if (tab === 1) reload() }} />
+      )}
       <Snackbar open={!!snackbar} autoHideDuration={3000} onClose={() => setSnackbar('')} message={snackbar} />
     </Box>
   )
@@ -207,6 +218,7 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
   const [reminderAt, setReminderAt] = useState('')
   const [creatingOffer, setCreatingOffer] = useState(false)
   const [existingRequestId, setExistingRequestId] = useState<string | null>(null)
+  const [inviteRec, setInviteRec] = useState<ChatInviteRecord | null>(null)
   const navigate = useNavigate()
   const { catalog, indexed, loadFromServer } = usePricingStore()
   useEffect(() => { loadFromServer() }, [loadFromServer])
@@ -214,9 +226,20 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
   useEffect(() => {
     serviceRequestService.listBySession(s.id).then((rs) => { if (rs.length) setExistingRequestId(rs[0].id) })
   }, [s.id])
+  // Беседа-приглашение: служебная запись (открыл ли клиент ссылку, статус SMS, кто пригласил)
+  const isInvite = !!s.invite
+  useEffect(() => {
+    if (!isInvite) return
+    chatInviteApi.get(s.id).then((r) => { if (r.ok) setInviteRec(r.data) })
+  }, [s.id, isInvite])
 
-  const persist = async (next: ChatSession) => {
+  // Сохранение поверх АКТУАЛЬНОЙ сессии: пока окно открыто, клиент мог написать (а сервер — дописать ответ ИИ);
+  // админ обходит правило «история только растёт», поэтому сохранять устаревший снимок нельзя — потерялись бы
+  // сообщения. change применяет правку менеджера к свежему документу.
+  const persist = async (change: (cur: ChatSession) => ChatSession) => {
     setSaving(true)
+    const latest = (await chatSessionService.load(s.id)) || s
+    const next = change(latest)
     const ok = await chatSessionService.save(next)
     setSaving(false)
     if (ok) { setS(next); onSaved(next) }
@@ -245,7 +268,9 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
           if (unmatched.length) onNotify(`ІІ не розпізнав: ${unmatched.join(', ')} — додайте в редакторі`)
         }
       }
-      const complaint = s.messages.filter((m) => m.role === 'client' && !m.internal).map((m) => m.text)[0] || ''
+      const firstClient = s.messages.filter((m) => m.role === 'client' && !m.internal).map((m) => m.text)[0] || ''
+      // Беседа-приглашение начинается с вопросов ИИ — первое сообщение клиента лишь ответ; суть — в теме приглашения.
+      const complaint = s.invite ? [s.invite.topic, firstClient].filter(Boolean).join(': ') : firstClient
       const created = await serviceRequestService.save({
         id: `sr-${s.id}`, // детерминированный id по обращению → без дублей при гонке/двойном клике
         sessionId: s.id,
@@ -287,31 +312,28 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
     const text = note.trim()
     if (!text) return
     const msg: ChatMessage = { id: genId(), role: 'manager', text, at: new Date().toISOString(), internal: true }
-    const next: ChatSession = { ...s, messages: [...s.messages, msg] }
-    if (await persist(next)) { setNote(''); onNotify('Заметка сохранена') }
+    if (await persist((cur) => ({ ...cur, messages: [...cur.messages, msg] }))) { setNote(''); onNotify('Заметка сохранена') }
   }
 
   const resolve = async () => {
-    const next: ChatSession = {
-      ...s,
+    const ok = await persist((cur) => ({
+      ...cur,
       status: 'resolved',
-      escalation: s.escalation
-        ? { ...s.escalation, resolvedAt: new Date().toISOString(), managerEmail }
+      escalation: cur.escalation
+        ? { ...cur.escalation, resolvedAt: new Date().toISOString(), managerEmail }
         : null,
-    }
-    if (await persist(next)) onNotify('Обращение закрыто')
+    }))
+    if (ok) onNotify('Обращение закрыто')
   }
 
   const addReminder = async () => {
     if (!reminderNote.trim() || !reminderAt) return
     const rem: ChatReminder = { id: genId(), at: new Date(reminderAt).toISOString(), note: reminderNote.trim(), done: false }
-    const next: ChatSession = { ...s, reminders: [...s.reminders, rem] }
-    if (await persist(next)) { setReminderNote(''); setReminderAt(''); onNotify('Напоминание добавлено') }
+    if (await persist((cur) => ({ ...cur, reminders: [...(cur.reminders || []), rem] }))) { setReminderNote(''); setReminderAt(''); onNotify('Напоминание добавлено') }
   }
 
   const toggleReminder = async (id: string) => {
-    const next: ChatSession = { ...s, reminders: s.reminders.map((r) => (r.id === id ? { ...r, done: !r.done } : r)) }
-    persist(next)
+    persist((cur) => ({ ...cur, reminders: (cur.reminders || []).map((r) => (r.id === id ? { ...r, done: !r.done } : r)) }))
   }
 
   const publicLink = `${window.location.origin}/chat/${s.id}`
@@ -340,6 +362,19 @@ function SessionDialog({ session, managerEmail, onClose, onSaved, onNotify }: {
             <> · <i>номер ще не отримано (бот попросить у клієнта)</i></>
           )}
         </Alert>
+        {s.invite && (
+          <Alert severity="info" icon={<InviteIcon />} sx={{ mb: 2 }}>
+            <b>Запрошення в чат:</b> {s.invite.topic} · створено {new Date(s.invite.createdAt).toLocaleString('uk-UA')}
+            {inviteRec && (
+              <>
+                {inviteRec.by?.email ? ` · запросив ${inviteRec.by.email}` : ''}
+                {' · '}{inviteRec.openedAt ? `клієнт відкрив ${new Date(inviteRec.openedAt).toLocaleString('uk-UA')}` : 'клієнт ще не відкривав посилання'}
+                {inviteRec.deliver === 'sms' ? ` · SMS: ${inviteRec.sms.status === 'sent' ? 'надіслано' : inviteRec.sms.status === 'failed' ? `не надіслано${inviteRec.sms.error ? ` (${inviteRec.sms.error})` : ''}` : 'надсилається'}` : ' · без SMS'}
+                {inviteRec.details && <><br /><i>Для помічника:</i> {inviteRec.details}</>}
+              </>
+            )}
+          </Alert>
+        )}
         <Box sx={{ mb: 2 }}>
           {existingRequestId ? (
             <Button variant="contained" startIcon={<OfferIcon />} onClick={() => navigate(`/service-request/${existingRequestId}`)}>Відкрити заявку</Button>
