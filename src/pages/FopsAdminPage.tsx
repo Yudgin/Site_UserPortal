@@ -11,12 +11,13 @@ import {
 } from '@mui/material'
 import {
   Home as HomeIcon, Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Payments as FopIcon,
-  Receipt as ReceiptIcon,
+  Receipt as ReceiptIcon, VpnKey as KeyIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
-import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs } from '@/api/endpoints/fopsAdmin'
+import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs, type FopKeyCheck } from '@/api/endpoints/fopsAdmin'
 import NpFopDirectory from '@/components/NpFopDirectory'
+import KeyCheckDialog from '@/components/KeyCheckDialog'
 
 const emptyEdit = () => ({
   id: '', name: '', active: true, isNew: true,
@@ -40,6 +41,8 @@ export default function FopsAdminPage() {
   const [saving, setSaving] = useState(false)
   const [receiptBusy, setReceiptBusy] = useState('') // id ФОПа, по которому выбивается тестовый чек
   const [receipt, setReceipt] = useState<{ fopName: string; ok: boolean; fiscalCode?: string | null; taxUrl?: string | null; status?: string | null; error?: string } | null>(null)
+  const [keyBusy, setKeyBusy] = useState('') // id ФОПа, у которого проверяются ключи
+  const [keyCheck, setKeyCheck] = useState<{ fopName: string; data?: FopKeyCheck; error?: string } | null>(null)
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
@@ -86,6 +89,13 @@ export default function FopsAdminPage() {
     const r = await fopsAdminApi.testReceipt(f.id)
     setReceiptBusy('')
     setReceipt({ fopName: f.name, ok: r.ok, fiscalCode: r.data?.fiscalCode, taxUrl: r.data?.taxUrl, status: r.data?.status, error: r.error })
+  }
+
+  const checkKeys = async (f: FopAdmin) => {
+    setKeyBusy(f.id)
+    const r = await fopsAdminApi.checkKeys(f.id)
+    setKeyBusy('')
+    setKeyCheck({ fopName: f.name, data: r.data, error: r.ok ? undefined : r.error })
   }
 
   const remove = async (f: FopAdmin) => {
@@ -139,7 +149,11 @@ export default function FopsAdminPage() {
                   <Chip size="small" label={f.id} variant="outlined" />
                   {!f.active && <Chip size="small" color="default" label="вимкнено" />}
                 </Stack>
-                <Stack direction="row" spacing={0.5} alignItems="center">
+                <Stack direction="row" alignItems="center" sx={{ flexWrap: 'wrap', gap: 0.5 }}>
+                  <Button size="small" variant="outlined" disabled={!!keyBusy} onClick={() => checkKeys(f)}
+                    startIcon={keyBusy === f.id ? <CircularProgress size={14} /> : <KeyIcon fontSize="small" />}>
+                    Перевірити ключі
+                  </Button>
                   {f.secretsSet.checkbox && (
                     <Button size="small" variant="outlined" disabled={receiptBusy === f.id} onClick={() => testReceipt(f)}
                       startIcon={receiptBusy === f.id ? <CircularProgress size={14} /> : <ReceiptIcon fontSize="small" />}>
@@ -234,6 +248,8 @@ export default function FopsAdminPage() {
           <Button variant="contained" onClick={save} disabled={saving}>Зберегти</Button>
         </DialogActions>
       </Dialog>
+
+      <KeyCheckDialog open={!!keyCheck} fopName={keyCheck?.fopName} data={keyCheck?.data} error={keyCheck?.error} onClose={() => setKeyCheck(null)} />
 
       {/* Результат тестового чека Checkbox */}
       <Dialog open={!!receipt} onClose={() => setReceipt(null)} maxWidth="xs" fullWidth>

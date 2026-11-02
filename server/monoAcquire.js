@@ -52,6 +52,12 @@ export const invoiceStatus = async (fop, invoiceId) => {
   return r.data
 }
 
+// Данные мерчанта {merchantId, merchantName, edrpou}: только чтение, для проверки токена на /fops.
+export const merchantDetails = async (fop) => {
+  const r = await axios.get(`${BASE}/api/merchant/details`, { headers: { 'X-Token': tokenOf(fop) }, timeout: 15000 })
+  return r.data
+}
+
 // Публичный ключ мерчанта (для проверки подписи вебхука). Кэш пер-ФОП, инвалидация по requestFresh.
 const pubKeyCache = new Map()
 export const getPubKey = async (fop, requestFresh = false) => {

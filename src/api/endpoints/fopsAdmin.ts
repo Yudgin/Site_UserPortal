@@ -63,6 +63,22 @@ export interface FopSavePayload {
   secrets?: FopSecretsPayload
 }
 
+// Проверка ключей без денег: только вердикты, значения ключей сервер не отдаёт.
+export type KeyCheckStatus = 'ok' | 'bad' | 'unknown' | 'none'
+export interface KeyCheckItem {
+  status: KeyCheckStatus
+  message: string
+  note?: string // ключ годен, но способ оплаты выключен
+  merchantName?: string // monobank: чей кабинет
+  edrpou?: string
+  paymentControl?: boolean | null // Нова Пошта: доступен ли «контроль оплаты»; null — неизвестно
+}
+export interface FopKeyCheck {
+  liqpay: KeyCheckItem
+  monoAcquire: KeyCheckItem
+  novaPoshta: KeyCheckItem
+}
+
 export const fopsAdminApi = {
   list: async (): Promise<FopAdmin[]> => {
     try {
@@ -96,6 +112,15 @@ export const fopsAdminApi = {
       return !!data?.success
     } catch {
       return false
+    }
+  },
+  checkKeys: async (id: string): Promise<{ ok: boolean; data?: FopKeyCheck; error?: string }> => {
+    try {
+      const { data } = await axios.post(`${BACKEND_URL}/api/fops/admin/${encodeURIComponent(id)}/check-keys`, {}, { headers: await adminHeaders() })
+      return data?.success ? { ok: true, data: data.data } : { ok: false, error: data?.error?.message || 'Помилка' }
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { error?: { message?: string } } } }
+      return { ok: false, error: err.response?.data?.error?.message || 'Не вдалося виконати запит' }
     }
   },
   // РЕАЛЬНЫЙ тестовый чек на 10 грн кредами этого ФОП (Checkbox) — проверка данных кассы.

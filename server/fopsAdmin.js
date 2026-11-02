@@ -3,8 +3,9 @@
 // GET возвращает лишь флаги «задано/не задано», значения ключей наружу НЕ отдаются. PUT
 // перезаписывает только НЕПУСТЫЕ переданные ключи (пустые оставляют прежние).
 import { verifyFirebaseAdmin } from './adminAuth.js'
-import { getFop } from './fops.js'
+import { getFop, loadFopFresh } from './fops.js'
 import { sellReceipt } from './checkbox.js'
+import { checkFopKeys } from './fopKeyCheck.js'
 
 const nowIso = () => new Date().toISOString()
 const clip = (v, n = 200) => (v == null ? '' : String(v).slice(0, n))
@@ -27,9 +28,9 @@ const pickSecrets = (secrets = {}) => {
 }
 
 export function registerFopsAdmin(app, deps) {
-  const { adminDb, refreshFops } = deps
+  const { adminDb, refreshFops, verifyAdmin = verifyFirebaseAdmin, loadFop = loadFopFresh, checkKeys = checkFopKeys } = deps
   const gate = async (req, res) => {
-    if (await verifyFirebaseAdmin(req)) return true
+    if (await verifyAdmin(req)) return true
     res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника' } })
     return false
   }
@@ -153,6 +154,22 @@ export function registerFopsAdmin(app, deps) {
     } catch (e) {
       console.error('fops admin delete:', e.message)
       res.status(500).json({ success: false })
+    }
+  })
+
+  // Проверка ключей без денег (см. fopKeyCheck.js): ключи читаем из Firestore, наружу — только вердикты.
+  app.post('/api/fops/admin/:id/check-keys', async (req, res) => {
+    if (!(await gate(req, res))) return
+    if (!adminDb) return res.status(503).json({ success: false })
+    const id = clip(req.params.id, 64).replace(/[^\w-]/g, '')
+    if (!id) return res.status(400).json({ success: false, error: { code: 'BAD_ID', message: 'Некоректний id' } })
+    try {
+      const fop = await loadFop(adminDb, id)
+      if (!fop) return res.status(404).json({ success: false, error: { code: 'NO_FOP', message: 'ФОП не знайдено' } })
+      return res.json({ success: true, data: await checkKeys(fop) })
+    } catch (e) {
+      console.error(`fops check-keys ${id}:`, e?.message)
+      return res.status(500).json({ success: false, error: { code: 'CHECK_FAILED', message: 'Не вдалося перевірити ключі' } })
     }
   })
 
