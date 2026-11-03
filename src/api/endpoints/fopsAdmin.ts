@@ -29,6 +29,15 @@ export interface FopNovaPoshtaRefs {
   warehouseRef?: string
   warehouseName?: string
 }
+// Реквизиты продавца для магазина на сайте: кроме actualAddress, они публичны.
+export interface FopSeller {
+  displayName?: string
+  ipn?: string
+  address?: string
+  actualAddress?: string
+  email?: string
+  phone?: string
+}
 export interface FopSecretsSet {
   liqpay: boolean
   monoChast: boolean
@@ -43,6 +52,7 @@ export interface FopAdmin {
   active: boolean
   methods: FopMethods
   novaPoshta: FopNovaPoshtaRefs
+  seller?: FopSeller
   secretsSet: FopSecretsSet
 }
 
@@ -60,6 +70,7 @@ export interface FopSavePayload {
   active: boolean
   methods: FopMethods
   novaPoshta: FopNovaPoshtaRefs
+  seller?: FopSeller
   secrets?: FopSecretsPayload
 }
 

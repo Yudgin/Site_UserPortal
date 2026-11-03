@@ -27,6 +27,18 @@ const pickSecrets = (secrets = {}) => {
   return out
 }
 
+// Реквизиты продавца для магазина на сайте. Пишем только переданные строки. Форма, где пусто всё (реквизиты не
+// загрузились, старая страница), прежние данные не стирает; очистить можно отдельное поле.
+const SELLER_FIELDS = { displayName: 200, ipn: 32, address: 300, actualAddress: 300, email: 120, phone: 32 }
+const pickSeller = (seller) => {
+  if (!seller || typeof seller !== 'object') return null
+  const out = {}
+  for (const [k, n] of Object.entries(SELLER_FIELDS)) {
+    if (typeof seller[k] === 'string') out[k] = seller[k].trim().slice(0, n)
+  }
+  return Object.values(out).some(Boolean) ? out : null
+}
+
 export function registerFopsAdmin(app, deps) {
   const { adminDb, refreshFops, verifyAdmin = verifyFirebaseAdmin, loadFop = loadFopFresh, checkKeys = checkFopKeys } = deps
   const gate = async (req, res) => {
@@ -55,6 +67,7 @@ export function registerFopsAdmin(app, deps) {
           active: m.active !== false,
           methods: m.methods || {},
           novaPoshta: m.novaPoshta || {}, // refs (не-секрет)
+          seller: m.seller || {},
           secretsSet: {
             liqpay: !!(s.liqpay && s.liqpay.privateKey),
             monoChast: !!(s.monoChast && s.monoChast.storeSecret),
@@ -72,7 +85,7 @@ export function registerFopsAdmin(app, deps) {
     }
   })
 
-  // Создать/обновить ФОП. body: { name, active, methods, novaPoshta(refs), secrets:{...} }
+  // Создать/обновить ФОП. body: { name, active, methods, novaPoshta(refs), seller, secrets:{...} }
   app.put('/api/fops/admin/:id', async (req, res) => {
     if (!(await gate(req, res))) return
     if (!adminDb) return res.status(503).json({ success: false })
@@ -80,6 +93,7 @@ export function registerFopsAdmin(app, deps) {
     if (!id) return res.status(400).json({ success: false, error: { code: 'BAD_ID', message: 'Некоректний id' } })
     try {
       const b = req.body || {}
+      const seller = pickSeller(b.seller)
       const meta = {
         name: clip(b.name, 200) || id,
         active: b.active !== false,
@@ -103,6 +117,7 @@ export function registerFopsAdmin(app, deps) {
           warehouseRef: clip(b.novaPoshta?.warehouseRef, 64),
           warehouseName: clip(b.novaPoshta?.warehouseName, 200),
         },
+        ...(seller ? { seller } : {}),
         updatedAt: nowIso(),
       }
       await adminDb.collection('fops').doc(id).set(meta, { merge: true })
