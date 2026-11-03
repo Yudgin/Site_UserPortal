@@ -16,6 +16,7 @@ export interface PaymentRow {
   taxUrl?: string | null
   fiscalCode?: string | null
   estimateId?: string | null
+  shopOrderId?: string | null
   createdAt: string
   receiptAt?: string | null
 }

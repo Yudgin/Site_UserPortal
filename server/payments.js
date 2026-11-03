@@ -52,8 +52,9 @@ const receiptUuidFor = (orderId) => {
   return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`
 }
 
+const CARD_LABEL = 'Оплата карткою (monobank)'
 // Подпись оплаты в повторном чеке для документов без своей paymentLabel (ремонты, заказы лодок, старые оплаты).
-const labelByProvider = (o) => (o.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : o.provider === 'mono-acquire' ? 'Оплата карткою (monobank)' : 'Оплата частинами (monobank)')
+const labelByProvider = (o) => (o.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : o.provider === 'mono-acquire' ? CARD_LABEL : 'Оплата частинами (monobank)')
 
 export function registerPayments(app, deps) {
   const { adminDb, mono = monoAcquire, cbx = checkbox } = deps
@@ -93,6 +94,8 @@ export function registerPayments(app, deps) {
       if (!snap.exists) return false
       const d = snap.data()
       if (d.receiptId || d.fiscalizeClaimedAt) return false
+      // Магазин: деньги вернули или сумма не сошлась, пока этот поток шёл к кассе.
+      if (d.shopOrderId && (d.status === 'reversed' || d.receiptStatus === 'amount-mismatch')) return false
       tx.set(ref, { fiscalizeClaimedAt: nowIso() }, { merge: true })
       return true
     })
@@ -241,6 +244,86 @@ export function registerPayments(app, deps) {
       await markEstimatePaid(order, null) // деньги пришли; чек добьёт reconcile и допишет taxUrl
       await notifyOwnerNoReceipt(order, 'помилка Checkbox')
       console.error(`payments: ⚠️ ОШИБКА ЧЕКА (гроші є, чек ні) ${order.orderId}:`, (e.response && e.response.data) || e.message)
+    }
+  }
+
+  // Сходится ли ответ банка с оплатой: копейки с копейками, гривна, наш номер оплаты. Чего банк не прислал, то не расхождение.
+  const amountAudit = (order, st) => {
+    const expected = cbx.toKop(order.amount)
+    const mismatch = []
+    const missing = []
+    if (st.amount == null) missing.push('amount')
+    else if (Number(st.amount) !== expected) mismatch.push(`сума ${st.amount} коп. замість ${expected}`)
+    if (st.ccy == null) missing.push('ccy')
+    else if (Number(st.ccy) !== 980) mismatch.push(`валюта ${st.ccy} замість 980`)
+    if (st.reference && String(st.reference) !== order.orderId) mismatch.push(`reference ${st.reference}`)
+    return { mismatch, missing }
+  }
+
+  // Хуки заказа магазина (shopPayments.js). Сбой хука не останавливает ни оплату, ни чек: хук повторят следующий колбэк или опрос.
+  let shopHooks = {}
+  const setShopHooks = (hooks) => { shopHooks = hooks || {} }
+  const runShopHook = async (name, order, ctx) => {
+    try {
+      if (!shopHooks[name]) throw new Error('хук не підключено')
+      await shopHooks[name](order, ctx)
+    } catch (e) {
+      console.error(`payments: ${name} ${order.orderId}, замовлення ${order.shopOrderId}:`, e.message)
+    }
+  }
+
+  // Счёт магазина. st здесь всегда ответ банка, а не тело колбэка.
+  const settleShopInvoice = async (order, st, source) => {
+    const status = st && st.status
+    if (status === 'reversed') {
+      const wasPaid = order.status === 'paid' || order.reversedAfterPaid === true
+      // Первой записью: дальше повтор чека, кнопка и выручка закрыты, что бы ни случилось с заказом.
+      if (order.status !== 'reversed') await saveOrder({ orderId: order.orderId, status: 'reversed', ...(wasPaid ? { reversedAfterPaid: true, reversedAt: nowIso() } : {}) })
+      if (wasPaid) await runShopHook('onShopReversed', order, { hadReceipt: !!(order.receiptId || order.fiscalizeClaimedAt), source })
+      return
+    }
+    if (order.status === 'reversed') return // возврат конечен, чек после него не выходит
+    if (status === 'failure' || status === 'expired') {
+      if (order.status !== 'paid') await saveOrder({ orderId: order.orderId, status })
+      return
+    }
+    if (status !== 'success') return
+
+    const first = order.status !== 'paid'
+    const { mismatch, missing } = amountAudit(order, st)
+    const amountIssue = first ? mismatch.join('; ') : order.receiptStatus === 'amount-mismatch' ? order.receiptError || 'сума не збіглася' : ''
+    if (first) await saveOrder({ orderId: order.orderId, status: 'paid', paytype: 'mono-acquire', ...(amountIssue ? { receiptStatus: 'amount-mismatch', receiptError: amountIssue } : {}) })
+    // Вне условия first: падение между записью оплаты и хуком лечится повтором.
+    await runShopHook('onShopPaid', order, { source, mismatch: amountIssue, missing })
+
+    const refundedKop = st.finalAmount == null ? 0 : (st.amount == null ? cbx.toKop(order.amount) : Number(st.amount)) - Number(st.finalAmount)
+    if (refundedKop > 0) {
+      const refunded = refundedKop / 100
+      if (!order.partialRefund || order.partialRefund.amount !== refunded) await saveOrder({ orderId: order.orderId, partialRefund: { amount: refunded, at: nowIso() } })
+      await runShopHook('onShopPartialRefund', order, { amount: refunded, source })
+    }
+
+    if (amountIssue) return console.warn(`mono acquire ${source}: сума не збіглася, чек НЕ вибито ${order.orderId}: ${amountIssue}`)
+    await fiscalize({ ...order, status: 'paid' }, CARD_LABEL)
+  }
+
+  // Единый исход счёта monobank для колбэка и сверки. У ремонта st в колбэке это его тело, в сверке ответ банка.
+  const settleMonoAcquire = async (order, st, source) => {
+    if (order.shopOrderId) return settleShopInvoice(order, st, source)
+    const status = st && st.status
+    if (status === 'success') {
+      if (order.status !== 'paid') {
+        await saveOrder({ orderId: order.orderId, status: 'paid', paytype: 'mono-acquire' })
+        // Ремонт: расхождение идёт только в журнал и владельцу, оплата и чек остаются как были.
+        const { mismatch } = amountAudit(order, st)
+        if (mismatch.length) {
+          console.warn(`mono acquire ${source}: дані банку не збігаються ${order.orderId}: ${mismatch.join('; ')}`)
+          await notifyOwner(`⚠️ RunFerry: оплата ${order.orderId} на ${order.amount} грн: дані банку не збігаються (${mismatch.join('; ')}). Чек виписується як звичайно. Звірте суму в кабінеті monobank.`)
+        }
+      }
+      await fiscalize({ ...order, status: 'paid' }, CARD_LABEL)
+    } else if (order.status !== 'paid' && (status === 'failure' || status === 'expired' || status === 'reversed')) {
+      await saveOrder({ orderId: order.orderId, status }) // терминальный не-paid не откатываем
     }
   }
 
@@ -817,13 +900,16 @@ export function registerPayments(app, deps) {
       if (!fop) return console.warn('mono acquire callback: ФОП не загружен', order.fopId, order.orderId)
       if (!(await mono.verifyWebhook(fop, req.rawBody, req.get('X-Sign')))) return console.warn('mono acquire callback: неверная подпись', order.orderId)
 
-      const status = body.status
-      if (status === 'success') {
-        if (order.status !== 'paid') await saveOrder({ orderId: order.orderId, status: 'paid', paytype: 'mono-acquire' })
-        await fiscalize({ ...order, status: 'paid' }, 'Оплата карткою (monobank)')
-      } else if (order.status !== 'paid' && (status === 'failure' || status === 'expired' || status === 'reversed')) {
-        await saveOrder({ orderId: order.orderId, status }) // терминальный не-paid не откатываем
+      // Магазин верит ответу банка, а не телу колбэка. Банк не ответил: документ не трогаем, закроет опрос.
+      let st = body
+      if (order.shopOrderId) {
+        try {
+          st = await mono.invoiceStatus(fop, invoiceId)
+        } catch (e) {
+          return console.warn('mono acquire callback: статус не прочитано, чекаємо опитування', order.orderId, e.message)
+        }
       }
+      await settleMonoAcquire(order, st, 'webhook')
     } catch (e) {
       console.error('mono acquire callback error:', e.message)
     }
@@ -917,14 +1003,7 @@ export function registerPayments(app, deps) {
         } else if (o.provider === 'mono-acquire' && o.providerOrderId) {
           checked++
           try {
-            const st = await mono.invoiceStatus(fop, o.providerOrderId)
-            const s = st && st.status
-            if (s === 'success') {
-              await saveOrder({ orderId: o.orderId, status: 'paid', paytype: 'mono-acquire' })
-              await fiscalize({ ...o, status: 'paid' }, 'Оплата карткою (monobank)')
-            } else if (s === 'failure' || s === 'expired' || s === 'reversed') {
-              await saveOrder({ orderId: o.orderId, status: s })
-            }
+            await settleMonoAcquire(o, await mono.invoiceStatus(fop, o.providerOrderId), 'reconcile')
             // created/processing/hold — оставляем pending
           } catch (e) { console.error('reconcile mono-acquire', o.orderId, e.message) }
         }
@@ -959,6 +1038,10 @@ export function registerPayments(app, deps) {
       if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Оплату не знайдено' } })
       if (order.receiptId) return res.status(409).json({ success: false, error: { code: 'ALREADY_FISCAL', message: 'Чек вже виписано' } })
       if (order.status !== 'paid') return res.status(409).json({ success: false, error: { code: 'NOT_PAID', message: 'Оплата не завершена' } })
+      // Чек магазина на сумму, с которой банк не сошёлся, выбил бы чек на другие деньги: решает страница заказа.
+      if (order.shopOrderId && order.receiptStatus === 'amount-mismatch') {
+        return res.status(409).json({ success: false, error: { code: 'AMOUNT_REVIEW', message: 'Сума не збіглася з банком: рішення на сторінці замовлення', shopOrderId: order.shopOrderId } })
+      }
       await fiscalize(order, labelByProvider(order))
       const after = await loadOrder(String(req.params.orderId))
       return res.json({ success: true, data: { receiptStatus: after?.receiptStatus || null, taxUrl: after?.taxUrl || null, receiptId: after?.receiptId || null } })
@@ -976,7 +1059,7 @@ export function registerPayments(app, deps) {
     if (t.unref) t.unref()
   }
 
-  return { createPayment, loadOrder, saveOrder, notifyOwner, fiscalize, receiptUuidFor }
+  return { createPayment, loadOrder, saveOrder, settleMonoAcquire, amountAudit, notifyOwner, fiscalize, resolveFop, setShopHooks, receiptUuidFor }
 }
 
 export default registerPayments

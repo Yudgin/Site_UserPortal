@@ -17,6 +17,7 @@ import { registerManagerReply } from './managerReply.js'
 import { registerServiceRequests } from './serviceRequests.js'
 import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
+import { createShopPaymentHooks } from './shopPayments.js'
 import { registerFopsAdmin } from './fopsAdmin.js'
 import { registerNpTtn } from './novaPoshtaTtn.js'
 import { registerTelegramLinks } from './telegramLinks.js'
@@ -1257,6 +1258,7 @@ registerMasterEstimates(app, { adminDb, notifyClient })
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 const paymentsApi = registerPayments(app, { adminDb })
+paymentsApi.setShopHooks(createShopPaymentHooks({ adminDb, payments: paymentsApi, siteUrl: SITE_URL }))
 // Управление ФОПами (владелец): мета в Firestore, секреты write-only (fopSecrets, backend-only).
 registerFopsAdmin(app, { adminDb, refreshFops })
 // Создание ТТН Новой Почты (InternetDocument.save) по шаблону: власник — будь-який шаблон; директор із

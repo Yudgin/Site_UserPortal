@@ -1,5 +1,5 @@
-// node --test: оплаты ремонтов и заказов лодок картой monobank (server/payments.js). Настоящие monoAcquire.js и
-// checkbox.js поверх подменённого axios: закрепляем то, что реально уходит банку и в кассу. Без сети и Firebase.
+// node --test: оплаты ремонтов, заказов лодок и магазина картой monobank (server/payments.js, server/shopPayments.js).
+// Настоящие monoAcquire.js и checkbox.js поверх подменённого axios: закрепляем то, что реально уходит банку и в кассу. Без сети и Firebase.
 import test, { afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'crypto'
@@ -1357,4 +1357,953 @@ test('notifyOwner: прежний алерт о чеке результат не
   assert.equal(doc.receiptStatus, 'error')
   assert.equal(doc.ownerNotified, true)
   assert.equal(net.calls.filter((c) => c.url.includes('telegram')).length, 1)
+})
+
+// ---------- один исход счёта: ремонт как раньше, кроме журнала и алерта при расхождении ----------
+
+const OWNER = { OWNER_TELEGRAM_CHAT_ID: '42', TELEGRAM_BOT_TOKEN: 'TG' }
+const alertTexts = () => net.of('POST', 'https://api.telegram.org/botTG/sendMessage').map((c) => c.body.text)
+// Даты заменены: сравниваем сами записи, а не момент записи.
+const noDates = (v) => JSON.parse(JSON.stringify(v).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z/g, 'ДАТА'))
+const reconcileNow = (a) => a.send('POST', '/api/pay/reconcile', {}, ADMIN)
+const bankSays = (over = {}) => { net.on.invoiceStatus = (invoiceId) => ok({ invoiceId, ...over }) }
+
+test('ремонт: колбэк и сверка дают одни и те же записи и один и тот же чек', async (t) => {
+  for (const status of ['success', 'failure', 'expired', 'reversed', 'created', 'processing', 'hold']) {
+    const viaHook = await mount(t, paySeed())
+    await viaHook.hook(ok({ status }))
+    const hookSells = sells().map((c) => c.body)
+    assert.equal(statusChecks().length, 0, 'колбэк ремонта банк не спрашивает')
+
+    const viaPoll = await mount(t, paySeed())
+    bankSays({ status })
+    await reconcileNow(viaPoll)
+    assert.deepEqual(noDates(viaPoll.db.docs), noDates(viaHook.db.docs), status)
+    assert.deepEqual(sells().map((c) => c.body), hookSells, status)
+  }
+})
+
+test('ремонт: расхождение с банком даёт журнал и один алерт, записи и чек те же', async (t) => {
+  const clean = await mount(t, paySeed())
+  await clean.hook(ok())
+  const cleanDocs = noDates(clean.db.docs)
+
+  const cases = [
+    [{ amount: 150000 }, 'сума 150000 коп. замість 150050'],
+    [{ amount: 1500.5 }, 'сума 1500.5 коп. замість 150050'],
+    [{ ccy: 840 }, 'валюта 840 замість 980'],
+    [{ reference: 'pay-other' }, 'reference pay-other'],
+    [{ amount: 1, ccy: 840 }, 'сума 1 коп. замість 150050; валюта 840 замість 980'],
+  ]
+  for (const [over, part] of cases) {
+    const text = `⚠️ RunFerry: оплата pay-1 на 1500.5 грн: дані банку не збігаються (${part}). Чек виписується як звичайно. Звірте суму в кабінеті monobank.`
+    const a = await mount(t, paySeed(), { env: OWNER })
+    await a.hook(ok(over))
+    assert.deepEqual(noDates(a.db.docs), cleanDocs, part)
+    assert.deepEqual(sells().map((c) => c.body), [sellBody('pay-1')])
+    assert.deepEqual(alertTexts(), [text])
+    assert.ok(a.logged('warn', `mono acquire webhook: дані банку не збігаються pay-1: ${part}`))
+    await a.hook(ok(over))
+    assert.equal(alertTexts().length, 1, 'повтор колбэка не шлёт второй алерт')
+    assert.equal(sells().length, 1)
+
+    const b = await mount(t, paySeed(), { env: OWNER })
+    bankSays(over)
+    await reconcileNow(b)
+    assert.deepEqual(noDates(b.db.docs), cleanDocs, part)
+    assert.deepEqual(alertTexts(), [text])
+    assert.ok(b.logged('warn', `mono acquire reconcile: дані банку не збігаються pay-1: ${part}`))
+  }
+})
+
+test('ремонт: всё сошлось или поля нет: ни алерта, ни журнала; после оплаты сумму не смотрим', async (t) => {
+  for (const over of [{}, { amount: undefined }, { ccy: undefined }, { reference: undefined }, { amount: undefined, ccy: undefined, reference: undefined }, { amount: '150050', ccy: '980' }]) {
+    const a = await mount(t, paySeed(), { env: OWNER })
+    await a.hook(ok(over))
+    assert.equal(a.db.get('payments/pay-1').status, 'paid')
+    assert.equal(sells().length, 1)
+    assert.deepEqual(alertTexts(), [])
+    assert.equal(a.logged('warn', 'дані банку'), false)
+  }
+  const paid = await mount(t, paySeed({ status: 'paid', receiptId: 'r-1', receiptStatus: 'DONE' }), { env: OWNER })
+  await paid.hook(ok({ amount: 1 }))
+  assert.deepEqual(alertTexts(), [])
+  assert.equal(sells().length, 0)
+})
+
+test('ремонт: сбой Telegram при расхождении не мешает ни оплате, ни чеку', async (t) => {
+  const a = await mount(t, paySeed(), { env: OWNER })
+  net.on.telegram = () => { throw new Error('tg down') }
+  await a.hook(ok({ amount: 1 }))
+  assert.equal(a.db.get('payments/pay-1').status, 'paid')
+  assert.equal(a.db.get('payments/pay-1').receiptStatus, 'DONE')
+  assert.equal(sells().length, 1)
+})
+
+test('ремонт: хуки магазина не вызываются ни на одном статусе, частичный возврат не замечается', async (t) => {
+  const called = []
+  const spy = (name) => async () => { called.push(name) }
+  const hooks = { onShopPaid: spy('paid'), onShopReversed: spy('reversed'), onShopPartialRefund: spy('partial') }
+  const a = await mount(t, paySeed())
+  a.api.setShopHooks(hooks)
+  await a.hook(ok({ finalAmount: 100 }))
+  const paid = a.db.get('payments/pay-1')
+  await a.hook(ok({ status: 'reversed' }))
+  await a.hook(ok({ finalAmount: 100 }))
+  assert.deepEqual(a.db.get('payments/pay-1'), paid)
+  assert.equal(statusChecks().length, 0)
+  assert.deepEqual(called, [])
+})
+
+test('settleMonoAcquire: тот же путь для следующих шагов, ответ без статуса ничего не делает', async (t) => {
+  const a = await mount(t, paySeed())
+  for (const st of [null, undefined, {}, { status: 'processing' }]) await a.api.settleMonoAcquire(a.db.get('payments/pay-1'), st, 'status')
+  assert.equal(a.db.get('payments/pay-1').status, 'pending')
+  await a.api.settleMonoAcquire(a.db.get('payments/pay-1'), ok(), 'status')
+  assert.equal(a.db.get('payments/pay-1').status, 'paid')
+  assert.deepEqual(sells().map((c) => c.body), [sellBody('pay-1')])
+  assert.deepEqual(a.api.amountAudit({ orderId: 'x', amount: 12.34 }, { amount: 1234, ccy: 980, reference: 'x' }), { mismatch: [], missing: [] })
+  assert.deepEqual(a.api.amountAudit({ orderId: 'x', amount: 12.34 }, {}), { mismatch: [], missing: ['amount', 'ccy'] })
+})
+
+// ---------- счёт магазина: сверка суммы, заказ догоняет оплату, возврат ----------
+
+const { createShopPaymentHooks } = await import('./shopPayments.js')
+const realMono = await import('./monoAcquire.js')
+const CARD_URL = 'https://portal.example/shop-orders/so-1'
+const shopOrder = (over = {}) => ({
+  orderNo: 'RF-100001', state: 'awaiting_payment', method: 'card', sku: 'V2-LID-R', qty: 1, total: 1500.5, phoneKey: 'ph-1',
+  clientName: 'Петренко Іван', clientPhone: '+380000000001', clientWarehouseName: 'Відділення №7',
+  createdAt: '2026-11-02T22:30:00.000Z', paymentIds: ['pay-1'], payment: { paymentId: 'pay-1', pageUrl: 'https://pay.example/inv-1' }, history: [], ...over,
+})
+const shopPayment = (over = {}) => payment({ shopOrderId: 'so-1', estimateId: undefined, serviceRequestId: undefined, ...over })
+const shopSeed = (pay = {}, order = {}) => ({
+  'payments/pay-1': shopPayment(pay),
+  'shopOrders/so-1': shopOrder(order),
+  'shopPhones/ph-1': { openCard: { 'V2-LID-R': 'so-1', OTHER: 'so-2' } },
+  'shopDaily/2026-11-03': { unpaid: 3, sms: 1 }, // 22:30 UTC это уже 3 ноября по Киеву
+  'system/shopSales': { mode: 'live', skus: { 'V2-LID-R': { enabled: true, inStock: true, stock: 5 } } },
+})
+const mountShop = async (t, seed, { removeInvoice = async () => ({}), env = OWNER } = {}) => {
+  const removed = []
+  const mono = { ...realMono, removeInvoice: async (fop, id) => { removed.push([fop.id, id]); return removeInvoice(fop, id) } }
+  const a = await mount(t, seed, { env, deps: { mono } })
+  a.api.setShopHooks(createShopPaymentHooks({ adminDb: a.db, payments: a.api, mono, siteUrl: 'https://portal.example' }))
+  bankSays()
+  return { ...a, removed }
+}
+const shopDoc = (a, id = 'so-1') => a.db.get(`shopOrders/${id}`)
+const payDoc = (a, id = 'pay-1') => a.db.get(`payments/${id}`)
+const stock = (a) => a.db.get('system/shopSales').skus['V2-LID-R'].stock
+const unpaid = (a) => a.db.get('shopDaily/2026-11-03').unpaid
+
+test('магазин: успех сверяется с банком, заказ оплачен до чека, записи полные и без алертов', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  let atSell = null
+  net.on.sell = (p) => { atSell = shopDoc(a); return { id: p.id, status: 'DONE', fiscal_code: 'FC-1', tax_url: 'https://check.example/1' } }
+  await a.hook(ok())
+
+  assert.deepEqual(statusChecks().map((c) => c.params), [{ invoiceId: 'inv-1' }])
+  assert.deepEqual(statusChecks()[0].headers, { 'X-Token': 'MONO-A' })
+  assert.equal(atSell.state, 'paid', 'заказ оплачен раньше обращения к кассе')
+  assert.match(atSell.paidAt, ISO)
+
+  const pay = payDoc(a)
+  assert.equal(pay.status, 'paid')
+  assert.equal(pay.paytype, 'mono-acquire')
+  assert.equal(pay.receiptId, receiptUuid('pay-1'))
+  assert.equal(pay.receiptStatus, 'DONE')
+  assert.deepEqual(sells().map((c) => c.body), [sellBody('pay-1')])
+
+  const shop = shopDoc(a)
+  assert.equal(shop.state, 'paid')
+  assert.equal(shop.paidPaymentId, 'pay-1')
+  assert.equal(shop.paidSource, 'webhook')
+  assert.match(shop.paidAt, ISO)
+  assert.deepEqual(shop.payment, { paymentId: 'pay-1', pageUrl: null })
+  assert.deepEqual(shop.history, [{ at: shop.paidAt, from: 'awaiting_payment', to: 'paid', by: 'webhook' }])
+  assert.equal(shop.alerts, undefined)
+
+  assert.deepEqual(a.db.get('shopPhones/ph-1').openCard, { 'V2-LID-R': null, OTHER: 'so-2' })
+  assert.equal(stock(a), 4)
+  assert.equal(a.db.get('system/shopSales').skus['V2-LID-R'].inStock, true)
+  assert.equal(a.db.get('system/shopSales').mode, 'live')
+  assert.deepEqual(a.db.get('shopDaily/2026-11-03'), { unpaid: 2, sms: 1 })
+  assert.deepEqual(alertTexts(), [])
+  assert.deepEqual(a.removed, [])
+})
+
+test('магазин: от создания счёта до чека: подпись и reference с документа, сумма сходится', async (t) => {
+  const a = await mountShop(t, { 'shopOrders/so-1': shopOrder({ paymentIds: [] }) })
+  const r = await a.api.createPayment({ ...SHOP_ARGS, shopOrderId: 'so-1', paymentLabel: 'Інтернет еквайринг', validitySec: 3600, webHookBase: 'https://hook.example' })
+  const { orderId } = r.data
+  const invoiceId = payDoc(a, orderId).providerOrderId
+  bankSays({ reference: orderId })
+  await a.hook({ invoiceId, status: 'success' })
+  assert.equal(payDoc(a, orderId).status, 'paid')
+  assert.equal(payDoc(a, orderId).receiptStatus, 'DONE')
+  assert.deepEqual(sells()[0].body.payments, [{ type: 'CASHLESS', value: 150050, label: 'Інтернет еквайринг' }])
+  assert.equal(shopDoc(a).paidPaymentId, orderId)
+  assert.deepEqual(alertTexts(), [])
+})
+
+test('магазин: решает ответ банка, а не тело колбэка', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  const pending = payDoc(a)
+  bankSays({ status: 'processing' })
+  await a.hook(ok())
+  assert.deepEqual(payDoc(a), pending, 'колбэк сказал успех, банк нет')
+  assert.equal(sells().length, 0)
+  assert.equal(shopDoc(a).state, 'awaiting_payment')
+
+  bankSays()
+  await a.hook(ok({ status: 'failure', amount: 1, ccy: 840, reference: 'pay-x' }))
+  assert.equal(payDoc(a).status, 'paid', 'колбэк сказал неудачу и неверную сумму, банк успех')
+  assert.equal(payDoc(a).receiptStatus, 'DONE')
+  assert.deepEqual(alertTexts(), [])
+})
+
+test('магазин: неверная подпись: банк не спрашиваем, ничего не меняем', async (t) => {
+  const other = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1', privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+  const a = await mountShop(t, shopSeed())
+  const before = clone(a.db.docs)
+  await a.hook(ok(), { privateKey: other.privateKey })
+  assert.deepEqual(a.db.docs, before)
+  assert.equal(statusChecks().length, 0)
+  assert.equal(sells().length, 0)
+})
+
+test('магазин: банк не ответил на чтение: документ pending, журнал, закрывает сверка', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  const before = clone(a.db.docs)
+  net.on.invoiceStatus = () => { throw httpErr(500, {}) }
+  await a.hook(ok())
+  assert.deepEqual(a.db.docs, before)
+  assert.equal(sells().length, 0)
+  assert.ok(a.logged('warn', 'mono acquire callback: статус не прочитано, чекаємо опитування pay-1'))
+
+  bankSays()
+  await reconcileNow(a)
+  assert.equal(payDoc(a).status, 'paid')
+  assert.equal(shopDoc(a).state, 'paid')
+  assert.equal(shopDoc(a).paidSource, 'reconcile')
+  assert.equal(sells().length, 1)
+})
+
+test('магазин: сумма не сошлась при первой записи: paid, чек не выходит, payment_review, один алерт', async (t) => {
+  const cases = [
+    [{ amount: 150000 }, 'сума 150000 коп. замість 150050'],
+    [{ amount: 1500.5 }, 'сума 1500.5 коп. замість 150050'],
+    [{ ccy: 840 }, 'валюта 840 замість 980'],
+    [{ reference: 'pay-x' }, 'reference pay-x'],
+  ]
+  for (const [over, part] of cases) {
+    const a = await mountShop(t, shopSeed())
+    bankSays(over)
+    await a.hook(ok())
+
+    const pay = payDoc(a)
+    assert.equal(pay.status, 'paid', part)
+    assert.equal(pay.paytype, 'mono-acquire')
+    assert.equal(pay.receiptStatus, 'amount-mismatch')
+    assert.equal(pay.receiptError, part)
+    assert.equal(pay.receiptId, undefined)
+    assert.equal(pay.fiscalizeClaimedAt, undefined)
+    assert.equal(sells().length, 0)
+    assert.ok(a.logged('warn', `mono acquire webhook: сума не збіглася, чек НЕ вибито pay-1: ${part}`))
+
+    const shop = shopDoc(a)
+    assert.equal(shop.state, 'payment_review')
+    assert.equal(shop.paidPaymentId, 'pay-1')
+    assert.match(shop.paidAt, ISO)
+    assert.equal(shop.payment.pageUrl, null)
+    assert.equal(stock(a), 5, 'склад решает владелец вместе с заказом')
+    assert.equal(a.db.get('shopPhones/ph-1').openCard['V2-LID-R'], null)
+    assert.equal(unpaid(a), 2)
+    const text = `⚠️ Замовлення RF-100001: 1500.5 грн, дані банку не збігаються (${part}). Чек не виписано. Звірте суму в кабінеті monobank і вирішіть на картці замовлення: ${CARD_URL}`
+    assert.deepEqual(alertTexts(), [text])
+
+    await a.hook(ok())
+    await reconcileNow(a)
+    assert.equal(sells().length, 0, 'повтор и сверка чек не выбивают')
+    assert.equal(alertTexts().length, 1)
+    assert.equal(payDoc(a).receiptStatus, 'amount-mismatch')
+    assert.equal(shopDoc(a).history.length, 1)
+  }
+})
+
+test('магазин: при уже записанной оплате другая сумма в ответе банка ничего не решает', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  await a.hook(ok())
+  const paid = payDoc(a)
+  bankSays({ amount: 1 })
+  await a.hook(ok())
+  assert.deepEqual(payDoc(a), paid)
+  assert.equal(shopDoc(a).state, 'paid')
+  assert.equal(sells().length, 1)
+})
+
+test('магазин: сверка по pending идёт той же дорогой: неверная сумма и нет поля', async (t) => {
+  const bad = await mountShop(t, shopSeed())
+  bankSays({ amount: 1 })
+  await reconcileNow(bad)
+  assert.equal(payDoc(bad).receiptStatus, 'amount-mismatch')
+  assert.equal(shopDoc(bad).state, 'payment_review')
+  assert.equal(shopDoc(bad).paidSource, 'reconcile')
+  assert.equal(sells().length, 0)
+
+  const none = await mountShop(t, shopSeed())
+  bankSays({ amount: undefined })
+  await reconcileNow(none)
+  assert.equal(shopDoc(none).state, 'paid')
+  assert.equal(sells().length, 1)
+  assert.equal(alertTexts().length, 1)
+})
+
+test('магазин: банк не прислал сумму или валюту: чек и один алерт; нет reference: просто чек', async (t) => {
+  for (const [over, part] of [[{ amount: undefined }, 'amount'], [{ ccy: undefined }, 'ccy'], [{ amount: undefined, ccy: undefined }, 'amount, ccy']]) {
+    const a = await mountShop(t, shopSeed())
+    bankSays(over)
+    await a.hook(ok())
+    assert.equal(payDoc(a).status, 'paid')
+    assert.equal(payDoc(a).receiptStatus, 'DONE')
+    assert.equal(sells().length, 1)
+    assert.equal(shopDoc(a).state, 'paid')
+    assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: 1500.5 грн оплачено, але банк не надіслав ${part}, суму не звірено. Звірте її в кабінеті monobank: ${CARD_URL}`])
+    await a.hook(ok())
+    assert.equal(sells().length, 1)
+    assert.equal(alertTexts().length, 1)
+  }
+  const a = await mountShop(t, shopSeed())
+  bankSays({ reference: undefined })
+  await a.hook(ok())
+  assert.equal(sells().length, 1)
+  assert.deepEqual(alertTexts(), [])
+})
+
+test('магазин: повтор и параллельные колбэки: один чек, один переход, склад один раз', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  await a.hook(ok())
+  const pay = payDoc(a)
+  const shop = shopDoc(a)
+  await a.hook(ok())
+  await a.api.settleMonoAcquire(pay, ok(), 'status')
+  await a.idle()
+  assert.equal(sells().length, 1)
+  assert.deepEqual(payDoc(a), pay)
+  assert.deepEqual(shopDoc(a), shop)
+  assert.equal(stock(a), 4)
+  assert.equal(unpaid(a), 2)
+
+  const b = await mountShop(t, shopSeed())
+  net.on.sell = async (p) => { await sleep(20); return { id: p.id, status: 'DONE', fiscal_code: 'FC-1', tax_url: 'https://check.example/1' } }
+  await Promise.all([b.postHook(ok()), b.postHook(ok()), b.postHook(ok())])
+  await b.idle()
+  assert.equal(sells().length, 1)
+  assert.equal(stock(b), 4)
+  assert.equal(shopDoc(b).history.length, 1)
+})
+
+test('магазин: частичный возврат: receiptStatus не трогаем, partialRefund, алерт, второго чека нет', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  await a.hook(ok())
+  const receipt = payDoc(a).receiptId
+
+  bankSays({ finalAmount: 150050 })
+  await a.hook(ok())
+  assert.equal(payDoc(a).partialRefund, undefined, 'вся сумма на месте')
+  bankSays({ finalAmount: null })
+  await a.hook(ok())
+  assert.equal(payDoc(a).partialRefund, undefined)
+  assert.deepEqual(alertTexts(), [])
+
+  bankSays({ finalAmount: 100050 })
+  await a.hook(ok())
+  let pay = payDoc(a)
+  assert.equal(pay.receiptStatus, 'DONE')
+  assert.equal(pay.receiptId, receipt)
+  assert.equal(pay.status, 'paid')
+  assert.equal(pay.partialRefund.amount, 500)
+  assert.match(pay.partialRefund.at, ISO)
+  assert.equal(shopDoc(a).state, 'paid')
+  assert.equal(shopDoc(a).partialRefund.amount, 500)
+  assert.equal(sells().length, 1, 'второй чек не выходит')
+  const text500 = `⚠️ Замовлення RF-100001: банк повернув частину оплати, 500 грн. Оформіть чек повернення на різницю в Checkbox: ${CARD_URL}`
+  assert.deepEqual(alertTexts(), [text500])
+
+  const at = pay.partialRefund.at
+  await a.hook(ok())
+  assert.equal(payDoc(a).partialRefund.at, at, 'повтор ничего не переписывает')
+  assert.equal(alertTexts().length, 1)
+
+  bankSays({ finalAmount: 80050 })
+  await a.hook(ok())
+  pay = payDoc(a)
+  assert.equal(pay.partialRefund.amount, 700)
+  assert.equal(shopDoc(a).partialRefund.amount, 700)
+  assert.equal(alertTexts().at(-1), `⚠️ Замовлення RF-100001: банк повернув частину оплати, 700 грн. Оформіть чек повернення на різницю в Checkbox: ${CARD_URL}`)
+  assert.equal(alertTexts().length, 2)
+  assert.equal(sells().length, 1)
+})
+
+test('магазин: частичный возврат при неудачном чеке и до первой записи оплаты: чек один и на всю сумму', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  net.on.sell = () => { throw new Error('timeout') }
+  await a.hook(ok())
+  assert.equal(payDoc(a).receiptStatus, 'error')
+  net.on.sell = (p) => ({ id: p.id, status: 'DONE', fiscal_code: 'FC-1', tax_url: 'https://check.example/1' })
+  bankSays({ finalAmount: 100050 })
+  await a.hook(ok())
+  assert.equal(payDoc(a).partialRefund.amount, 500)
+  assert.equal(payDoc(a).receiptStatus, 'DONE', 'чек повторяется своим ходом')
+  assert.equal(new Set(sells().map((c) => c.body.id)).size, 1)
+
+  const b = await mountShop(t, shopSeed())
+  bankSays({ finalAmount: 100050 })
+  await b.hook(ok())
+  assert.equal(shopDoc(b).state, 'paid')
+  assert.equal(shopDoc(b).partialRefund.amount, 500)
+  assert.equal(payDoc(b).partialRefund.amount, 500)
+  assert.deepEqual(sells().map((c) => c.body), [sellBody('pay-1')])
+  assert.equal(alertTexts().length, 1)
+
+  const c = await mountShop(t, shopSeed({ status: 'paid', paytype: 'mono-acquire', receiptId: 'r-1', receiptStatus: 'DONE' }, { state: 'paid', paidPaymentId: 'pay-1', paidAt: ago(5) }))
+  bankSays({ amount: undefined, finalAmount: 100050 })
+  await c.hook(ok())
+  assert.equal(payDoc(c).partialRefund.amount, 500, 'без amount в ответе считаем от суммы оплаты')
+
+  const paidSeed = () => shopSeed({ status: 'paid', paytype: 'mono-acquire', receiptId: 'r-1', receiptStatus: 'DONE' }, { state: 'paid', paidPaymentId: 'pay-1', paidAt: ago(5) })
+  for (const over of [{ finalAmount: 200000 }, { finalAmount: 'нема' }, { amount: 100000, finalAmount: 100000 }]) {
+    const d = await mountShop(t, paidSeed())
+    bankSays(over)
+    await d.hook(ok())
+    assert.equal(payDoc(d).partialRefund, undefined, JSON.stringify(over))
+    assert.deepEqual(alertTexts(), [], 'разница считается от суммы в ответе банка, больше суммы не возврат')
+  }
+
+  // Часть лишнего счёта вернули: алерт есть, а partialRefund заказа описывает только оплативший счёт.
+  const e = await mountShop(t, { ...paidSeed(), 'payments/pay-2': shopPayment({ orderId: 'pay-2', providerOrderId: 'inv-2', status: 'paid', receiptId: 'r-2', receiptStatus: 'DONE' }) })
+  bankSays({ reference: 'pay-2', finalAmount: 100050 })
+  await e.hook(ok({ invoiceId: 'inv-2', reference: 'pay-2' }))
+  assert.equal(payDoc(e, 'pay-2').partialRefund.amount, 500)
+  assert.equal(shopDoc(e).partialRefund, undefined)
+  assert.equal(alertTexts().filter((x) => x.includes('повернув частину')).length, 1)
+})
+
+test('магазин: чек упал: заказ уже paid, повтор чека через сверку его не трогает', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  net.on.sell = () => { throw new Error('timeout') }
+  await a.hook(ok())
+  assert.equal(shopDoc(a).state, 'paid')
+  assert.equal(payDoc(a).status, 'paid')
+  assert.equal(payDoc(a).receiptStatus, 'error')
+  const shop = shopDoc(a)
+
+  net.on.sell = (p) => ({ id: p.id, status: 'DONE', fiscal_code: 'FC-1', tax_url: 'https://check.example/1' })
+  await reconcileNow(a)
+  assert.equal(payDoc(a).receiptStatus, 'DONE')
+  assert.deepEqual(shopDoc(a), shop)
+})
+
+test('магазин: заказ не прочитался: чек всё равно выходит, повтор догоняет заказ один раз', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  a.db.failRead = (path) => path === 'shopOrders/so-1'
+  await a.hook(ok())
+  assert.equal(payDoc(a).status, 'paid')
+  assert.equal(sells().length, 1)
+  assert.equal(shopDoc(a).state, 'awaiting_payment')
+  assert.ok(a.logged('error', 'payments: onShopPaid pay-1, замовлення so-1: Firestore недоступний'))
+
+  a.db.failRead = null
+  await a.hook(ok())
+  assert.equal(shopDoc(a).state, 'paid')
+  assert.equal(stock(a), 4)
+  assert.equal(sells().length, 1)
+})
+
+test('магазин: сервер упал между записью оплаты и хуком: повтор лечит и с суммой, и без', async (t) => {
+  const a = await mountShop(t, shopSeed({ status: 'paid', paytype: 'mono-acquire' }))
+  await a.hook(ok())
+  assert.equal(shopDoc(a).state, 'paid')
+  assert.equal(sells().length, 1)
+
+  const b = await mountShop(t, shopSeed({ status: 'paid', paytype: 'mono-acquire', receiptStatus: 'amount-mismatch', receiptError: 'сума 1 коп. замість 150050' }))
+  bankSays({ amount: 150050 })
+  await b.hook(ok())
+  assert.equal(shopDoc(b).state, 'payment_review', 'причина берётся с документа оплаты')
+  assert.equal(sells().length, 0)
+  assert.ok(alertTexts()[0].includes('сума 1 коп. замість 150050'))
+  assert.equal(payDoc(b).receiptStatus, 'amount-mismatch')
+
+  const c = await mountShop(t, shopSeed({ status: 'paid', paytype: 'mono-acquire', receiptStatus: 'amount-mismatch' }))
+  await c.hook(ok())
+  assert.equal(shopDoc(c).state, 'payment_review')
+  assert.ok(alertTexts()[0].includes('сума не збіглася'))
+})
+
+test('магазин: заказа нет или хуки не подключены: деньги и чек не теряются', async (t) => {
+  const { 'shopOrders/so-1': _gone, ...noOrder } = shopSeed()
+  for (const status of ['success', 'reversed']) {
+    const a = await mountShop(t, noOrder)
+    await a.hook(ok())
+    bankSays({ status, finalAmount: 100 })
+    await a.hook(ok())
+    assert.equal(sells().length, 1)
+    assert.equal(a.db.get('shopOrders/so-1'), undefined, 'заказ не создаётся из воздуха')
+    assert.ok(a.logged('error', 'shop: оплата pay-1 без замовлення so-1'))
+    assert.ok(a.logged('error', status === 'reversed' ? 'shop: повернення pay-1 без замовлення so-1' : 'shop: часткове повернення pay-1 без замовлення so-1'))
+  }
+
+  const b = await mount(t, shopSeed())
+  bankSays()
+  await b.hook(ok())
+  assert.equal(payDoc(b).status, 'paid')
+  assert.equal(sells().length, 1)
+  assert.ok(b.logged('error', 'payments: onShopPaid pay-1, замовлення so-1: хук не підключено'))
+})
+
+test('магазин: прочие живые счета снимаются в банке, остальные не трогаются, сбой не мешает чеку и лечится повтором', async (t) => {
+  const seed = (removeOver = {}) => ({
+    ...shopSeed({}, { paymentIds: ['pay-live', 'pay-failed', 'pay-removed', 'pay-paidx', 'pay-gone', 'pay-liq', 'pay-noinv', 'pay-1'] }),
+    'payments/pay-live': shopPayment({ orderId: 'pay-live', providerOrderId: 'inv-live', fopId: 'fop-b', ...removeOver }),
+    'payments/pay-failed': shopPayment({ orderId: 'pay-failed', providerOrderId: 'inv-failed', status: 'failure' }),
+    'payments/pay-removed': shopPayment({ orderId: 'pay-removed', providerOrderId: 'inv-removed', status: 'removed' }),
+    'payments/pay-paidx': shopPayment({ orderId: 'pay-paidx', providerOrderId: 'inv-paidx', status: 'paid' }),
+    'payments/pay-liq': shopPayment({ orderId: 'pay-liq', provider: 'liqpay', providerOrderId: 'inv-liq' }),
+    'payments/pay-noinv': shopPayment({ orderId: 'pay-noinv', providerOrderId: null }),
+  })
+  const a = await mountShop(t, seed())
+  await a.hook(ok())
+  assert.deepEqual(a.removed, [['fop-b', 'inv-live']])
+  assert.equal(payDoc(a, 'pay-live').status, 'removed')
+  assert.equal(payDoc(a, 'pay-failed').status, 'failure')
+  assert.equal(payDoc(a, 'pay-removed').status, 'removed')
+  assert.equal(payDoc(a, 'pay-paidx').status, 'paid')
+  assert.equal(payDoc(a, 'pay-liq').status, 'pending')
+  assert.equal(payDoc(a, 'pay-noinv').status, 'pending')
+  assert.equal(shopDoc(a).payment.pageUrl, null)
+  assert.equal(sells().length, 1)
+
+  let down = true
+  const b = await mountShop(t, seed(), { removeInvoice: async () => { if (down) throw httpErr(500, {}) } })
+  await b.hook(ok())
+  assert.equal(payDoc(b, 'pay-live').status, 'pending')
+  assert.equal(sells().length, 1, 'банк не снял счёт, чек всё равно выходит')
+  assert.equal(shopDoc(b).state, 'paid')
+  assert.ok(b.logged('error', 'shop: рахунок pay-live не знято: Request failed with status code 500'))
+  down = false
+  await b.hook(ok())
+  assert.equal(payDoc(b, 'pay-live').status, 'removed')
+
+  const c = await mountShop(t, seed({ fopId: 'nope' }))
+  await c.hook(ok())
+  assert.deepEqual(c.removed, [])
+  assert.ok(c.logged('error', 'shop: рахунок pay-live не знято: ФОП nope не завантажено'))
+  assert.equal(sells().length, 1)
+
+  // Хук сам по себе свой счёт не снимает, даже если документ ещё не успел стать paid.
+  const d = await mountShop(t, shopSeed({}, { paymentIds: ['pay-1', 'pay-other'] }))
+  const hooks = createShopPaymentHooks({ adminDb: d.db, payments: d.api, mono: { removeInvoice: async (fop, id) => { d.removed.push(id) } } })
+  await hooks.onShopPaid(payDoc(d), { source: 'status' })
+  assert.deepEqual(d.removed, [])
+  assert.equal(await hooks.removeLiveInvoice('pay-1'), true, 'следующим шагам: снять счёт по id оплаты')
+  assert.deepEqual(d.removed, ['inv-1'])
+  assert.equal(payDoc(d).status, 'removed')
+  assert.equal(await hooks.removeLiveInvoice('pay-1'), false)
+  assert.equal(await hooks.removeLiveInvoice('none'), false)
+})
+
+test('магазин: второй успех: алерт «зайвий платіж», заказ на первом платеже, чек за пришедшие деньги', async (t) => {
+  const seed = () => ({
+    ...shopSeed({ status: 'paid', paytype: 'mono-acquire', receiptId: 'r-1', receiptStatus: 'DONE' }, { state: 'paid', paidPaymentId: 'pay-1', paidAt: ago(30), paymentIds: ['pay-1', 'pay-2'] }),
+    'payments/pay-2': shopPayment({ orderId: 'pay-2', providerOrderId: 'inv-2', status: 'removed' }),
+  })
+  const a = await mountShop(t, seed())
+  const shop = shopDoc(a)
+  bankSays({ reference: 'pay-2' })
+  await a.hook(ok({ invoiceId: 'inv-2', reference: 'pay-2' }))
+  assert.equal(payDoc(a, 'pay-2').status, 'paid', 'снятый счёт всё равно проводит оплату')
+  assert.equal(payDoc(a, 'pay-2').receiptStatus, 'DONE')
+  assert.deepEqual(sells().map((c) => c.body.id), [receiptUuid('pay-2')])
+  assert.equal(shopDoc(a).state, 'paid')
+  assert.equal(shopDoc(a).paidPaymentId, 'pay-1')
+  assert.equal(shopDoc(a).paidAt, shop.paidAt)
+  assert.equal(stock(a), 5)
+  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: зайвий платіж 1500.5 грн, замовлення вже оплачено іншим рахунком. Поверніть ці гроші в кабінеті monobank і оформіть чек повернення в Checkbox: ${CARD_URL}`])
+  assert.deepEqual(Object.keys(shopDoc(a).alerts), ['extra-payment-pay-2'])
+  await a.hook(ok({ invoiceId: 'inv-2', reference: 'pay-2' }))
+  assert.equal(alertTexts().length, 1)
+  assert.equal(sells().length, 1)
+
+  // Счёт, который в первый раз снять не удалось, снимается и при втором успехе.
+  const b = await mountShop(t, { ...seed(), 'payments/pay-3': shopPayment({ orderId: 'pay-3', providerOrderId: 'inv-3' }), 'shopOrders/so-1': { ...seed()['shopOrders/so-1'], paymentIds: ['pay-1', 'pay-2', 'pay-3'] } })
+  bankSays({ reference: 'pay-2' })
+  await b.hook(ok({ invoiceId: 'inv-2', reference: 'pay-2' }))
+  assert.deepEqual(b.removed, [['fop-a', 'inv-3']])
+  assert.equal(payDoc(b, 'pay-1').status, 'paid')
+})
+
+test('магазин: оплата по cancelled и expired: payment_review, алерт, чек выходит, склад и счётчик не трогаем', async (t) => {
+  for (const state of ['cancelled', 'expired']) {
+    const a = await mountShop(t, shopSeed({ status: 'removed' }, { state, cancelReason: 'superseded' }))
+    await a.hook(ok())
+    const shop = shopDoc(a)
+    assert.equal(shop.state, 'payment_review', state)
+    assert.equal(shop.paidPaymentId, 'pay-1')
+    assert.deepEqual(shop.history.map(({ from, to, by }) => ({ from, to, by })), [{ from: state, to: 'payment_review', by: 'webhook' }])
+    assert.equal(payDoc(a).status, 'paid')
+    assert.equal(payDoc(a).receiptStatus, 'DONE')
+    assert.equal(sells().length, 1)
+    assert.equal(stock(a), 5)
+    assert.equal(unpaid(a), 3)
+    assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: 1500.5 грн оплачено вже після закриття замовлення. Вирішіть на картці замовлення: відправити чи повернути гроші: ${CARD_URL}`])
+  }
+})
+
+test('магазин: второй оплаченный заказ того же телефона за сутки: один алерт «можливий дубль»', async (t) => {
+  const other = (over = {}) => ({ orderNo: 'RF-100000', phoneKey: 'ph-1', state: 'paid', paidAt: ago(60), ...over })
+  const a = await mountShop(t, { ...shopSeed(), 'shopOrders/so-0': other() })
+  await a.hook(ok())
+  await a.hook(ok())
+  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: можливий дубль, той самий покупець за добу оплатив RF-100000. Перевірте обидва перед відправкою: ${CARD_URL}`])
+  assert.equal(shopDoc(a).state, 'paid')
+  assert.equal(sells().length, 1)
+  assert.match(shopDoc(a).alerts['possible-duplicate'].sentAt, ISO)
+
+  const quiet = [
+    other({ paidAt: ago(25 * 60) }),
+    other({ phoneKey: 'ph-2' }),
+    other({ state: 'reversed' }),
+    other({ paidAt: undefined, state: 'awaiting_payment' }),
+    other({ paidAt: new Date(Date.now() + 3600000).toISOString() }),
+  ]
+  for (const doc of quiet) {
+    const b = await mountShop(t, { ...shopSeed(), 'shopOrders/so-0': doc })
+    await b.hook(ok())
+    assert.deepEqual(alertTexts(), [], JSON.stringify(doc))
+  }
+
+  const c = await mountShop(t, { ...shopSeed(), 'shopOrders/so-0': other() })
+  net.on.sell = async (p) => { await sleep(10); return { id: p.id, status: 'DONE' } }
+  await Promise.all([c.postHook(ok()), c.postHook(ok()), c.postHook(ok())])
+  await c.idle()
+  assert.equal(alertTexts().length, 1, 'параллельные колбэки шлют один алерт')
+
+  // Оба вызова уже прошли проверку снимка: один алерт держится на транзакции. Поставленный алерт базу больше не спрашивает.
+  const p = await mountShop(t, { ...shopSeed(), 'shopOrders/so-0': other() })
+  const parallel = createShopPaymentHooks({ adminDb: p.db, payments: p.api })
+  await Promise.all([parallel.onShopPaid(payDoc(p), { source: 'status' }), parallel.onShopPaid(payDoc(p), { source: 'status' })])
+  assert.equal(alertTexts().length, 1)
+  const queries = () => p.db.reads.filter((path) => path === 'shopOrders').length
+  const before = queries()
+  await parallel.onShopPaid(payDoc(p), { source: 'status' })
+  assert.equal(queries(), before)
+
+  const d = await mountShop(t, { ...shopSeed(), 'shopOrders/so-0': other() })
+  const realCollection = d.db.collection.bind(d.db)
+  d.db.collection = (name) => {
+    const col = realCollection(name)
+    return name === 'shopOrders' ? { ...col, where: () => { throw new Error('запит не пройшов') } } : col
+  }
+  await d.hook(ok())
+  assert.equal(payDoc(d).receiptStatus, 'DONE', 'сбой проверки дубля чек не останавливает')
+  assert.ok(d.logged('error', 'shop: перевірка дубля so-1: запит не пройшов'))
+})
+
+test('магазин: склад: 1 даёт 0 и выключение, 0 даёт алерт о перепродаже, null и нет настроек не считаем', async (t) => {
+  const withStock = (skuOver) => ({ ...shopSeed(), 'system/shopSales': { skus: { 'V2-LID-R': { enabled: true, inStock: true, ...skuOver }, OTHER: { stock: 9 } } } })
+  const a = await mountShop(t, withStock({ stock: 1 }))
+  await a.hook(ok())
+  assert.deepEqual(a.db.get('system/shopSales').skus, { 'V2-LID-R': { enabled: true, inStock: false, stock: 0 }, OTHER: { stock: 9 } })
+  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: артикул V2-LID-R закінчився, продаж вимкнено. Поповніть залишок на сторінці замовлень: ${CARD_URL}`])
+
+  const b = await mountShop(t, withStock({ stock: 0 }))
+  await b.hook(ok())
+  assert.equal(stock(b), 0)
+  assert.equal(b.db.get('system/shopSales').skus['V2-LID-R'].inStock, false)
+  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: оплачено більше, ніж було на складі (V2-LID-R), продаж артикула вимкнено. Домовтеся з покупцем або поверніть гроші: ${CARD_URL}`])
+  assert.equal(shopDoc(b).state, 'paid')
+  assert.equal(sells().length, 1, 'деньги пришли, чек выходит')
+
+  const c = await mountShop(t, withStock({ stock: null }))
+  await c.hook(ok())
+  assert.equal(stock(c), null)
+  assert.equal(c.db.get('system/shopSales').skus['V2-LID-R'].inStock, true)
+  assert.deepEqual(alertTexts(), [])
+
+  for (const seed of [{ ...shopSeed(), 'system/shopSales': { skus: {} } }, (({ 'system/shopSales': _s, ...rest }) => rest)(shopSeed())]) {
+    const d = await mountShop(t, seed)
+    await d.hook(ok())
+    assert.equal(shopDoc(d).state, 'paid')
+    assert.deepEqual(alertTexts(), [])
+  }
+})
+
+test('магазин: телефон и суточный счётчик: чужой заказ остаётся, ноль не уходит в минус, пустых документов не создаём', async (t) => {
+  const a = await mountShop(t, { ...shopSeed(), 'shopPhones/ph-1': { openCard: { 'V2-LID-R': 'so-newer' } }, 'shopDaily/2026-11-03': { unpaid: 0 } })
+  await a.hook(ok())
+  assert.deepEqual(a.db.get('shopPhones/ph-1').openCard, { 'V2-LID-R': 'so-newer' })
+  assert.equal(unpaid(a), 0)
+
+  const { 'shopPhones/ph-1': _p, 'shopDaily/2026-11-03': _d, ...bare } = shopSeed()
+  const b = await mountShop(t, bare)
+  await b.hook(ok())
+  assert.equal(shopDoc(b).state, 'paid')
+  assert.equal(b.db.get('shopPhones/ph-1'), undefined)
+  assert.equal(b.db.get('shopDaily/2026-11-03'), undefined)
+
+  const c = await mountShop(t, shopSeed({}, { phoneKey: undefined, createdAt: undefined, sku: undefined }))
+  await c.hook(ok())
+  assert.equal(shopDoc(c).state, 'paid', 'заказ без этих полей всё равно закрывается')
+})
+
+test('магазин: в алертах нет имени, телефона и отделения; sentAt только после отправки', async (t) => {
+  const a = await mountShop(t, {
+    ...shopSeed({}, { paymentIds: ['pay-1', 'pay-2'] }),
+    'shopOrders/so-0': { orderNo: 'RF-100000', phoneKey: 'ph-1', state: 'paid', paidAt: ago(60) },
+    'system/shopSales': { skus: { 'V2-LID-R': { stock: 1 } } },
+  })
+  bankSays({ amount: undefined, finalAmount: 100050 })
+  await a.hook(ok())
+  bankSays({ status: 'reversed' })
+  await a.hook(ok())
+  assert.equal(alertTexts().length, 5)
+  for (const text of alertTexts()) {
+    for (const secret of ['Петренко', 'Іван', '380000000001', 'Відділення', 'ph-1']) assert.equal(text.includes(secret), false, text)
+    assert.ok(text.includes('RF-100001'), text)
+    assert.ok(text.includes(CARD_URL), text)
+  }
+  for (const alert of Object.values(shopDoc(a).alerts)) assert.match(alert.sentAt, ISO)
+
+  const b = await mountShop(t, shopSeed())
+  net.on.telegram = () => { throw new Error('tg down') }
+  bankSays({ amount: 1 })
+  await b.hook(ok())
+  const failed = shopDoc(b).alerts['amount-mismatch']
+  assert.equal(failed.sentAt, null, 'не дошёл: повторит сверка')
+  assert.match(failed.at, ISO)
+  assert.ok(failed.text.includes('RF-100001'))
+
+  const c = await mountShop(t, shopSeed(), { env: {} })
+  bankSays({ amount: 1 })
+  await c.hook(ok())
+  assert.equal(shopDoc(c).alerts['amount-mismatch'].sentAt, null, 'Telegram не настроен')
+  assert.equal(shopDoc(c).state, 'payment_review')
+})
+
+// ---------- возврат всей суммы ----------
+
+const REVERSED_RECEIPT = `⚠️ Замовлення RF-100001: банк повернув 1500.5 грн. Чек було виписано: оформіть чек повернення в Checkbox. Накладну не створюйте, а якщо посилка вже пішла, зупиніть її: ${CARD_URL}`
+const REVERSED_NO_RECEIPT = `⚠️ Замовлення RF-100001: банк повернув 1500.5 грн. У нас чека немає: чек повернення потрібен, лише якщо чек є в кабінеті Checkbox. Накладну не створюйте, а якщо посилка вже пішла, зупиніть її: ${CARD_URL}`
+
+test('магазин: reversed по оплатившему счёту: документ, заказ, алерт про чек, повтор ничего не меняет', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  await a.hook(ok())
+  bankSays({ status: 'reversed' })
+  await a.hook(ok())
+
+  const pay = payDoc(a)
+  assert.equal(pay.status, 'reversed')
+  assert.equal(pay.reversedAfterPaid, true)
+  assert.match(pay.reversedAt, ISO)
+  assert.equal(pay.receiptStatus, 'DONE', 'выбитый чек остаётся в документе')
+  const shop = shopDoc(a)
+  assert.equal(shop.state, 'reversed')
+  assert.match(shop.reversedAt, ISO)
+  assert.equal(shop.paidPaymentId, 'pay-1')
+  assert.deepEqual(shop.history.map(({ from, to, by }) => ({ from, to, by })), [{ from: 'awaiting_payment', to: 'paid', by: 'webhook' }, { from: 'paid', to: 'reversed', by: 'webhook' }])
+  assert.deepEqual(alertTexts(), [REVERSED_RECEIPT])
+  assert.equal(sells().length, 1)
+  assert.equal(stock(a), 4, 'склад решает владелец: посылка могла уйти')
+
+  await a.hook(ok())
+  assert.deepEqual(payDoc(a), pay)
+  assert.deepEqual(shopDoc(a), shop)
+  assert.equal(alertTexts().length, 1)
+})
+
+test('магазин: чек с ошибкой, затем reversed: сверка и кнопка больше не выбивают чек', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  net.on.sell = () => { throw new Error('timeout') }
+  await a.hook(ok())
+  assert.equal(payDoc(a).receiptStatus, 'error')
+  const tries = sells().length
+  net.on.sell = (p) => ({ id: p.id, status: 'DONE' })
+
+  bankSays({ status: 'reversed' })
+  await a.hook(ok())
+  assert.equal(payDoc(a).status, 'reversed')
+  assert.equal(payDoc(a).receiptStatus, 'error')
+  assert.equal(shopDoc(a).state, 'reversed')
+  assert.ok(alertTexts().includes(REVERSED_NO_RECEIPT))
+
+  await reconcileNow(a)
+  assert.equal(sells().length, tries, 'сверка не зовёт Checkbox')
+  const r = await a.send('POST', '/api/pay/pay-1/refiscalize', {}, ADMIN)
+  assert.equal(r.status, 409)
+  assert.equal(r.json.error.code, 'NOT_PAID')
+  assert.equal(sells().length, tries)
+  const list = await a.send('GET', '/api/pay/unfiscalized', undefined, ADMIN)
+  assert.deepEqual(list.json.data, [], 'в «гроші є, чек ні» не показывается')
+})
+
+test('магазин: чек мог уйти в этот момент: живой захват считается чеком, поток у кассы новый чек не начнёт', async (t) => {
+  const a = await mountShop(t, shopSeed({ status: 'paid', fiscalizeClaimedAt: ago(1) }, { state: 'paid', paidPaymentId: 'pay-1', paidAt: ago(2) }))
+  bankSays({ status: 'reversed' })
+  await a.hook(ok())
+  assert.deepEqual(alertTexts(), [REVERSED_RECEIPT])
+
+  const b = await mountShop(t, shopSeed({ status: 'paid' }, { state: 'paid', paidPaymentId: 'pay-1', paidAt: ago(2) }))
+  const stale = payDoc(b)
+  await b.api.saveOrder({ orderId: 'pay-1', status: 'reversed' })
+  await b.api.fiscalize(stale, LABEL)
+  assert.equal(sells().length, 0, 'снимок ещё paid, а документ уже reversed')
+  assert.equal(payDoc(b).fiscalizeClaimedAt, undefined)
+
+  const c = await mountShop(t, shopSeed({ status: 'paid' }, { state: 'payment_review', paidPaymentId: 'pay-1', paidAt: ago(2) }))
+  const staleMismatch = payDoc(c)
+  await c.api.saveOrder({ orderId: 'pay-1', receiptStatus: 'amount-mismatch' })
+  await c.api.fiscalize(staleMismatch, LABEL)
+  assert.equal(sells().length, 0)
+
+  // Владелец подтвердил сумму и снял метку: тогда чек выходит, id тот же.
+  await c.api.saveOrder({ orderId: 'pay-1', receiptStatus: null })
+  await c.api.fiscalize(payDoc(c), LABEL)
+  assert.deepEqual(sells().map((s) => s.body), [sellBody('pay-1')])
+})
+
+test('магазин: заказ не прочитался при reversed: документ уже закрыт первой записью, повтор догоняет заказ', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  await a.hook(ok())
+  bankSays({ status: 'reversed' })
+  a.db.failRead = (path) => path === 'shopOrders/so-1'
+  await a.hook(ok())
+  assert.equal(payDoc(a).status, 'reversed')
+  assert.equal(payDoc(a).reversedAfterPaid, true)
+  assert.equal(shopDoc(a).state, 'paid')
+  assert.ok(a.logged('error', 'payments: onShopReversed pay-1, замовлення so-1: Firestore недоступний'))
+
+  a.db.failRead = null
+  const at = payDoc(a).reversedAt
+  await a.hook(ok())
+  assert.equal(shopDoc(a).state, 'reversed')
+  assert.equal(payDoc(a).reversedAt, at)
+  assert.deepEqual(alertTexts(), [REVERSED_RECEIPT])
+})
+
+test('магазин: reversed лишнего счёта: заказ тот же, алерт «повернуто зайвий платіж» с разным текстом о чеке', async (t) => {
+  const seed = (extra) => ({
+    ...shopSeed({ status: 'paid', paytype: 'mono-acquire', receiptId: 'r-1', receiptStatus: 'DONE' }, { state: 'shipped', paidPaymentId: 'pay-1', paidAt: ago(30), paymentIds: ['pay-1', 'pay-2'] }),
+    'payments/pay-2': shopPayment({ orderId: 'pay-2', providerOrderId: 'inv-2', status: 'paid', amount: 700, ...extra }),
+  })
+  const a = await mountShop(t, seed({ receiptId: 'r-2', receiptStatus: 'DONE' }))
+  const shop = shopDoc(a)
+  bankSays({ status: 'reversed', reference: 'pay-2' })
+  await a.hook(ok({ invoiceId: 'inv-2', reference: 'pay-2' }))
+  assert.equal(payDoc(a, 'pay-2').status, 'reversed')
+  assert.equal(payDoc(a).status, 'paid', 'оплативший счёт цел')
+  assert.equal(shopDoc(a).state, 'shipped')
+  assert.deepEqual(shopDoc(a).history, shop.history)
+  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: повернуто зайвий платіж 700 грн, замовлення лишається без змін. Чек було виписано: оформіть чек повернення в Checkbox. ${CARD_URL}`])
+  await a.hook(ok({ invoiceId: 'inv-2', reference: 'pay-2' }))
+  assert.equal(alertTexts().length, 1)
+
+  const b = await mountShop(t, seed({ receiptStatus: 'error', fiscalizeClaimedAt: null }))
+  bankSays({ status: 'reversed', reference: 'pay-2' })
+  await b.hook(ok({ invoiceId: 'inv-2', reference: 'pay-2' }))
+  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: повернуто зайвий платіж 700 грн, замовлення лишається без змін. У нас чека немає: чек повернення потрібен, лише якщо чек є в кабінеті Checkbox. ${CARD_URL}`])
+})
+
+test('магазин: reversed из любого состояния после оплаты; payment_review тоже закрывается', async (t) => {
+  for (const state of ['shipped', 'delivered', 'refused', 'returned', 'payment_review']) {
+    const a = await mountShop(t, shopSeed({ status: 'paid', receiptId: 'r-1', receiptStatus: 'DONE' }, { state, paidPaymentId: 'pay-1', paidAt: ago(30) }))
+    bankSays({ status: 'reversed' })
+    await a.hook(ok())
+    assert.equal(shopDoc(a).state, 'reversed', state)
+    assert.equal(shopDoc(a).history.at(-1).from, state)
+  }
+  const done = await mountShop(t, shopSeed({ status: 'paid', receiptId: 'r-1' }, { state: 'reversed', paidPaymentId: 'pay-1', paidAt: ago(30), history: [{ at: ago(1), from: 'paid', to: 'reversed', by: 'owner' }] }))
+  bankSays({ status: 'reversed' })
+  await done.hook(ok())
+  assert.equal(shopDoc(done).history.length, 1, 'владелец уже закрыл: второго перехода нет')
+  assert.equal(alertTexts().length, 1, 'но сообщить о деньгах всё равно надо')
+})
+
+test('магазин: неоплаченный счёт и конечные статусы банка: только статус, ни хука, ни алерта', async (t) => {
+  for (const status of ['failure', 'expired', 'reversed']) {
+    const a = await mountShop(t, shopSeed())
+    const order = shopDoc(a)
+    bankSays({ status })
+    await a.hook(ok())
+    assert.equal(payDoc(a).status, status)
+    assert.equal(payDoc(a).reversedAfterPaid, undefined)
+    assert.deepEqual(shopDoc(a), order)
+    assert.deepEqual(alertTexts(), [])
+    assert.equal(sells().length, 0)
+
+    const b = await mountShop(t, shopSeed())
+    bankSays({ status })
+    await reconcileNow(b)
+    assert.equal(payDoc(b).status, status, 'сверка той же дорогой')
+    assert.deepEqual(shopDoc(b), order)
+  }
+})
+
+test('магазин: после оплаты failure и expired не откатывают; после возврата ничто не воскрешает платёж', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  await a.hook(ok())
+  const paid = payDoc(a)
+  for (const status of ['failure', 'expired', 'processing', 'created', 'hold']) {
+    bankSays({ status })
+    await a.hook(ok())
+    assert.deepEqual(payDoc(a), paid, status)
+  }
+
+  const b = await mountShop(t, shopSeed({ status: 'reversed', reversedAfterPaid: true, reversedAt: ago(5) }, { state: 'reversed', paidPaymentId: 'pay-1', paidAt: ago(30) }))
+  const reversed = payDoc(b)
+  const shop = shopDoc(b)
+  for (const status of ['success', 'failure', 'expired', 'processing']) {
+    bankSays({ status })
+    await b.hook(ok())
+    assert.deepEqual(payDoc(b), reversed, status)
+    assert.deepEqual(shopDoc(b), shop, status)
+  }
+  assert.equal(sells().length, 0, 'чек после возврата не выходит')
+  assert.deepEqual(alertTexts(), [])
+})
+
+test('ремонт: возврат и метка суммы чек не закрывают, как и раньше', async (t) => {
+  const a = await mount(t, paySeed({ status: 'reversed' }))
+  await a.hook(ok())
+  assert.equal(payDoc(a).status, 'paid', 'успех после reversed у ремонта по-прежнему проводит оплату')
+  assert.equal(sells().length, 1)
+
+  const b = await mount(t, paySeed({ status: 'paid' }))
+  await b.api.saveOrder({ orderId: 'pay-1', receiptStatus: 'amount-mismatch' })
+  await b.api.fiscalize(payDoc(b), LABEL)
+  assert.equal(sells().length, 1, 'общий захват ограничен только магазином')
+})
+
+// ---------- повторный чек при расхождении суммы ----------
+
+test('/refiscalize: магазин при amount-mismatch отвечает 409 и ведёт на заказ; ремонт и другие метки проходят', async (t) => {
+  const a = await mountShop(t, {
+    ...shopSeed({ status: 'paid', receiptStatus: 'amount-mismatch', receiptError: 'сума' }, { state: 'payment_review', paidPaymentId: 'pay-1' }),
+    'payments/shop-error': shopPayment({ orderId: 'shop-error', status: 'paid', receiptStatus: 'error' }),
+    'payments/repair': payment({ orderId: 'repair', status: 'paid', receiptStatus: 'amount-mismatch', estimateId: undefined, serviceRequestId: undefined }),
+  })
+  const r = await a.send('POST', '/api/pay/pay-1/refiscalize', {}, ADMIN)
+  assert.equal(r.status, 409)
+  assert.deepEqual(r.json, { success: false, error: { code: 'AMOUNT_REVIEW', message: 'Сума не збіглася з банком: рішення на сторінці замовлення', shopOrderId: 'so-1' } })
+  assert.equal(sells().length, 0)
+  assert.equal(payDoc(a).receiptStatus, 'amount-mismatch')
+  assert.equal((await a.send('POST', '/api/pay/pay-1/refiscalize', {})).status, 403, 'права проверяются первыми')
+
+  const repair = await a.send('POST', '/api/pay/repair/refiscalize', {}, ADMIN)
+  assert.equal(repair.status, 200)
+  assert.equal(repair.json.data.receiptId, receiptUuid('repair'))
+  const shop = await a.send('POST', '/api/pay/shop-error/refiscalize', {}, ADMIN)
+  assert.equal(shop.status, 200)
+  assert.equal(shop.json.data.receiptId, receiptUuid('shop-error'))
+  assert.equal(sells().length, 2)
 })

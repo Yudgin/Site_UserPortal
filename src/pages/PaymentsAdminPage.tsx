@@ -32,6 +32,9 @@ const statusChip = (s: string) => {
   return <Chip size="small" variant="outlined" label={s} />
 }
 
+// Оплата магазина, с которой банк не сошёлся: чек тут выбил бы чек на другую сумму, решение на странице заказа.
+const needsOrderPage = (p: PaymentRow) => !!p.shopOrderId && p.receiptStatus === 'amount-mismatch'
+
 // Безопасное форматирование даты (не 'Invalid Date' на неожиданном формате)
 const fmtDate = (s?: string): string => {
   if (!s) return '—'
@@ -106,6 +109,7 @@ export default function PaymentsAdminPage() {
           </Button>
         }>
           <b>{noReceipt.length}</b> оплат без чека («гроші є, чек ні»). Виправте кнопкою «Виписати чек» або запустіть реконсиляцію.
+          {noReceipt.some(needsOrderPage) && ' Де сума не збіглася з банком, рішення на сторінці замовлення.'}
         </Alert>
       )}
 
@@ -145,13 +149,16 @@ export default function PaymentsAdminPage() {
                     {p.taxUrl && <Link href={p.taxUrl} target="_blank" rel="noreferrer" sx={{ ml: 1, fontSize: 12 }}>відкрити</Link>}
                   </TableCell>
                   <TableCell align="right">
-                    {p.status === 'paid' && !p.receiptId && p.receiptStatus !== 'no-checkbox' && (
+                    {p.status === 'paid' && !p.receiptId && p.receiptStatus !== 'no-checkbox' && !needsOrderPage(p) && (
                       <Button size="small" variant="outlined" startIcon={<ReceiptIcon />} disabled={busy === p.orderId} onClick={() => refiscalize(p.orderId)}>
                         {busy === p.orderId ? '…' : 'Виписати чек'}
                       </Button>
                     )}
                     {p.estimateId && (
                       <Button size="small" onClick={() => navigate(`/estimate/${p.estimateId}`)}>кошторис</Button>
+                    )}
+                    {p.shopOrderId && (
+                      <Button size="small" onClick={() => navigate(`/shop-orders/${p.shopOrderId}`)}>замовлення</Button>
                     )}
                   </TableCell>
                 </TableRow>
