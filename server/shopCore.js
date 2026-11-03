@@ -139,6 +139,12 @@ export function buildOrderDoc({ id, value: v, fingerprint, item, fop, statusToke
 const INVOICE_CLOSED = new Set(['failure', 'expired', 'removed'])
 const BANK_BUSY = new Set(['processing', 'hold', 'success', 'reversed'])
 
+// Документ оплаты показывает, что денег по счёту нет: сверка может закрыть заказ, если так у всех его счетов.
+export const invoiceFinal = (payment) => !payment || INVOICE_CLOSED.has(payment.status) || payment.status === 'reversed'
+
+// Адрес страницы статуса: сюда банк возвращает покупателя, эта же ссылка уходит в сообщении.
+export const orderStatusUrl = (siteBaseUrl, statusToken) => `${str(siteBaseUrl).replace(/\/+$/, '')}/uk/order/${statusToken}`
+
 // Текущий счёт заказа. payment это документ payments/{id}, первоисточник; order.payment.status только последний ответ банка на опрос.
 // closed: денег по счёту нет и новый создать можно. Счёт не закрыт и не живой: ждём банк, новый создавать нельзя, прежний могли оплатить.
 export function invoiceView(order, payment, now = Date.now()) {
@@ -149,7 +155,7 @@ export function invoiceView(order, payment, now = Date.now()) {
   return { creating, closed, live, checking: creating || (!closed && !live) }
 }
 
-const RECEIPT_FAILED = new Set(['ERROR', 'CANCELLED', 'no-checkbox'])
+export const RECEIPT_FAILED = new Set(['ERROR', 'CANCELLED', 'no-checkbox'])
 const receiptView = (order, paid) => {
   if (!paid) return { status: 'none', url: null }
   if (paid.taxUrl) return { status: 'ready', url: paid.taxUrl }
@@ -351,3 +357,27 @@ export function npOutcome(code, { shippedAt, now = Date.now() } = {}) {
   if (NP_GONE.has(c)) return c === '2' || now - Date.parse(shippedAt) > NP_NOT_FOUND_GRACE_MS ? 'back' : 'none'
   return c === NP_NOT_HANDED ? 'not-handed' : 'moving'
 }
+
+// Запись из ответа НП для заказа. Сырой текст статуса только для карточки владельца, покупателю он не отдаётся.
+export function npDeliveryFrom(doc, prev, at) {
+  const code = String(doc?.StatusCode ?? '').trim()
+  return { code, text: String(doc?.Status || '').slice(0, 120), changedAt: prev?.code === code && prev.changedAt ? prev.changedAt : at, final: false }
+}
+
+export const npDeliveredAt = (doc, at) => npDateToIso(doc?.RecipientDateTime) || npDateToIso(doc?.ActualDeliveryDate) || at
+
+// НП больше не знает накладную: номер уходит в историю, заказ снова ждёт накладную.
+export const ttnGonePatch = (order, code, at) => ({
+  ttn: null, npDocRef: null, npCostOnSite: null, npEstimatedDelivery: null, npFopId: null, ttnCreatingAt: null, ttnError: null,
+  shippedAt: null, npDelivery: null, npCheckedAt: null,
+  ttnHistory: [...(order.ttnHistory || []), { ttn: order.ttn, at, reason: `np-${code}` }],
+})
+
+// ---------- стирание ----------
+
+// Что стирается у заказа: всё, по чему можно узнать покупателя. fingerprint и phoneKey считаются от телефона и перебираются.
+export const piiPurgePatch = (at) => ({
+  lastName: null, firstName: null, middleName: null, clientName: null, clientPhone: null, phoneKey: null, email: null, fingerprint: null,
+  clientCityRef: null, clientCityName: null, clientWarehouseRef: null, clientWarehouseName: null, phoneCode: null,
+  piiPurgedAt: at, updatedAt: at,
+})

@@ -19,6 +19,7 @@ import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
 import { createShopPaymentHooks } from './shopPayments.js'
 import { registerShopOrders } from './shopOrders.js'
+import { createShopReconcile } from './shopReconcile.js'
 import { registerFopsAdmin } from './fopsAdmin.js'
 import { registerNpTtn } from './novaPoshtaTtn.js'
 import { registerTelegramLinks } from './telegramLinks.js'
@@ -1259,8 +1260,10 @@ registerMasterEstimates(app, { adminDb, notifyClient })
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 const paymentsApi = registerPayments(app, { adminDb })
-const shopHooks = createShopPaymentHooks({ adminDb, payments: paymentsApi, siteUrl: SITE_URL })
+const shopHooks = createShopPaymentHooks({ adminDb, payments: paymentsApi, siteUrl: SITE_URL, notifyClient, sendSms })
 paymentsApi.setShopHooks(shopHooks)
+// Шаг магазина в той же сверке: опрос счетов, чек, напоминания владельцу, посылки НП, стирание данных.
+paymentsApi.addReconcileStep(createShopReconcile({ adminDb, payments: paymentsApi, hooks: shopHooks, siteUrl: SITE_URL }).step)
 // Магазин на runferry.ua: /api/shop/* для сервера сайта по токену x-shop-token (Secret Manager shop-site-token), без токена 503.
 registerShopOrders(app, { adminDb, npRequest, hooks: shopHooks, payments: paymentsApi, siteUrl: SITE_URL })
 // Управление ФОПами (владелец): мета в Firestore, секреты write-only (fopSecrets, backend-only).

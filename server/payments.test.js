@@ -3071,3 +3071,42 @@ test('сверка: чек ремонта с просроченным токен
   assert.equal(net.of('POST', `${CBX}/cashier/signinPinCode`).length, 1)
   assert.deepEqual(sells().map((c) => c.body), [sellBody('pay-1', LABEL, { cashier_name: 'Касир Z' })])
 })
+
+// ---------- шаги других модулей в сверке ----------
+
+test('сверка: шаг другого модуля идёт в конце прохода, его обращения входят в ответ', async (t) => {
+  const a = await mount(t, paySeed())
+  bankSays({ status: 'success' })
+  const order = []
+  a.api.addReconcileStep(async () => {
+    order.push(payDoc(a).status)
+    return { checked: 2 }
+  })
+  a.api.addReconcileStep(async () => { order.push('другий') })
+  const r = await reconcileNow(a)
+  assert.deepEqual(order, ['paid', 'другий'], 'шаг видит уже сверенные оплаты')
+  assert.equal(r.json.data.checked, 3)
+})
+
+test('сверка: падение шага не ломает сверку и следующий шаг', async (t) => {
+  const a = await mount(t, paySeed())
+  bankSays({ status: 'success' })
+  let next = 0
+  a.api.addReconcileStep(async () => { throw Object.assign(new Error('крок упав'), { response: { status: 503 } }) })
+  a.api.addReconcileStep(() => { throw new Error('синхронно') })
+  a.api.addReconcileStep(async () => { next += 1; return { checked: 1 } })
+  const r = await reconcileNow(a)
+  assert.equal(r.status, 200)
+  assert.equal(r.json.data.checked, 2)
+  assert.equal(next, 1)
+  assert.equal(payDoc(a).status, 'paid')
+  assert.ok(a.logged('error', 'reconcile step: 503'))
+  assert.ok(a.logged('error', 'reconcile step: синхронно'))
+})
+
+test('сверка: ремонты без шагов отвечают как раньше', async (t) => {
+  const a = await mount(t, paySeed())
+  bankSays({ status: 'success' })
+  const r = await reconcileNow(a)
+  assert.deepEqual(r.json.data, { checked: 1 })
+})

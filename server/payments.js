@@ -1000,6 +1000,10 @@ export function registerPayments(app, deps) {
     }
   })
 
+  // Шаги других модулей (магазин) идут в конце сверки, отдельного задания Scheduler им не нужно. Шаг возвращает { checked }.
+  const reconcileSteps = []
+  const addReconcileStep = (fn) => { reconcileSteps.push(fn) }
+
   // Реконсиляция: колбэки банков не гарантированы → добиваем застрявшие monobank-заявки опросом
   // order/state и повторяем непробитые чеки (paid без receiptId). Транзакционный claim делает это
   // безопасным даже при нескольких инстансах Cloud Run.
@@ -1120,6 +1124,12 @@ export function registerPayments(app, deps) {
         }
       }
     } catch (e) { console.error('reconcile liqpay pending query:', e.message) }
+    for (const step of reconcileSteps) {
+      try {
+        const r = await step()
+        checked += (r && r.checked) || 0
+      } catch (e) { console.error('reconcile step:', e?.response?.status || e.message) }
+    }
     return { checked }
   }
 
@@ -1187,7 +1197,7 @@ export function registerPayments(app, deps) {
     if (t.unref) t.unref()
   }
 
-  return { createPayment, loadOrder, saveOrder, settleMonoAcquire, amountAudit, notifyOwner, fiscalize, resolveFop, setShopHooks, receiptUuidFor }
+  return { createPayment, loadOrder, saveOrder, settleMonoAcquire, amountAudit, notifyOwner, fiscalize, resolveFop, setShopHooks, addReconcileStep, receiptUuidFor }
 }
 
 export default registerPayments

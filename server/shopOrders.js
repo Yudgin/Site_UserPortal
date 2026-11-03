@@ -8,7 +8,7 @@ import * as monoAcquire from './monoAcquire.js'
 import { KYIV_DAY } from './shopPayments.js'
 import {
   NP_REF_RE, SALES_MODES, STATUS_TOKEN_RE, acceptsOrders, buildCatalogFeed, buildOrderDoc, canTransition, cardOpenFor, claimFresh, invoiceView,
-  newStatusToken, orderFingerprint, orderIdFromKey, orderPublicView, pricedItem, shopLimit, shopSellable, skuOnSale, transitionPatch, validateOrderInput,
+  newStatusToken, orderFingerprint, orderIdFromKey, orderPublicView, orderStatusUrl, pricedItem, shopLimit, shopSellable, skuOnSale, transitionPatch, validateOrderInput,
 } from './shopCore.js'
 
 // Сервер сайта ждёт чтение 8 с: отвечаем раньше, чтобы сбой НП не выглядел сбоем портала.
@@ -238,7 +238,7 @@ export function registerShopOrders(app, deps) {
         fopId: fop.id, fopOverride: fop, method: 'mono-acquire', amount: order.total, shopOrderId: ref.id,
         goods: [{ name: order.titleUk, price: order.total, qty: 1, code: order.sku }],
         description: invoiceDestination(order.orderNo),
-        resultUrl: `${str(cfg.siteBaseUrl).replace(/\/+$/, '')}/uk/order/${order.statusToken}`,
+        resultUrl: orderStatusUrl(cfg.siteBaseUrl, order.statusToken),
         paymentLabel: str(cfg.cardReceiptLabel) || CARD_RECEIPT_LABEL,
         validitySec: INVOICE_VALIDITY_SEC,
         webHookBase: process.env.SHOP_CALLBACK_BASE_URL,
