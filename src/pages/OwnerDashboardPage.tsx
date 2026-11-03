@@ -46,7 +46,7 @@ export default function OwnerDashboardPage() {
   const load = useCallback(async () => {
     setLoading(true)
     const [p, r, s] = await Promise.all([
-      paymentsAdminService.list(1000),
+      paymentsAdminService.listWithUnfiscalized(1000),
       serviceRequestService.list(1000),
       chatSessionService.listRecent(1000),
     ])

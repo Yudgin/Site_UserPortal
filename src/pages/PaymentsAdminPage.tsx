@@ -55,7 +55,7 @@ export default function PaymentsAdminPage() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    setRows(await paymentsAdminService.list(300))
+    setRows(await paymentsAdminService.listWithUnfiscalized(300))
     setLoading(false)
   }, [])
 

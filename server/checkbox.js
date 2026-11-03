@@ -53,19 +53,38 @@ const ensureToken = async (fop) => {
   if (!tokenCache.get(fop.id)) await signin(fop)
 }
 
-// Убедиться, что открыта смена; иначе открыть и дождаться OPENED.
-export const ensureShift = async (fop) => {
-  await ensureToken(fop)
-  const cur = await axios.get(`${BASE}/api/v1/cashier/shift`, { headers: headers(fop), timeout: 15000 }).catch(() => null)
+const is401 = (e) => !!(e.response && e.response.status === 401)
+
+// Текущая смена. Прочие сбои чтения считаем «смены нет», а 401 отдаём наверх: токен протух, и открытие смены тоже откажет.
+const readShift = (fop) => axios.get(`${BASE}/api/v1/cashier/shift`, { headers: headers(fop), timeout: 15000 }).catch((e) => {
+  if (is401(e)) throw e
+  return null
+})
+
+const openShift = async (fop) => {
+  const cur = await readShift(fop)
   if (cur && cur.data && cur.data.status === 'OPENED') return cur.data
   await axios.post(`${BASE}/api/v1/shifts`, {}, { headers: headers(fop), timeout: 20000 })
   // ждём OPENED (регистрация в ДПС ~5-7с)
   for (let i = 0; i < 8; i++) {
     await new Promise((r) => setTimeout(r, 2000))
-    const s = await axios.get(`${BASE}/api/v1/cashier/shift`, { headers: headers(fop), timeout: 15000 }).catch(() => null)
+    const s = await readShift(fop)
     if (s && s.data && s.data.status === 'OPENED') return s.data
   }
   throw new Error(`ФОП ${fop.id}: смена Checkbox не открылась`)
+}
+
+// Убедиться, что открыта смена; иначе открыть и дождаться OPENED. Токен мог протухнуть → один повтор после переавторизации.
+export const ensureShift = async (fop) => {
+  await ensureToken(fop)
+  try {
+    return await openShift(fop)
+  } catch (e) {
+    if (!is401(e)) throw e
+    tokenCache.delete(fop.id)
+    await signin(fop)
+    return openShift(fop)
+  }
 }
 
 // Собрать тело чека продажи. goods: [{name, price(грн), qty, code?}]. paymentLabel — подпись оплаты.

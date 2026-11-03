@@ -124,11 +124,12 @@ const BAD_FIELDS = [
   ['sku', ['', 'v2-lid-r', 'V2_LID', 'V2-LID-RM-X1', 7, null]],
   ['qty', [0, 2, '1', 1.5, null, undefined]],
   ['method', ['', 'liqpay', 'CARD', ['card'], null, undefined]],
-  ['lastName', ['', 'Я', 'Ivanov', 'Шевченко Тарас', 'Шевченко1', 'я'.repeat(41), null, 5, {}]],
-  ['firstName', ['', 'Т', 'Taras', 'Та рас', 'Та<b>рас', null]],
-  ['middleName', ['Г', 'Hryhorovych', 'Григо рович']],
+  // Без букв: дефисы, апострофы, знак тысяч из кириллицы, ʼ (это буква для \\p{L}, но не кириллица).
+  ['lastName', ['', 'Я', 'Ivanov', 'Шевченко Тарас', 'Шевченко1', 'я'.repeat(41), null, 5, {}, '--', "''", '-ʼ-', '҂҂', 'ʼʼ', '’’', 'Я-', "'Я", 'Я҂']],
+  ['firstName', ['', 'Т', 'Taras', 'Та рас', 'Та<b>рас', null, '--', '҂҂', 'ʼʼ']],
+  ['middleName', ['Г', 'Hryhorovych', 'Григо рович', '--', '҂҂']],
   ['phone', ['', 'abc', '+49 151 12345678', 671234567, null]],
-  ['email', ['без-собаки', 'a@b', 'a b@c.ua', `${'a'.repeat(120)}@b.ua`]],
+  ['email', ['без-собаки', 'a@b', 'a b@c.ua', `${'a'.repeat(120)}@b.ua`, 'a,b@c.ua', 'a,b@c.d', 'a..b@gmail.com', '.a@b.ua', 'a.@b.ua', 'ivan@пошта.укр', 'іван@example.com', 'a@b..ua', 'a@-b.ua', 'a@b-.ua', 'a@b.u', 'a@b.1a']],
   ['cityRef', ['', 'kyiv', `${REF_A}0`, 5, null]],
   ['cityName', ['', '   ', 5, null]],
   ['warehouseRef', ['', 'wh', 5, null]],
@@ -148,6 +149,15 @@ for (const [field, values] of BAD_FIELDS) {
     }
   })
 }
+
+test('вход заказа: настоящие имена и адреса проходят', () => {
+  for (const name of ['Нечуй-Левицький', "Мар'яна", 'Мар’яна', 'Марʼяна', 'Ґе', 'Їжак', 'Єва', 'Ли', "О'Коннор", 'я'.repeat(40)]) {
+    assert.equal(validateOrderInput(orderBody({ lastName: name, firstName: name, middleName: name })).ok, true, name)
+  }
+  for (const email of ['a@b.ua', 'first.last+tag@sub.example.com', "o'neil@example.com", 'a_b-c@my-shop.com.ua', 'ivan@xn--80a1acny.xn--j1amh', 'A.B@EXAMPLE.COM']) {
+    assert.equal(validateOrderInput(orderBody({ email })).ok, true, email)
+  }
+})
 
 test('вход заказа: не объект и пустое тело не падают и перечисляют обязательные поля', () => {
   for (const body of [null, undefined, 'x', 5, [], {}]) {

@@ -1,5 +1,5 @@
 // Что оплата monobank меняет в заказе магазина (shopOrders). payments.js уже записал деньги в payments/{id} и зовёт
-// эти хуки из settleMonoAcquire. Любой хук можно звать повторно: сбой лечится следующим колбэком или опросом банка.
+// эти хуки из settleMonoAcquire. Любой хук можно звать повторно: сбой лечит сверка по метке bankRecheck или следующий колбэк.
 // Чек здесь не выбивается. В текстах алертов нет имени, телефона и отделения: только номер, сумма, что случилось и что делать.
 import * as monoAcquire from './monoAcquire.js'
 
@@ -135,8 +135,8 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
     await alertPossibleDuplicate(ref, result.shop)
   }
 
-  // Банк вернул оплату целиком. Заказ меняется, только если вернули именно оплативший счёт.
-  const onShopReversed = async (payment, { hadReceipt, source } = {}) => {
+  // Банк вернул оплату. Заказ меняется, только если вернули именно оплативший счёт. refunded: сумма, если банк оставил часть денег.
+  const onShopReversed = async (payment, { hadReceipt, source, refunded = null } = {}) => {
     const ref = orderRef(payment.shopOrderId)
     const result = await adminDb.runTransaction(async (tx) => {
       const snap = await tx.get(ref)
@@ -146,16 +146,22 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
       const paying = shop.paidPaymentId === payment.orderId
       const kind = paying ? 'reversed' : `extra-reversed-${payment.orderId}`
       const receipt = hadReceipt ? 'Чек було виписано: оформіть чек повернення в Checkbox.' : 'У нас чека немає: чек повернення потрібен, лише якщо чек є в кабінеті Checkbox.'
+      const sum = refunded ? `${refunded} грн із ${payment.amount} грн` : `${payment.amount} грн`
+      const rest = refunded ? ' На рахунку лишилась решта: звірте суму в кабінеті monobank.' : ''
       const alerts = {}
       if (!(shop.alerts && shop.alerts[kind])) {
         alerts[kind] = newAlert(at, paying
-          ? `⚠️ Замовлення ${shop.orderNo}: банк повернув ${payment.amount} грн. ${receipt} Накладну не створюйте, а якщо посилка вже пішла, зупиніть її: ${cardUrl(ref)}`
-          : `⚠️ Замовлення ${shop.orderNo}: повернуто зайвий платіж ${payment.amount} грн, замовлення лишається без змін. ${receipt} ${cardUrl(ref)}`)
+          ? `⚠️ Замовлення ${shop.orderNo}: банк повернув ${sum}. ${receipt}${rest} Накладну не створюйте, а якщо посилка вже пішла, зупиніть її: ${cardUrl(ref)}`
+          : `⚠️ Замовлення ${shop.orderNo}: повернуто зайвий платіж ${sum}, замовлення лишається без змін. ${receipt}${rest} ${cardUrl(ref)}`)
       }
       const moved = paying && shop.state !== 'reversed'
       if (moved || Object.keys(alerts).length) {
         tx.set(ref, {
-          ...(moved ? { state: 'reversed', reversedAt: at, history: [...(shop.history || []), { at, from: shop.state || null, to: 'reversed', by: source || null }] } : {}),
+          ...(moved ? {
+            state: 'reversed', reversedAt: at,
+            ...(refunded ? { partialRefund: { amount: refunded, at } } : {}),
+            history: [...(shop.history || []), { at, from: shop.state || null, to: 'reversed', by: source || null }],
+          } : {}),
           ...(Object.keys(alerts).length ? { alerts } : {}),
           updatedAt: at,
         }, { merge: true })
@@ -188,7 +194,41 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
     await sendAlerts(ref, result.alerts)
   }
 
-  return { onShopPaid, onShopReversed, onShopPartialRefund, removeLiveInvoice }
+  // Один алерт на заказ и вид: повторы колбэка и сверки второго сообщения не шлют.
+  const alertOnce = async (payment, kind, textOf) => {
+    const ref = orderRef(payment.shopOrderId)
+    const alerts = await adminDb.runTransaction(async (tx) => {
+      const snap = await tx.get(ref)
+      if (!snap.exists) return null
+      const shop = snap.data()
+      if (shop.alerts && shop.alerts[kind]) return {}
+      const at = nowIso()
+      const fresh = { [kind]: newAlert(at, textOf(shop, cardUrl(ref))) }
+      tx.set(ref, { alerts: fresh, updatedAt: at }, { merge: true })
+      return fresh
+    })
+    if (!alerts) return console.error(`shop: алерт ${kind} ${payment.orderId} без замовлення ${payment.shopOrderId}`)
+    await sendAlerts(ref, alerts)
+  }
+
+  // Подписанный колбэк сказал «возврат», а прочитать статус не вышло. Заказ не трогаем: решит ответ банка в сверке.
+  const onShopReversalSignal = (payment) => alertOnce(payment, 'reversed-signal', (shop, url) =>
+    `⚠️ Замовлення ${shop.orderNo}: банк повідомив про повернення ${payment.amount} грн, але статус не вдалося перечитати. Чек не вийде, доки банк не відповість. Накладну не створюйте, звірте оплату в кабінеті monobank: ${url}`)
+
+  // Банк показал по оплаченному счёту статус не из нашего списка. Как он показывает чарджбэк, неизвестно: когда банк ответит, завести ветку как у reversed.
+  const onShopUnknownStatus = (payment, { status } = {}) => {
+    const shown = String(status).slice(0, 40)
+    return alertOnce(payment, `unknown-status-${shown.replace(/[^\w-]/g, '_')}`, (shop, url) =>
+      `⚠️ Замовлення ${shop.orderNo}: банк показує статус «${shown}» за оплатою ${payment.amount} грн. Чек і накладну не робіть, доки не звірите оплату в кабінеті monobank: ${url}`)
+  }
+
+  // Почта покупателя для чека: в payments её видел бы весь персонал, поэтому она только в заказе.
+  const receiptEmail = async (payment) => {
+    const snap = await orderRef(payment.shopOrderId).get()
+    return snap.exists ? snap.data().email || null : null
+  }
+
+  return { onShopPaid, onShopReversed, onShopPartialRefund, onShopReversalSignal, onShopUnknownStatus, receiptEmail, removeLiveInvoice }
 }
 
 export default createShopPaymentHooks
