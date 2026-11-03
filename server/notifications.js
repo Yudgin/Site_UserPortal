@@ -27,7 +27,8 @@ const NP_TRACK_URL = 'https://novaposhta.ua/tracking/?cargo_number='
 const ALLOWED_EVENTS = ['offer', 'actual', 'ttn', 'custom']
 // Події з готовим текстом, ідемпотентні лише за clientKey (а не «одна на заявку»): custom — текст майстра,
 // chat-invite — SMS-запрошення в чат (server/chatInvites.js, лише внутрішній виклик, не через /api/notify).
-const KEYED_EVENTS = ['custom', 'chat-invite']
+// shop — сообщение покупателю магазина: только внутренний вызов, заявки нет, ключ обязателен.
+const KEYED_EVENTS = ['custom', 'chat-invite', 'shop']
 // ТТН Нової Пошти — 14 цифр; приймаємо 8–20 цифр після очищення (інші формати перевізників).
 const normTtn = (v) => { const d = String(v ?? '').replace(/\D/g, ''); return d && d !== '0' ? d : '' }
 const TTN_RE = /^\d{8,20}$/
@@ -52,7 +53,7 @@ const template = (event, ctx) => {
 }
 
 export function registerNotifications(app, deps) {
-  const { adminDb, senders = {}, sendSms, siteUrl = 'https://my.runferry.com' } = deps
+  const { adminDb, senders = {}, sendSms, siteUrl = 'https://my.runferry.com', verifyStaff = verifyFirebaseStaff } = deps
 
   // Время последнего входящего (от КЛИЕНТА) сообщения — определяет окно Viber.
   const lastClientAt = (session) => {
@@ -128,7 +129,12 @@ export function registerNotifications(app, deps) {
     // chat-invite ідемпотентний за ключем (= id запрошення) і без заявки: запрошення зазвичай ще без заявки.
     const keyed = KEYED_EVENTS.includes(event)
     const customKey = keyed && clientKey && CLIENT_KEY_RE.test(String(clientKey)) ? String(clientKey) : null
-    const autoId = event === 'chat-invite' && customKey
+    const isShop = event === 'shop'
+    // Без верного ключа каждый повтор из сверки был бы новым платным SMS: лучше отказ, чем дубли.
+    if (isShop && !customKey) throw new Error('shop notification needs a valid clientKey')
+    const autoId = isShop
+      ? `ntf-na-shop-${customKey}`
+      : event === 'chat-invite' && customKey
       ? `ntf-${serviceRequestId || 'na'}-chat-invite-${customKey}`
       : serviceRequestId && (!keyed || customKey)
         ? (event === 'ttn' ? `ntf-${serviceRequestId}-ttn-${ttnSlug}` : keyed ? `ntf-${serviceRequestId}-${event}-${customKey}` : `ntf-${serviceRequestId}-${event}`)
@@ -186,19 +192,21 @@ export function registerNotifications(app, deps) {
     }
     if (ok) error = null // успешная доставка (в т.ч. SMS-фолбэк) — без ошибки в журнале
 
+    // Журнал читает весь персонал, а заказы магазина закрыты, и их данные стираются по сроку:
+    // телефона покупателя здесь нет, текст только явно заданный (в ссылке токен статуса).
     const rec = {
       id: ref.id,
       createdAt: nowIso(),
       serviceRequestId: serviceRequestId || null,
       serviceCenterId: req?.serviceCenterId || null, // розріз по центрах для стрічки «Увага»
       sessionId: journal && journal.sessionId !== undefined ? journal.sessionId : sid,
-      phone: toPhone || null,
+      phone: isShop ? null : toPhone || null,
       event,
       channel,
       via,
       status: ok ? 'sent' : 'failed',
       error: error || null,
-      text: journal && typeof journal.text === 'string' ? journal.text : body,
+      text: journal && typeof journal.text === 'string' ? journal.text : isShop ? '' : body,
       by: by || null,
     }
     await ref.set(rec)
@@ -209,7 +217,7 @@ export function registerNotifications(app, deps) {
   // Авто-события фронт шлёт при публикации калькуляций/ТТН. НЕ-владелец: только в привязке к
   // заявке СВОЕГО центра и только на телефон заявки (платный SMS-шлюз — не для произвольных номеров).
   app.post('/api/notify', async (req, res) => {
-    const staff = await verifyFirebaseStaff(req, ['owner', 'director', 'master'])
+    const staff = await verifyStaff(req, ['owner', 'director', 'master'])
     if (!staff) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника, директора або майстра' } })
     }
