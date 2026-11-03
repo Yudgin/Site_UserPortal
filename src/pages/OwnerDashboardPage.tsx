@@ -17,9 +17,11 @@ import { isAdminEmail } from '@/config/access'
 import { serviceRequestService } from '@/api/serviceRequestService'
 import { paymentsAdminService, type PaymentRow } from '@/api/paymentsAdminService'
 import { chatSessionService } from '@/api/chatSessionService'
+import { shopAdminApi } from '@/api/endpoints/shopAdmin'
 import { formatMoney } from '@/utils/pricing'
 import { SERVICE_REQUEST_STATUS_LABELS, type ServiceRequest, type ServiceRequestStatus } from '@/types/serviceRequest'
 import type { ChatSession } from '@/types/chat'
+import type { ShopCounters } from '@/types/shopOrder'
 
 const PERIODS: { k: number; label: string }[] = [
   { k: 7, label: '7 днів' },
@@ -42,9 +44,12 @@ export default function OwnerDashboardPage() {
   const [payments, setPayments] = useState<PaymentRow[]>([])
   const [requests, setRequests] = useState<ServiceRequest[]>([])
   const [sessions, setSessions] = useState<ChatSession[]>([])
+  const [shop, setShop] = useState<ShopCounters | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
+    // Отдельно: сервер магазина не должен держать всю панель.
+    shopAdminApi.actionList().then((res) => setShop(res.ok ? res.data.counters : null))
     const [p, r, s] = await Promise.all([
       paymentsAdminService.listWithUnfiscalized(1000),
       serviceRequestService.list(1000),
@@ -140,6 +145,12 @@ export default function OwnerDashboardPage() {
           {m.unfiscalized > 0 && (
             <Alert severity="warning" icon={<WarnIcon />} action={<Button color="inherit" size="small" onClick={() => navigate('/payments-admin')}>Розібратися</Button>}>
               Оплат без чека: <b>{m.unfiscalized}</b> — гроші отримано, фіскальний чек не виписано.
+            </Alert>
+          )}
+
+          {shop && shop.action > 0 && (
+            <Alert severity="warning" action={<Button color="inherit" size="small" onClick={() => navigate('/shop-orders')}>Відкрити</Button>}>
+              Замовлення з сайту, потрібна дія: <b>{shop.action}</b>{shop.noTtn > 0 && <>, без накладної: <b>{shop.noTtn}</b></>}.
             </Alert>
           )}
 

@@ -43,6 +43,8 @@ import BoatCatalogPage from '@/pages/BoatCatalogPage'
 import BoatOrdersPage from '@/pages/BoatOrdersPage'
 import BoatOrderPage from '@/pages/BoatOrderPage'
 import BoatImportPage from '@/pages/BoatImportPage'
+import ShopOrdersPage from '@/pages/ShopOrdersPage'
+import ShopOrderPage from '@/pages/ShopOrderPage'
 import CallsJournalPage from '@/pages/CallsJournalPage'
 import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
 import MasterPage from '@/pages/MasterPage'
@@ -278,6 +280,24 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <BoatImportPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Orders from the runferry.ua shop - owner and director (role-gated inside) */}
+      <Route
+        path="/shop-orders"
+        element={
+          <AuthenticatedRoute>
+            <ShopOrdersPage />
+          </AuthenticatedRoute>
+        }
+      />
+      <Route
+        path="/shop-orders/:id"
+        element={
+          <AuthenticatedRoute>
+            <ShopOrderPage />
           </AuthenticatedRoute>
         }
       />

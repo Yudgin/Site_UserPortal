@@ -50,6 +50,7 @@ import {
   Memory as FirmwareMenuIcon,
   LocalShipping as ShippingIcon,
   Sailing as BoatSalesIcon,
+  Storefront as ShopOrdersIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
 } from '@mui/icons-material'
@@ -124,6 +125,10 @@ export default function Layout() {
     nav.push({ group: 'Сервіс', icon: <InboxIcon />, items })
   }
 
+  // Заказы с сайта: отдельным пунктом, а не в группе, чтобы дойти одним нажатием. Директор заменяет владельца: накладные и отметки.
+  const shopOrdersItem: NavItem = { text: 'Замовлення з сайту', icon: <ShopOrdersIcon />, path: '/shop-orders' }
+  if (user?.role !== 'developer' && (access.role === 'owner' || access.role === 'director')) nav.push(shopOrdersItem)
+
   // Оператор дзвінків: единственный служебный раздел — доска звонков.
   if (user?.role !== 'developer' && access.isOperator) {
     nav.push({ text: 'Дзвінки', icon: <InboxIcon />, path: '/calls' })
@@ -132,6 +137,7 @@ export default function Layout() {
   // Разделы для владельца — сгруппированы, чтобы меню не было длинной простынёй.
   if (user?.role === 'developer') {
     nav.push({ text: 'Панель власника', icon: <OwnerDashIcon />, path: '/owner' })
+    nav.push(shopOrdersItem)
     nav.push({ group: 'Заявки та сервіс', icon: <InboxIcon />, items: [
       { text: 'Обращения', icon: <InboxIcon />, path: '/manager-inbox' },
       { text: 'Заявки', icon: <RequestIcon />, path: '/service-requests' },

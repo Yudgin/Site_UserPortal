@@ -28,6 +28,7 @@ const statusChip = (s: string) => {
   if (s === 'paid') return <Chip size="small" color="success" variant="outlined" label="оплачено" />
   if (s === 'FAILURE') return <Chip size="small" color="error" variant="outlined" label="помилка" />
   if (s === 'EXPIRED') return <Chip size="small" color="error" variant="outlined" label="протерміновано" />
+  if (s === 'removed') return <Chip size="small" variant="outlined" label="знято" />
   if (s === 'pending' || s === 'WAITING_FOR_CLIENT' || s === 'WAITING_FOR_STORE_CONFIRM') return <Chip size="small" color="warning" variant="outlined" label={s === 'pending' ? 'очікує' : 'очікує банк'} />
   return <Chip size="small" variant="outlined" label={s} />
 }
