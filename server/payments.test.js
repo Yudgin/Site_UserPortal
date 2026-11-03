@@ -892,11 +892,13 @@ test('сверка: чек CREATED со статусом ERROR пишется, �
 
 // ---------- остальные маршруты оплат ----------
 
-test('повторный чек /refiscalize: права, состояния, ответ; подпись mono-acquire пока «частинами»', async (t) => {
+test('повторный чек /refiscalize: права, состояния, ответ, подпись по провайдеру', async (t) => {
   const a = await mount(t, {
     ...repairSeed(),
     'payments/m': payment({ orderId: 'm', status: 'paid', receiptStatus: 'error' }),
     'payments/l': payment({ orderId: 'l', provider: 'liqpay', status: 'paid', receiptStatus: 'error' }),
+    'payments/c': payment({ orderId: 'c', provider: 'mono-chast', status: 'paid', receiptStatus: 'error' }),
+    'payments/old': payment({ orderId: 'old', provider: undefined, status: 'paid', receiptStatus: 'error' }),
     'payments/np': payment({ orderId: 'np' }),
     'payments/done': payment({ orderId: 'done', status: 'paid', receiptId: 'r-1' }),
   })
@@ -910,11 +912,14 @@ test('повторный чек /refiscalize: права, состояния, о
 
   const r = await a.send('POST', '/api/pay/m/refiscalize', {}, ADMIN)
   assert.deepEqual(r.json, { success: true, data: { receiptStatus: 'DONE', taxUrl: 'https://check.example/1', receiptId: receiptUuid('m') } })
-  // Эту подпись исправит шаг P2 (D7): там тест меняется вместе с поведением.
-  assert.equal(sells()[0].body.payments[0].label, 'Оплата частинами (monobank)')
+  assert.equal(sells()[0].body.payments[0].label, LABEL)
 
   await a.send('POST', '/api/pay/l/refiscalize', {}, ADMIN)
   assert.equal(sells()[1].body.payments[0].label, 'Оплата частинами (LiqPay)')
+  await a.send('POST', '/api/pay/c/refiscalize', {}, ADMIN)
+  assert.equal(sells()[2].body.payments[0].label, 'Оплата частинами (monobank)')
+  await a.send('POST', '/api/pay/old/refiscalize', {}, ADMIN)
+  assert.equal(sells()[3].body.payments[0].label, 'Оплата частинами (monobank)', 'документ без провайдера как раньше')
 })
 
 test('статус для опроса: только статус, чек и ссылка; 404 на неизвестный id', async (t) => {
@@ -951,6 +956,110 @@ test('без базы маршруты отвечают 503, колбэк мол
   assert.deepEqual((await a.send('POST', '/api/pay/reconcile', {}, ADMIN)).json, { success: true, data: { checked: 0 } })
   await a.postHook(ok())
   assert.equal(net.calls.length, 0)
+})
+
+// ---------- подпись оплаты на документе ----------
+
+const SHOP_LABEL = 'Інтернет еквайринг'
+const receiptLabels = () => sells().map((c) => c.body.payments[0].label)
+
+test('подпись оплаты: createPayment пишет её на документ, банку она не уходит, без неё поля нет', async (t) => {
+  const a = await mount(t)
+  const args = { fopId: 'fop-a', amount: 1500.5, goods: GOODS, method: 'mono-acquire', description: 'Тест', resultUrl: RESULT_URL }
+  const plain = await a.api.createPayment(args)
+  const labelled = await a.api.createPayment({ ...args, paymentLabel: SHOP_LABEL })
+  const empty = await a.api.createPayment({ ...args, paymentLabel: '' })
+  const doc = (r) => a.db.get(`payments/${r.data.orderId}`)
+  assert.equal(doc(labelled).paymentLabel, SHOP_LABEL)
+  assert.equal('paymentLabel' in doc(plain), false)
+  assert.equal('paymentLabel' in doc(empty), false)
+
+  const [first, second] = invoices().map((c) => ({ ...c.body, merchantPaymInfo: { ...c.body.merchantPaymInfo, reference: 'x' } }))
+  assert.deepEqual(second, first, 'тело счёта с подписью и без неё одно и то же')
+  assert.deepEqual(labelled.data, { orderId: labelled.data.orderId, provider: 'mono-acquire', pageUrl: 'https://pay.example/inv-2' })
+})
+
+test('подпись оплаты: первый чек и все повторы магазина выходят с одной подписью и одним id', async (t) => {
+  const a = await mount(t)
+  const r = await a.api.createPayment({ fopId: 'fop-a', amount: 1500.5, goods: GOODS, method: 'mono-acquire', description: 'Тест', paymentLabel: SHOP_LABEL })
+  const { orderId } = r.data
+  const paid = ok({ invoiceId: a.db.get(`payments/${orderId}`).providerOrderId, reference: orderId })
+
+  const sellDone = net.on.sell
+  net.on.sell = () => { throw httpErr(422, { message: 'Bad goods' }) }
+  await a.hook(paid)
+  assert.equal(a.db.get(`payments/${orderId}`).receiptStatus, 'error')
+  await a.hook(paid)
+  await a.send('POST', '/api/pay/reconcile', {}, ADMIN)
+  assert.equal(a.db.get(`payments/${orderId}`).receiptStatus, 'error')
+
+  net.on.sell = sellDone
+  const retried = await a.send('POST', `/api/pay/${orderId}/refiscalize`, {}, ADMIN)
+  assert.equal(retried.json.data.receiptStatus, 'DONE')
+  assert.deepEqual(receiptLabels(), [SHOP_LABEL, SHOP_LABEL, SHOP_LABEL, SHOP_LABEL])
+  assert.deepEqual(sells().map((c) => c.body.id), Array(4).fill(receiptUuid(orderId)))
+  assert.equal(a.db.get(`payments/${orderId}`).paymentLabel, SHOP_LABEL, 'подпись остаётся на документе')
+})
+
+test('подпись оплаты: чек из колбэка и из сверки по pending берёт подпись документа, остальное тело прежнее', async (t) => {
+  const a = await mount(t, paySeed({ paymentLabel: SHOP_LABEL }))
+  await a.hook(ok())
+  assert.deepEqual(sells()[0].body, sellBody('pay-1', SHOP_LABEL))
+
+  const b = await mount(t, paySeed({ paymentLabel: SHOP_LABEL }))
+  net.on.invoiceStatus = (invoiceId) => ({ invoiceId, status: 'success', amount: 150050 })
+  await b.send('POST', '/api/pay/reconcile', {}, ADMIN)
+  assert.deepEqual(sells()[0].body, sellBody('pay-1', SHOP_LABEL))
+})
+
+test('подпись оплаты: на документе важнее подписи по провайдеру, в сверке и в /refiscalize', async (t) => {
+  const paid = (id, provider, over = {}) => payment({ orderId: id, provider, status: 'paid', paymentLabel: SHOP_LABEL, providerOrderId: `inv-${id}`, ...over })
+  const a = await mount(t, {
+    ...repairSeed(),
+    'payments/m': paid('m', 'mono-acquire', { receiptStatus: 'error' }),
+    'payments/l': paid('l', 'liqpay', { receiptStatus: 'error' }),
+    'payments/c': paid('c', 'mono-chast', { receiptStatus: 'error' }),
+    'payments/rm': paid('rm', 'mono-acquire'),
+    'payments/rl': paid('rl', 'liqpay'),
+    'payments/rc': paid('rc', 'mono-chast'),
+  })
+  await a.send('POST', '/api/pay/reconcile', {}, ADMIN)
+  assert.deepEqual(receiptLabels(), [SHOP_LABEL, SHOP_LABEL, SHOP_LABEL])
+  for (const id of ['rm', 'rl', 'rc']) await a.send('POST', `/api/pay/${id}/refiscalize`, {}, ADMIN)
+  assert.deepEqual(receiptLabels(), Array(6).fill(SHOP_LABEL))
+})
+
+test('подпись оплаты: fiscalize берёт подпись документа, переданная нужна только без неё', async (t) => {
+  const a = await mount(t, {
+    ...repairSeed(),
+    'payments/own': payment({ orderId: 'own', status: 'paid', paymentLabel: SHOP_LABEL }),
+    'payments/none': payment({ orderId: 'none', status: 'paid' }),
+  })
+  await a.api.fiscalize(await a.api.loadOrder('own'), 'Підпис тесту')
+  await a.api.fiscalize(await a.api.loadOrder('none'), 'Підпис тесту')
+  assert.deepEqual(receiptLabels(), [SHOP_LABEL, 'Підпис тесту'])
+})
+
+test('подпись оплаты из тела запроса не принимается: /api/pay/create, смета, заказ лодки', async (t) => {
+  const boat = { status: 'new', total: 900, clientPhone: '+380000000000', lines: [{ label: 'Кораблик', price: 900, qty: 1 }] }
+  const a = await mount(t, { ...repairSeed(), 'boatOrders/bo-1': boat })
+  const paymentLabel = 'Чужа підпис'
+  const requests = [
+    ['/api/pay/create', { fopId: 'fop-a', amount: 1500.5, goods: GOODS, method: 'mono-acquire', paymentLabel }, ADMIN],
+    ['/api/estimates/pay', { estimateId: 'est-1', method: 'mono-acquire', paymentLabel }, {}],
+    ['/api/boat-orders/pay', { boatOrderId: 'bo-1', fopId: 'fop-a', method: 'mono-acquire', paymentLabel }, ADMIN],
+  ]
+  for (const [path, body, headers] of requests) {
+    const r = await a.send('POST', path, body, headers)
+    assert.equal(r.status, 200, path)
+    const { orderId } = r.json.data
+    const doc = a.db.get(`payments/${orderId}`)
+    assert.equal('paymentLabel' in doc, false, path)
+    await a.hook(ok({ invoiceId: doc.providerOrderId, reference: orderId }))
+    assert.equal(sells().at(-1).body.payments[0].label, LABEL, path)
+    assert.equal(sells().at(-1).body.id, receiptUuid(orderId), path)
+  }
+  assert.equal(sells().length, 3)
 })
 
 // ---------- подмена модулей, помощники для магазина, ФОП мимо кэша ----------

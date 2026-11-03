@@ -52,6 +52,9 @@ const receiptUuidFor = (orderId) => {
   return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`
 }
 
+// Подпись оплаты в повторном чеке для документов без своей paymentLabel (ремонты, заказы лодок, старые оплаты).
+const labelByProvider = (o) => (o.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : o.provider === 'mono-acquire' ? 'Оплата карткою (monobank)' : 'Оплата частинами (monobank)')
+
 export function registerPayments(app, deps) {
   const { adminDb, mono = monoAcquire, cbx = checkbox } = deps
   const PUBLIC = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '')
@@ -190,6 +193,7 @@ export function registerPayments(app, deps) {
   }
 
   // ЕДИНЫЙ модуль фискализации: чек выбивает ФОП из order.fopId (идемпотентно + атомарный claim).
+  // Подпись с документа оплаты важнее переданной: первый чек и все повторы выходят с одной подписью.
   const fiscalize = async (order, paymentLabel) => {
     if (!order || order.receiptId) return // уже выбит
     const fop = await resolveFop(order.fopId)
@@ -206,7 +210,7 @@ export function registerPayments(app, deps) {
     try {
       const res = await cbx.sellReceipt(fop, {
         goods: order.goods,
-        paymentLabel,
+        paymentLabel: order.paymentLabel || paymentLabel,
         // Checkbox требует body.id строго в формате uuid («Невірне значення uuid» на
         // rcpt-<orderId>). Детерминированно выводим uuid из orderId (sha256 → форма v4):
         // идемпотентность у Checkbox сохраняется, формат валиден.
@@ -244,7 +248,7 @@ export function registerPayments(app, deps) {
   // Ядро создания оплаты (переиспользуется HTTP-роутом и оплатой из сметы).
   // Возвращает { ok:true, data } или { ok:false, status, code, message }. Деньги — server-authoritative:
   // amount обязан точно совпадать с суммой позиций (в копейках), иначе чек и списание разойдутся.
-  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId, serviceRequestId, boatOrderId }) => {
+  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId, serviceRequestId, boatOrderId, paymentLabel }) => {
     const fop = getFop(fopId)
     if (!fop) return { ok: false, status: 400, code: 'BAD_FOP', message: 'Невідомий ФОП' }
     // Новую оплату НЕ принимаем на выключенный ФОП (но getFop его резолвит для старых заказов).
@@ -266,6 +270,7 @@ export function registerPayments(app, deps) {
       ...(deliveryEmail ? { deliveryEmail } : {}), ...(estimateId ? { estimateId: String(estimateId) } : {}),
       ...(serviceRequestId ? { serviceRequestId: String(serviceRequestId) } : {}),
       ...(boatOrderId ? { boatOrderId: String(boatOrderId) } : {}),
+      ...(paymentLabel ? { paymentLabel: String(paymentLabel) } : {}),
     }
 
     if (method.startsWith('liqpay')) {
@@ -329,7 +334,9 @@ export function registerPayments(app, deps) {
     if (!adminDb) return res.status(503).json({ success: false, error: { code: 'NO_DB', message: 'Firestore не настроен' } })
     if (!hasAnyFop()) return res.status(503).json({ success: false, error: { code: 'NO_FOPS', message: 'ФОП не настроены (FOPS_CONFIG)' } })
     try {
-      const r = await createPayment(req.body || {})
+      // Сюда идёт всё тело, а подпись в чеке телом запроса не задаётся.
+      const { paymentLabel: _label, ...body } = req.body || {}
+      const r = await createPayment(body)
       if (!r.ok) return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
       return res.json({ success: true, data: r.data })
     } catch (e) {
@@ -850,8 +857,7 @@ export function registerPayments(app, deps) {
         const o = doc.data()
         if (o.status !== 'paid' || o.receiptId) continue
         checked++
-        const lbl = o.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : o.provider === 'mono-acquire' ? 'Оплата карткою (monobank)' : 'Оплата частинами (monobank)'
-        await fiscalize(o, lbl)
+        await fiscalize(o, labelByProvider(o))
       }
     } catch (e) { console.error('reconcile failed query:', e.message) }
     // 2б) чек создан (CREATED), но фискальный код/ссылка ДПС ещё не дописаны — опросить Checkbox.
@@ -945,8 +951,7 @@ export function registerPayments(app, deps) {
       if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Оплату не знайдено' } })
       if (order.receiptId) return res.status(409).json({ success: false, error: { code: 'ALREADY_FISCAL', message: 'Чек вже виписано' } })
       if (order.status !== 'paid') return res.status(409).json({ success: false, error: { code: 'NOT_PAID', message: 'Оплата не завершена' } })
-      const label = order.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : 'Оплата частинами (monobank)'
-      await fiscalize(order, label)
+      await fiscalize(order, labelByProvider(order))
       const after = await loadOrder(String(req.params.orderId))
       return res.json({ success: true, data: { receiptStatus: after?.receiptStatus || null, taxUrl: after?.taxUrl || null, receiptId: after?.receiptId || null } })
     } catch (e) {
