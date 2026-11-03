@@ -1262,7 +1262,7 @@ const paymentsApi = registerPayments(app, { adminDb })
 const shopHooks = createShopPaymentHooks({ adminDb, payments: paymentsApi, siteUrl: SITE_URL })
 paymentsApi.setShopHooks(shopHooks)
 // Магазин на runferry.ua: /api/shop/* для сервера сайта по токену x-shop-token (Secret Manager shop-site-token), без токена 503.
-registerShopOrders(app, { adminDb, npRequest, hooks: shopHooks, siteUrl: SITE_URL })
+registerShopOrders(app, { adminDb, npRequest, hooks: shopHooks, payments: paymentsApi, siteUrl: SITE_URL })
 // Управление ФОПами (владелец): мета в Firestore, секреты write-only (fopSecrets, backend-only).
 registerFopsAdmin(app, { adminDb, refreshFops })
 // Создание ТТН Новой Почты (InternetDocument.save) по шаблону: власник — будь-який шаблон; директор із

@@ -802,7 +802,7 @@ test('НП: лимит по умолчанию 300 в минуту и не за�
 
 test('index.js: маршруты до json-server, с настоящими npRequest и хуками оплат', () => {
   const src = readFileSync(new URL('./index.js', import.meta.url), 'utf8')
-  const register = src.indexOf('registerShopOrders(app, { adminDb, npRequest, hooks: shopHooks, siteUrl: SITE_URL })')
+  const register = src.indexOf('registerShopOrders(app, { adminDb, npRequest, hooks: shopHooks, payments: paymentsApi, siteUrl: SITE_URL })')
   assert.ok(register > 0)
   assert.ok(register < src.indexOf('jsonServer.router('))
   assert.ok(src.indexOf('const npRequest = ') < register)

@@ -8,6 +8,7 @@ import {
   shopPhone, maskPhone, validateOrderInput, orderFingerprint, orderIdFromKey, phoneKeyOf, newStatusToken, phoneCodeHash,
   canTransition, transitionPatch, sellerFilled, publicSeller, npMissing, codPairAllowed, shopSellable,
   pricedItem, skuOnSale, buildCatalogFeed, npOutcome,
+  orderNoFromId, shopLimit, claimFresh, acceptsOrders, cardOpenFor, buildOrderDoc, invoiceView, orderPublicView,
 } from './shopCore.js'
 import { findMaterial } from './siteCatalog.js'
 import { npDateToIso as npDateOriginal } from './incomingRefresh.js'
@@ -882,4 +883,190 @@ test('D13: неактивный ФОП с реквизитами: продаве
   assert.equal(shopSellable(fop, 'card', {}, CALLBACK).ok, false)
   assert.deepEqual(shopSellable(fop, 'card', {}, CALLBACK).missing, ['active'])
   assert.ok(publicSeller(fop))
+})
+
+// ---------- заказ: номер, пределы, документ ----------
+
+test('номер заказа: RF и 6 знаков без похожих на цифры букв; один id даёт один номер, номер не содержит id', () => {
+  const ids = Array.from({ length: 500 }, (_, i) => orderIdFromKey(`key-${i}-000000000000`))
+  const numbers = ids.map(orderNoFromId)
+  for (const no of numbers) assert.match(no, /^RF-[2-9A-HJ-NP-Z]{6}$/)
+  assert.equal(orderNoFromId(ids[0]), numbers[0])
+  assert.ok(new Set(numbers).size >= 499, 'совпадений почти нет')
+  assert.ok(!ids[0].toUpperCase().includes(numbers[0].slice(3)))
+  assert.equal(new Set(numbers.join('').replace(/RF-/g, '')).size, 32, 'все знаки алфавита встречаются')
+})
+
+test('предел: своё значение, ноль, умолчания и мусор', () => {
+  assert.equal(shopLimit({ limits: { unpaidPerDay: 7 } }, 'unpaidPerDay'), 7)
+  assert.equal(shopLimit({ limits: { unpaidPerDay: 0 } }, 'unpaidPerDay'), 0)
+  for (const v of [undefined, null, '7', -1, 1.5, NaN]) assert.equal(shopLimit({ limits: { unpaidPerDay: v } }, 'unpaidPerDay'), 40, String(v))
+  assert.equal(shopLimit(null, 'payAttemptsPerOrder'), 5)
+  assert.equal(shopLimit({}, 'payAttemptsPerOrder'), 5)
+})
+
+test('захват живёт 3 минуты', () => {
+  const now = Date.parse('2026-11-03T12:00:00Z')
+  assert.equal(claimFresh('2026-11-03T11:57:00.001Z', now), true)
+  assert.equal(claimFresh('2026-11-03T11:57:00.000Z', now), false)
+  assert.equal(claimFresh(null, now), false)
+  assert.equal(claimFresh('', now), false)
+  assert.equal(claimFresh('мусор', now), false)
+})
+
+test('приём заказов и вход на страницу банка: только hidden и live, карта строго true, артикул в продаже', () => {
+  const cfg = (over = {}) => ({ mode: 'live', methods: { card: true }, skus: { A: { enabled: true, inStock: true, stock: null } }, ...over })
+  for (const mode of ['hidden', 'live']) assert.equal(acceptsOrders({ mode }), true, mode)
+  for (const mode of ['off', 'prices', 'LIVE', '', undefined]) assert.equal(acceptsOrders({ mode }), false, String(mode))
+  assert.equal(acceptsOrders(null), false)
+  assert.equal(cardOpenFor(cfg(), 'A'), true)
+  assert.equal(cardOpenFor(cfg({ mode: 'hidden' }), 'A'), true)
+  assert.equal(cardOpenFor(cfg({ mode: 'prices' }), 'A'), false)
+  assert.equal(cardOpenFor(cfg({ methods: { card: 'true' } }), 'A'), false)
+  assert.equal(cardOpenFor(cfg({ methods: undefined }), 'A'), false)
+  assert.equal(cardOpenFor(cfg(), 'B'), false)
+  assert.equal(cardOpenFor(cfg({ skus: undefined }), 'A'), false)
+  assert.equal(cardOpenFor(cfg({ skus: { A: { enabled: true, inStock: true, stock: 0 } } }), 'A'), false)
+  assert.equal(cardOpenFor(null, 'A'), false)
+})
+
+const orderValue = (over = {}) => validateOrderInput(orderBody(over)).value
+const orderDoc = (over = {}, { addressVerified = true, value = orderValue() } = {}) => ({
+  ...buildOrderDoc({
+    id: 'so-1', value, fingerprint: 'fp', item: { titleUk: 'Кришка', priceUah: 800 }, fop: readyFop({ id: 'f2' }), statusToken: 'T'.repeat(22), addressVerified, at: '2026-11-03T12:00:00.000Z',
+  }),
+  ...over,
+})
+
+test('документ заказа: только разобранные поля, сумма из прайса, захват счёта стоит, история начата', () => {
+  const body = orderBody({ total: 1, price: 1, fopId: 'evil', statusToken: 'evil', paidAt: 'x', state: 'paid' })
+  const d = orderDoc({}, { value: validateOrderInput(body).value })
+  assert.equal(d.total, 800)
+  assert.equal(d.fopId, 'f2')
+  assert.equal(d.statusToken, 'T'.repeat(22))
+  assert.equal(d.state, 'awaiting_payment')
+  assert.equal(d.paidAt, undefined)
+  assert.equal(d.orderNo, orderNoFromId('so-1'))
+  assert.equal(d.qty, 1)
+  assert.equal(d.method, 'card')
+  assert.equal(d.cancelReason, null)
+  assert.equal(d.clientName, 'Шевченко Тарас Григорович')
+  assert.equal(d.phoneKey, phoneKeyOf('+380671234567'))
+  assert.deepEqual(d.seller, publicSeller(readyFop({ id: 'f2' })))
+  assert.deepEqual(d.consent, { offerVersion: '2026-11-03', acceptedAt: '2026-11-03T12:00:00.000Z', personalData: true })
+  assert.deepEqual(d.payment, { paymentId: null, invoiceId: null, pageUrl: null, status: null, createdAt: null, expiresAt: null, initiatedAt: '2026-11-03T12:00:00.000Z', lastBankCheckAt: null })
+  assert.deepEqual(d.paymentIds, [])
+  assert.equal(d.payAttempts, 0)
+  assert.deepEqual(d.alerts, {})
+  assert.deepEqual(d.sms, {})
+  assert.deepEqual(d.history, [{ at: '2026-11-03T12:00:00.000Z', from: null, to: 'awaiting_payment', by: 'site' }])
+  assert.equal(d.createdAt, '2026-11-03T12:00:00.000Z')
+  // В документе нет undefined: Firestore его бы не принял без ignoreUndefinedProperties.
+  assert.deepEqual(JSON.parse(JSON.stringify(d)), d)
+})
+
+test('документ заказа: без отчества имя без хвостового пробела; адрес не проверен', () => {
+  const d = orderDoc({}, { addressVerified: false, value: orderValue({ middleName: '', email: '' }) })
+  assert.equal(d.clientName, 'Шевченко Тарас')
+  assert.equal(d.middleName, '')
+  assert.equal(d.email, '')
+  assert.equal(d.addressVerified, false)
+})
+
+// ---------- заказ: счёт ----------
+
+const NOW = Date.parse('2026-11-03T12:00:00Z')
+const LATER = '2026-11-03T13:00:00.000Z'
+const invoiceOrder = (payment = {}) => ({ payment: { paymentId: 'p1', pageUrl: 'https://pay/1', status: 'created', expiresAt: LATER, initiatedAt: null, ...payment } })
+
+test('счёт: таблица состояний', () => {
+  const cases = [
+    ['нет счёта и захвата', { paymentId: null, pageUrl: null, expiresAt: null }, null, { creating: false, closed: true, live: false, checking: false }],
+    ['создаётся первый', { paymentId: null, pageUrl: null, expiresAt: null, initiatedAt: '2026-11-03T11:59:00Z' }, null, { creating: true, closed: true, live: false, checking: true }],
+    ['захват устарел', { paymentId: null, pageUrl: null, expiresAt: null, initiatedAt: '2026-11-03T11:50:00Z' }, null, { creating: false, closed: true, live: false, checking: false }],
+    ['живой', {}, { status: 'pending' }, { creating: false, closed: false, live: true, checking: false }],
+    ['банк ещё не отвечал', { status: null }, { status: 'pending' }, { creating: false, closed: false, live: true, checking: false }],
+    ['срок вышел', { expiresAt: '2026-11-03T12:00:00.000Z' }, { status: 'pending' }, { creating: false, closed: false, live: false, checking: true }],
+    ['срока нет', { expiresAt: null }, { status: 'pending' }, { creating: false, closed: false, live: false, checking: true }],
+    ['нет ссылки', { pageUrl: null }, { status: 'pending' }, { creating: false, closed: false, live: false, checking: true }],
+    ['processing', { status: 'processing' }, { status: 'pending' }, { creating: false, closed: false, live: false, checking: true }],
+    ['hold', { status: 'hold' }, { status: 'pending' }, { creating: false, closed: false, live: false, checking: true }],
+    ['банк сказал success', { status: 'success' }, { status: 'pending' }, { creating: false, closed: false, live: false, checking: true }],
+    ['банк сказал reversed', { status: 'reversed' }, { status: 'pending' }, { creating: false, closed: false, live: false, checking: true }],
+    ['failure', {}, { status: 'failure' }, { creating: false, closed: true, live: false, checking: false }],
+    ['expired', {}, { status: 'expired' }, { creating: false, closed: true, live: false, checking: false }],
+    ['removed', {}, { status: 'removed' }, { creating: false, closed: true, live: false, checking: false }],
+    ['paid, заказ ещё не обновлён', {}, { status: 'paid' }, { creating: false, closed: false, live: false, checking: true }],
+    ['reversed в оплате', {}, { status: 'reversed' }, { creating: false, closed: false, live: false, checking: true }],
+    ['документа нет', {}, null, { creating: false, closed: false, live: false, checking: true }],
+  ]
+  for (const [name, payment, doc, expected] of cases) assert.deepEqual(invoiceView(invoiceOrder(payment), doc, NOW), expected, name)
+  assert.deepEqual(invoiceView({}, null, NOW), { creating: false, closed: true, live: false, checking: false }, 'заказ без блока payment')
+})
+
+// ---------- заказ: ответ статуса ----------
+
+test('статус: блок оплаты зависит от состояния, открытых продаж и числа попыток', () => {
+  const view = (order, opts) => orderPublicView(orderDoc(order), { now: NOW, ...opts }).payment
+  const live = { payment: invoiceOrder().payment }
+  assert.deepEqual(view(live, { payment: { status: 'pending' }, open: true }), { payUrl: 'https://pay/1', canRetry: false, checking: false })
+  assert.deepEqual(view(live, { payment: { status: 'pending' }, open: false }), { payUrl: null, canRetry: false, checking: false })
+  assert.deepEqual(view(live, { payment: { status: 'expired' }, open: true }), { payUrl: null, canRetry: true, checking: false })
+  assert.deepEqual(view(live, { payment: { status: 'expired' }, open: false }), { payUrl: null, canRetry: false, checking: false })
+  assert.deepEqual(view({ ...live, payAttempts: 4 }, { payment: { status: 'expired' }, open: true }), { payUrl: null, canRetry: true, checking: false })
+  assert.deepEqual(view({ ...live, payAttempts: 5 }, { payment: { status: 'expired' }, open: true }), { payUrl: null, canRetry: false, checking: false })
+  assert.deepEqual(view({ ...live, payAttempts: 2 }, { payment: { status: 'expired' }, open: true, maxPayAttempts: 2 }), { payUrl: null, canRetry: false, checking: false })
+  for (const state of ['paid', 'cancelled', 'expired', 'shipped', 'payment_review']) {
+    assert.deepEqual(view({ ...live, state }, { payment: { status: 'pending' }, open: true }), { payUrl: null, canRetry: false, checking: false }, state)
+  }
+})
+
+test('статус: чек', () => {
+  const view = (paid, order = {}) => orderPublicView(orderDoc({ state: 'paid', paidPaymentId: 'p1', ...order }), { paidPayment: paid, now: NOW }).receipt
+  assert.deepEqual(orderPublicView(orderDoc(), { now: NOW }).receipt, { status: 'none', url: null })
+  assert.deepEqual(view(null), { status: 'none', url: null })
+  assert.deepEqual(view({ status: 'paid' }), { status: 'pending', url: null })
+  assert.deepEqual(view({ status: 'paid', receiptStatus: 'CREATED' }), { status: 'pending', url: null })
+  assert.deepEqual(view({ status: 'paid', receiptStatus: 'error' }), { status: 'pending', url: null }, 'error повторяет сверка')
+  assert.deepEqual(view({ status: 'paid', receiptStatus: 'DONE', taxUrl: 'https://t/1' }), { status: 'ready', url: 'https://t/1' })
+  for (const receiptStatus of ['ERROR', 'CANCELLED', 'no-checkbox']) assert.deepEqual(view({ status: 'paid', receiptStatus }), { status: 'failed', url: null }, receiptStatus)
+  assert.deepEqual(view({ status: 'paid' }, { receipt: { status: 'failed' } }), { status: 'failed', url: null })
+  assert.deepEqual(view({ status: 'paid', receiptStatus: 'amount-mismatch' }), { status: 'none', url: null })
+  assert.deepEqual(view({ status: 'reversed' }), { status: 'none', url: null })
+  assert.deepEqual(view({ status: 'reversed', taxUrl: 'https://t/1' }), { status: 'ready', url: 'https://t/1' }, 'выданный чек остаётся у покупателя')
+})
+
+test('статус: доставка: только свои стадии', () => {
+  const view = (order) => orderPublicView(orderDoc(order), { now: NOW }).delivery
+  assert.deepEqual(view({}), { ttn: null, trackUrl: null, stage: 'none' })
+  const ttn = { ttn: 20450000000000, state: 'shipped', shippedAt: '2026-11-03T10:00:00Z' }
+  assert.deepEqual(view(ttn), { ttn: '20450000000000', trackUrl: 'https://novaposhta.ua/tracking/?cargo_number=20450000000000', stage: 'created' })
+  assert.equal(view({ ...ttn, npDelivery: { code: '1' } }).stage, 'created', 'код 1: посылку ещё не сдали')
+  assert.equal(view({ ...ttn, npDelivery: { code: '4' } }).stage, 'moving')
+  assert.equal(view({ ...ttn, npDelivery: { code: '3' } }).stage, 'created')
+  assert.equal(view({ ...ttn, state: 'delivered', npDelivery: { code: '9' } }).stage, 'received')
+  assert.equal(view({ ...ttn, state: 'refused', npDelivery: { code: '103' } }).stage, 'refused')
+  assert.equal(view({ ...ttn, state: 'returned' }).stage, 'refused')
+})
+
+test('статус: ровно условленные поля, данных покупателя и служебного нет; телефон в маске и исчезает со стиранием', () => {
+  const full = orderDoc({
+    state: 'payment_review', payment: invoiceOrder().payment, paymentIds: ['p1'], paidPaymentId: 'p1', paidAt: 'x', paidSource: 'webhook',
+    alerts: { x: { text: 'алерт' } }, cod: { ettn: { id: 'e1', rawError: 'сире' } }, phoneCode: { hash: 'hash-1' }, npFopId: 'f2', npDocRef: 'doc-ref', ttnHistory: ['old'], ttnError: 'unknown',
+    amountConfirmed: { by: 'owner@x', at: 'y', amount: 1 }, partialRefund: { amount: 1, at: 'z' }, sms: { paid: { status: 'sent' } },
+  }, { value: orderValue({ cityName: 'Назвамістаа' }) })
+  const view = orderPublicView(full, { paidPayment: { status: 'paid', fiscalCode: 'FC-77', receiptError: 'помилка-77', receiptId: 'r-77', providerOrderId: 'inv-77', fopId: 'f2' }, now: NOW })
+  assert.deepEqual(Object.keys(view), ['orderNo', 'state', 'cancelReason', 'method', 'item', 'seller', 'offerVersion', 'payment', 'receipt', 'delivery', 'phoneConfirm'])
+  assert.deepEqual(Object.keys(view.seller), ['name', 'ipn', 'address', 'email', 'phone'])
+  const text = JSON.stringify(view)
+  for (const word of [
+    'Шевченко', 'Тарас', 'Григорович', '380671234567', 'buyer@example.com', 'Назвамістаа', 'Відділення', 'Львів', REF_A, REF_B, 'T'.repeat(22), 'fp"', '"f2"', 'p1', 'FC-77', 'помилка-77', 'r-77', 'inv-77',
+    'алерт', 'e1', 'сире', 'hash-1', 'doc-ref', 'owner@x', 'webhook', 'history', 'consent', 'acceptedAt',
+  ]) assert.ok(!text.includes(word), word)
+  assert.deepEqual(view.phoneConfirm, { required: false, phoneMasked: '+380•••••••67', resendInSec: 0, attemptsLeft: 0 })
+  assert.equal(orderPublicView(orderDoc({ state: 'phone_pending' }), { now: NOW }).phoneConfirm.required, true)
+  assert.equal(orderPublicView(orderDoc({ clientPhone: null }), { now: NOW }).phoneConfirm.phoneMasked, '')
+  assert.equal(orderPublicView(orderDoc({ seller: undefined }), { now: NOW }).seller, null)
+  assert.equal(view.cancelReason, null)
+  assert.equal(orderPublicView(orderDoc({ state: 'cancelled', cancelReason: 'superseded' }), { now: NOW }).cancelReason, 'superseded')
 })

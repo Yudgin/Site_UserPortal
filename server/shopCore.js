@@ -94,6 +94,102 @@ export const newStatusToken = () => crypto.randomBytes(16).toString('base64url')
 
 export const phoneCodeHash = (token, code) => sha256(`${token}:${code}`)
 
+// ---------- заказ ----------
+
+const ORDER_NO_ABC = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
+const LIMIT_DEFAULTS = { unpaidPerDay: 40, payAttemptsPerOrder: 5 }
+// Захват создания счёта или накладной считается живым 3 минуты: дольше ни банк, ни НП не отвечают, значит, процесс упал.
+const CLAIM_FRESH_MS = 3 * 60 * 1000
+const NP_TRACK_URL = 'https://novaposhta.ua/tracking/?cargo_number='
+
+// Номер для людей считается из id заказа: повтор запроса даёт тот же номер и счётчик не нужен. Доступа номер не даёт.
+export const orderNoFromId = (id) => {
+  const h = sha256(id)
+  return 'RF-' + Array.from({ length: 6 }, (_, i) => ORDER_NO_ABC[parseInt(h.slice(i * 2, i * 2 + 2), 16) % ORDER_NO_ABC.length]).join('')
+}
+
+export const shopLimit = (cfg, name) => {
+  const v = cfg && cfg.limits && cfg.limits[name]
+  return Number.isInteger(v) && v >= 0 ? v : LIMIT_DEFAULTS[name]
+}
+
+export const claimFresh = (at, now = Date.now()) => !!at && now - Date.parse(at) < CLAIM_FRESH_MS
+
+export const acceptsOrders = (cfg) => !!cfg && (cfg.mode === 'hidden' || cfg.mode === 'live')
+
+// Можно ли сейчас вести покупателя на страницу банка. Гейта ФОП здесь нет: он нужен только новому заказу и новому счёту.
+export const cardOpenFor = (cfg, sku) => acceptsOrders(cfg) && (cfg.methods || {}).card === true && skuOnSale((cfg.skus || {})[sku])
+
+// value из validateOrderInput; item из pricedItem; цена, ФОП и продавец из тела запроса сюда не попадают.
+// Реквизиты продавца замораживаем: страница статуса подтверждает покупателю, у кого он купил, даже если реквизиты потом сменятся.
+export function buildOrderDoc({ id, value: v, fingerprint, item, fop, statusToken, addressVerified, at }) {
+  return {
+    orderNo: orderNoFromId(id), statusToken, idempotencyKey: v.idempotencyKey, fingerprint, state: 'awaiting_payment', method: v.method, cancelReason: null,
+    sku: v.sku, titleUk: item.titleUk, qty: 1, total: item.priceUah, fopId: fop.id, seller: publicSeller(fop), offerVersion: v.offerVersion,
+    consent: { offerVersion: v.offerVersion, acceptedAt: at, personalData: true },
+    lastName: v.lastName, firstName: v.firstName, middleName: v.middleName, clientName: [v.lastName, v.firstName, v.middleName].filter(Boolean).join(' '),
+    clientPhone: v.phone, phoneKey: phoneKeyOf(v.phone), email: v.email,
+    clientCityRef: v.cityRef, clientCityName: v.cityName, clientWarehouseRef: v.warehouseRef, clientWarehouseName: v.warehouseName, addressVerified,
+    payment: { paymentId: null, invoiceId: null, pageUrl: null, status: null, createdAt: null, expiresAt: null, initiatedAt: at, lastBankCheckAt: null },
+    paymentIds: [], payAttempts: 0, receipt: { status: 'none' }, sms: {}, alerts: {},
+    history: [{ at, from: null, to: 'awaiting_payment', by: 'site' }], createdAt: at, updatedAt: at,
+  }
+}
+
+const INVOICE_CLOSED = new Set(['failure', 'expired', 'removed'])
+const BANK_BUSY = new Set(['processing', 'hold', 'success', 'reversed'])
+
+// Текущий счёт заказа. payment это документ payments/{id}, первоисточник; order.payment.status только последний ответ банка на опрос.
+// closed: денег по счёту нет и новый создать можно. Счёт не закрыт и не живой: ждём банк, новый создавать нельзя, прежний могли оплатить.
+export function invoiceView(order, payment, now = Date.now()) {
+  const cur = order.payment || {}
+  const creating = claimFresh(cur.initiatedAt, now)
+  const closed = !cur.paymentId || (!!payment && INVOICE_CLOSED.has(payment.status))
+  const live = !!payment && payment.status === 'pending' && !!cur.pageUrl && now < Date.parse(cur.expiresAt) && !BANK_BUSY.has(cur.status)
+  return { creating, closed, live, checking: creating || (!closed && !live) }
+}
+
+const RECEIPT_FAILED = new Set(['ERROR', 'CANCELLED', 'no-checkbox'])
+const receiptView = (order, paid) => {
+  if (!paid) return { status: 'none', url: null }
+  if (paid.taxUrl) return { status: 'ready', url: paid.taxUrl }
+  if (paid.status === 'reversed' || paid.receiptStatus === 'amount-mismatch') return { status: 'none', url: null }
+  if (RECEIPT_FAILED.has(paid.receiptStatus) || (order.receipt && order.receipt.status === 'failed')) return { status: 'failed', url: null }
+  return { status: 'pending', url: null }
+}
+
+// Наружу только свои стадии, сырой текст статуса НП не отдаём.
+const deliveryView = (order) => {
+  if (!order.ttn) return { ttn: null, trackUrl: null, stage: 'none' }
+  const stage = order.state === 'delivered' ? 'received'
+    : order.state === 'refused' || order.state === 'returned' ? 'refused'
+      : npOutcome(order.npDelivery && order.npDelivery.code, { shippedAt: order.shippedAt }) === 'moving' ? 'moving' : 'created'
+  return { ttn: String(order.ttn), trackUrl: `${NP_TRACK_URL}${order.ttn}`, stage }
+}
+
+// Ответ страницы статуса: перечисляем поля явно, всё остальное из заказа наружу не выходит. Токен, имя, полный телефон, почта,
+// адрес, рефы НП, fopId, id оплат и счетов, журнал, алерты и согласие сюда не попадают. payUrl поневоле содержит номер счёта банка.
+export function orderPublicView(order, { payment = null, paidPayment = null, open = false, maxPayAttempts = LIMIT_DEFAULTS.payAttemptsPerOrder, now = Date.now() } = {}) {
+  const inv = order.state === 'awaiting_payment' ? invoiceView(order, payment, now) : null
+  return {
+    orderNo: order.orderNo,
+    state: order.state,
+    cancelReason: order.cancelReason || null,
+    method: order.method,
+    item: { sku: order.sku, titleUk: order.titleUk, qty: order.qty, totalUah: order.total },
+    seller: order.seller || null,
+    offerVersion: order.offerVersion,
+    payment: {
+      payUrl: inv && inv.live && open ? order.payment.pageUrl : null,
+      canRetry: !!inv && inv.closed && !inv.creating && open && (order.payAttempts || 0) < maxPayAttempts,
+      checking: !!inv && inv.checking,
+    },
+    receipt: receiptView(order, paidPayment),
+    delivery: deliveryView(order),
+    phoneConfirm: { required: order.state === 'phone_pending', phoneMasked: maskPhone(order.clientPhone), resendInSec: 0, attemptsLeft: 0 },
+  }
+}
+
 // ---------- переходы состояний ----------
 
 const NEXT_STATES = {
