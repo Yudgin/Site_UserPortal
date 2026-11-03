@@ -18,7 +18,7 @@ import crypto from 'crypto'
 import axios from 'axios'
 import { getAuth } from 'firebase-admin/auth'
 import { verifyFirebaseStaff } from './adminAuth.js'
-import { getFop, fopHas, listFopsPublic, hasAnyFop } from './fops.js'
+import { getFop, fopHas, listFopsPublic, hasAnyFop, loadFopFresh } from './fops.js'
 import * as liqpay from './liqpay.js'
 import * as monoChast from './monoChast.js'
 import * as monoAcquire from './monoAcquire.js'
@@ -53,7 +53,7 @@ const receiptUuidFor = (orderId) => {
 }
 
 export function registerPayments(app, deps) {
-  const { adminDb } = deps
+  const { adminDb, mono = monoAcquire, cbx = checkbox } = deps
   const PUBLIC = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '')
   const SANDBOX = process.env.PAYMENTS_SANDBOX === 'true'
   const ADMIN_TOKEN = process.env.PAYMENTS_ADMIN_TOKEN || ''
@@ -67,6 +67,18 @@ export function registerPayments(app, deps) {
   const findByProviderOrderId = async (providerOrderId) => {
     const q = await col().where('providerOrderId', '==', String(providerOrderId)).limit(1).get()
     return q.empty ? null : q.docs[0].data()
+  }
+  // FOPS стартует пустым, а refreshFops никто не ждёт: на новом экземпляре ФОП заказа читаем напрямую.
+  // null, если его нет или база не ответила: ошибка здесь не должна обрывать сверку или колбэк.
+  const resolveFop = async (fopId) => {
+    const cached = getFop(fopId)
+    if (cached) return cached
+    try {
+      return await loadFopFresh(adminDb, fopId)
+    } catch (e) {
+      console.error(`payments: ФОП ${fopId} не прочитан:`, e.message)
+      return null
+    }
   }
 
   // Атомарно «застолбить» право выбить чек. true → фискализируем МЫ; false → уже выбит/в процессе.
@@ -180,8 +192,8 @@ export function registerPayments(app, deps) {
   // ЕДИНЫЙ модуль фискализации: чек выбивает ФОП из order.fopId (идемпотентно + атомарный claim).
   const fiscalize = async (order, paymentLabel) => {
     if (!order || order.receiptId) return // уже выбит
-    const fop = getFop(order.fopId)
-    if (!fop) return
+    const fop = await resolveFop(order.fopId)
+    if (!fop) return console.warn(`payments: ⚠️ ФОП ${order.fopId} не загружен, чек не выбит для ${order.orderId}`)
     if (!fopHas(fop, 'checkbox.licenseKey')) {
       await saveOrder({ orderId: order.orderId, receiptStatus: 'no-checkbox' })
       await markEstimatePaid(order, null) // деньги есть, чека не будет (ФОП без ПРРО)
@@ -192,7 +204,7 @@ export function registerPayments(app, deps) {
     const claimed = await claimFiscalization(order.orderId)
     if (!claimed) return // другой колбэк/поток уже фискализирует или чек выбит
     try {
-      const res = await checkbox.sellReceipt(fop, {
+      const res = await cbx.sellReceipt(fop, {
         goods: order.goods,
         paymentLabel,
         // Checkbox требует body.id строго в формате uuid («Невірне значення uuid» на
@@ -241,8 +253,8 @@ export function registerPayments(app, deps) {
     const gErr = validateGoods(goods)
     if (gErr) return { ok: false, status: 400, code: 'BAD_GOODS', message: gErr }
 
-    const amountKop = checkbox.toKop(amount)
-    const goodsKop = checkbox.goodsTotalKop(goods)
+    const amountKop = cbx.toKop(amount)
+    const goodsKop = cbx.goodsTotalKop(goods)
     if (!Number.isFinite(amountKop) || amountKop <= 0) return { ok: false, status: 400, code: 'BAD_AMOUNT', message: 'Невірна сума' }
     if (amountKop !== goodsKop) {
       return { ok: false, status: 400, code: 'AMOUNT_MISMATCH', message: `Сума (${(amountKop / 100).toFixed(2)}) не збігається з позиціями (${(goodsKop / 100).toFixed(2)})` }
@@ -293,7 +305,7 @@ export function registerPayments(app, deps) {
       const lineKop = (priceUah, qty) => Math.round((Math.round(Number(priceUah) * 100) * Math.round((qty || 1) * 1000)) / 1000)
       const basket = goods.map((g) => ({ name: String(g.name), qty: Number(g.qty) || 1, sumKop: lineKop(g.price, Number(g.qty) || 1), code: g.code }))
       const amountKop = basket.reduce((s, b) => s + b.sumKop, 0)
-      const inv = await monoAcquire.createInvoice(fop, {
+      const inv = await mono.createInvoice(fop, {
         amountKop, reference: orderId, destination: description || `Оплата RunFerry #${orderId}`, goods: basket,
         redirectUrl: resultUrl, webHookUrl: PUBLIC ? `${PUBLIC}/api/mono/acquire/callback` : undefined,
       })
@@ -727,8 +739,8 @@ export function registerPayments(app, deps) {
       if (decoded.status !== 'success') return // wait_accept и т.п. — ждём финального success
 
       // Сверка суммы/валюты/песочницы перед выдачей ФИСКАЛЬНОГО чека (защита от рассинхронизации и тестовых денег).
-      const paidKop = checkbox.toKop(decoded.amount)
-      const okAmount = Number.isFinite(paidKop) && paidKop === checkbox.toKop(order.amount)
+      const paidKop = cbx.toKop(decoded.amount)
+      const okAmount = Number.isFinite(paidKop) && paidKop === cbx.toKop(order.amount)
       const okCurrency = !decoded.currency || decoded.currency === 'UAH'
       const okSandbox = SANDBOX || !(decoded.sandbox === 1 || decoded.sandbox === '1' || decoded.sandbox === true)
       if (!okAmount || !okCurrency || !okSandbox) {
@@ -786,8 +798,9 @@ export function registerPayments(app, deps) {
       if (!invoiceId) return
       const order = await findByProviderOrderId(invoiceId)
       if (!order) return console.warn('mono acquire callback: заказ не найден', invoiceId)
-      const fop = getFop(order.fopId)
-      if (!(await monoAcquire.verifyWebhook(fop, req.rawBody, req.get('X-Sign')))) return console.warn('mono acquire callback: неверная подпись', order.orderId)
+      const fop = await resolveFop(order.fopId)
+      if (!fop) return console.warn('mono acquire callback: ФОП не загружен', order.fopId, order.orderId)
+      if (!(await mono.verifyWebhook(fop, req.rawBody, req.get('X-Sign')))) return console.warn('mono acquire callback: неверная подпись', order.orderId)
 
       const status = body.status
       if (status === 'success') {
@@ -851,7 +864,7 @@ export function registerPayments(app, deps) {
         if (!fop) continue
         checked++
         try {
-          const r = await checkbox.getReceipt(fop, o.receiptId)
+          const r = await cbx.getReceipt(fop, o.receiptId)
           if (r.fiscalCode || r.taxUrl || (r.status && r.status !== 'CREATED')) {
             await saveOrder({ orderId: o.orderId, receiptStatus: r.status || o.receiptStatus, fiscalCode: r.fiscalCode, taxUrl: r.taxUrl, receiptError: null })
           }
@@ -890,7 +903,7 @@ export function registerPayments(app, deps) {
         } else if (o.provider === 'mono-acquire' && o.providerOrderId) {
           checked++
           try {
-            const st = await monoAcquire.invoiceStatus(fop, o.providerOrderId)
+            const st = await mono.invoiceStatus(fop, o.providerOrderId)
             const s = st && st.status
             if (s === 'success') {
               await saveOrder({ orderId: o.orderId, status: 'paid', paytype: 'mono-acquire' })
@@ -949,6 +962,8 @@ export function registerPayments(app, deps) {
     const t = setInterval(() => { reconcile().catch((e) => console.error('reconcile loop:', e.message)) }, everyMs)
     if (t.unref) t.unref()
   }
+
+  return { createPayment, loadOrder, saveOrder, notifyOwner, fiscalize, receiptUuidFor }
 }
 
 export default registerPayments
