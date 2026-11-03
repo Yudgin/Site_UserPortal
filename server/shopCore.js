@@ -164,9 +164,9 @@ const receiptView = (order, paid) => {
   return { status: 'pending', url: null }
 }
 
-// Наружу только свои стадии, сырой текст статуса НП не отдаём.
+// Наружу только свои стадии, сырой текст статуса НП не отдаём. Накладная на закрытом заказе покупателю не обещана: её удаляют.
 const deliveryView = (order) => {
-  if (!order.ttn) return { ttn: null, trackUrl: null, stage: 'none' }
+  if (!order.ttn || order.ttnOnClosed) return { ttn: null, trackUrl: null, stage: 'none' }
   const stage = order.state === 'delivered' ? 'received'
     : order.state === 'refused' || order.state === 'returned' ? 'refused'
       : npOutcome(order.npDelivery && order.npDelivery.code, { shippedAt: order.shippedAt }) === 'moving' ? 'moving' : 'created'
@@ -223,9 +223,9 @@ export const canTransition = (order, to) => {
 }
 
 // Что записать при переходе; null, если такого перехода нет. Строка истории как в хуках оплаты (shopPayments.js).
-export function transitionPatch(order, to, { at = new Date().toISOString(), by = null, patch = {} } = {}) {
+export function transitionPatch(order, to, { at = new Date().toISOString(), by = null, patch = {}, note = null } = {}) {
   if (!canTransition(order, to)) return null
-  return { ...patch, state: to, history: [...(order.history || []), { at, from: order.state, to, by }], updatedAt: at }
+  return { ...patch, state: to, history: [...(order.history || []), { at, from: order.state, to, by, ...(note ? { note } : {}) }], updatedAt: at }
 }
 
 // ---------- продавец и гейт ФОП ----------
@@ -252,6 +252,22 @@ export const npMissing = (fop) => {
 
 // Наложка: только эти две пары. Деньги переводом и авточек Checkbox вместе запрещены, пока Checkbox письменно не подтвердит.
 export const codPairAllowed = (kind, receiptMode) => (kind === 'control' && receiptMode === 'ettn') || (kind === 'money' && receiptMode === 'manual')
+
+// Годится ли шаблон для посылки покупателю этого ФОП. Адрес клиента saveInternetDocument подставляет, только если получатель клиент и отделение;
+// без описания сервер написал бы «кораблик». Пустой список: годится.
+export function npTemplateProblems(tpl, fopId) {
+  if (!tpl) return ['missing']
+  const problems = []
+  const check = (ok, name) => { if (!ok) problems.push(name) }
+  check(tpl.active !== false, 'inactive')
+  check(tpl.scenario === 'parts', 'scenario')
+  check(tpl.fopId === fopId, 'fop')
+  check(filled(tpl.description), 'description')
+  check((tpl.senderTarget || 'service') === 'service', 'sender')
+  check((tpl.recipientTarget || 'client') === 'client', 'recipient')
+  check(String(tpl.serviceType || 'WarehouseWarehouse').endsWith('Warehouse'), 'service-type')
+  return problems
+}
 
 // Можно ли принять новый заказ или счёт. Только для них: оплаченное отправляется и чекуется без этого гейта.
 // Галочка строго true: methodOn считает отсутствующий ключ включённым. Выключатели магазина (cfg.methods) здесь не смотрим:
@@ -339,6 +355,125 @@ export function buildCatalogFeed({ sales, priceList, fop, now = new Date().toISO
     feed.items.push({ ...item, orderable, showBuyButton: orderable && mode === 'live', methods })
   }
   return { feed, dropped }
+}
+
+// ---------- страницы владельца ----------
+
+const isMap = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+const SITE_BASE_RE = /^https:\/\/\S+$/
+const CONFIG_ID_RE = /^[\w-]{0,64}$/
+const LIMIT_NAMES = ['unpaidPerDay', 'smsPerDay', 'smsPerPhoneDay', 'codOpenPerPhone', 'codeSendsPerOrder', 'codeAttempts', 'payAttemptsPerOrder', 'moneyWaitDays']
+const COUNT = (v) => Number.isInteger(v) && v >= 0
+const AMOUNT = (v) => Number.isFinite(v) && v > 0
+const skuRuleOk = (r) => isMap(r) && typeof r.enabled === 'boolean' && typeof r.inStock === 'boolean' && (r.stock === null || r.stock === undefined || COUNT(r.stock))
+  && AMOUNT(r.minUah) && AMOUNT(r.maxUah) && r.minUah <= r.maxUah
+
+export const siteBaseUrlOk = (v) => SITE_BASE_RE.test(str(v))
+
+// Что можно менять страницей: всё остальное в теле, включая ownerTestOkAt, не проходит. skus заменяются целиком, чтобы артикул можно было убрать,
+// methods и limits дополняются. Настройки проверяются вместе с прежними: одно поле mode=off проходит всегда, это аварийный выключатель.
+export function salesSettingsNext(body, prev = {}) {
+  const b = isMap(body) ? body : {}
+  const patch = {}
+  const fields = []
+  const take = (k, value, ok) => {
+    if (!(k in b)) return
+    if (ok) patch[k] = value
+    else fields.push(k)
+  }
+  take('mode', b.mode, SALES_MODES.includes(b.mode))
+  take('fopId', str(b.fopId), CONFIG_ID_RE.test(str(b.fopId)))
+  take('npTemplateId', str(b.npTemplateId), CONFIG_ID_RE.test(str(b.npTemplateId)))
+  take('siteBaseUrl', str(b.siteBaseUrl), !str(b.siteBaseUrl) || (str(b.siteBaseUrl).length <= 200 && siteBaseUrlOk(b.siteBaseUrl)))
+  take('offerVersion', str(b.offerVersion), str(b.offerVersion).length <= 40)
+  take('codKind', b.codKind, ['control', 'money'].includes(b.codKind))
+  take('codReceiptMode', b.codReceiptMode, ['ettn', 'manual'].includes(b.codReceiptMode))
+  take('cardReceiptLabel', str(b.cardReceiptLabel), str(b.cardReceiptLabel).length <= 128)
+  take('codReceiptLabel', str(b.codReceiptLabel), str(b.codReceiptLabel).length <= 128)
+  take('ownerPhone', str(b.ownerPhone) ? shopPhone(b.ownerPhone) : '', !str(b.ownerPhone) || !!shopPhone(b.ownerPhone))
+  const testPhones = Array.isArray(b.codTestPhones) ? b.codTestPhones.map(shopPhone) : null
+  take('codTestPhones', testPhones, !!testPhones && testPhones.length <= 20 && testPhones.every(Boolean))
+  take('methods', { ...prev.methods, ...b.methods }, isMap(b.methods) && Object.entries(b.methods).every(([k, v]) => SHOP_METHODS.includes(k) && typeof v === 'boolean'))
+  const limitOk = ([k, v]) => (k === 'piiPaidDays' ? v === null || (Number.isInteger(v) && v > 0) : LIMIT_NAMES.includes(k) && COUNT(v))
+  take('limits', { ...prev.limits, ...b.limits }, isMap(b.limits) && Object.entries(b.limits).every(limitOk))
+  take('skus', b.skus, isMap(b.skus) && Object.entries(b.skus).every(([sku, rule]) => SKU_RE.test(sku) && skuRuleOk(rule)))
+  if (fields.length) return { ok: false, code: 'BAD_SETTINGS', fields }
+
+  const next = { ...prev, ...patch }
+  if (!SALES_MODES.includes(next.mode)) next.mode = 'off'
+  const touchesCod = ['methods', 'codKind', 'codReceiptMode'].some((k) => k in patch)
+  if ((next.mode !== 'off' || touchesCod) && (next.methods || {}).cod === true && !codPairAllowed(next.codKind, next.codReceiptMode)) return { ok: false, code: 'COD_PAIR_FORBIDDEN', fields: ['codKind', 'codReceiptMode'] }
+  if (acceptsOrders(next)) {
+    if (!next.ownerTestOkAt) return { ok: false, code: 'OWNER_TEST_REQUIRED', fields: [] }
+    const missing = ['fopId', 'offerVersion'].filter((k) => !str(next[k]))
+    if (!siteBaseUrlOk(next.siteBaseUrl)) missing.push('siteBaseUrl')
+    if (missing.length) return { ok: false, code: 'BAD_SETTINGS', fields: missing }
+  }
+  return { ok: true, next }
+}
+
+// Данные получателя, которые исправляет владелец. Только переданные поля; адрес всегда целиком. Правила те же, что у нового заказа.
+export function validateRecipient(body) {
+  const b = isMap(body) ? body : {}
+  const value = {}
+  const fields = []
+  const take = (k, v, ok) => {
+    if (!(k in b)) return
+    if (ok) value[k] = v
+    else fields.push(k)
+  }
+  take('phone', shopPhone(b.phone), !!shopPhone(b.phone))
+  take('lastName', str(b.lastName), NAME_RE.test(str(b.lastName)))
+  take('firstName', str(b.firstName), NAME_RE.test(str(b.firstName)))
+  take('middleName', str(b.middleName), !str(b.middleName) || NAME_RE.test(str(b.middleName)))
+  const email = str(b.email).toLowerCase()
+  take('email', email, !email || (email.length <= 120 && EMAIL_RE.test(email)))
+  if (['cityRef', 'cityName', 'warehouseRef', 'warehouseName'].some((k) => k in b)) {
+    const address = { cityRef: str(b.cityRef).toLowerCase(), cityName: str(b.cityName).slice(0, 120), warehouseRef: str(b.warehouseRef).toLowerCase(), warehouseName: str(b.warehouseName).slice(0, 200) }
+    if (!NP_REF_RE.test(address.cityRef)) fields.push('cityRef')
+    if (!address.cityName) fields.push('cityName')
+    if (!NP_REF_RE.test(address.warehouseRef)) fields.push('warehouseRef')
+    if (!address.warehouseName) fields.push('warehouseName')
+    Object.assign(value, address)
+  }
+  if (!fields.length && !Object.keys(value).length) fields.push('empty')
+  return fields.length ? { ok: false, fields } : { ok: true, value }
+}
+
+// Красные плашки считаются из текущего состояния: алерт остаётся в заказе навсегда, а плашка гаснет, когда причины больше нет.
+export function orderFlags(order, now = Date.now()) {
+  const alerts = order.alerts || {}
+  const paidCard = order.method === 'card' && !!order.paidPaymentId && order.state !== 'reversed'
+  const flags = []
+  const flag = (on, name) => { if (on) flags.push(name) }
+  flag(order.state === 'payment_review', 'payment-review')
+  flag(paidCard && order.receipt?.status === 'failed', 'receipt-failed')
+  flag(!order.ttn && canTransition(order, 'shipped') && (order.ttnError === 'unknown' || (!!order.ttnCreatingAt && !claimFresh(order.ttnCreatingAt, now))), 'ttn-unknown')
+  flag(order.ttnOnClosed === true, 'ttn-on-closed')
+  flag(paidCard && (order.state === 'refused' || order.state === 'returned'), 'refund-due')
+  flag(Object.keys(alerts).some((k) => k.startsWith('sms-') && alerts[k]), 'sms-failed')
+  flag(order.state === 'shipped' && !!alerts[`np-not-handed-${order.ttn}`] && String(order.npDelivery?.code) === NP_NOT_HANDED, 'not-handed')
+  return flags
+}
+
+export const orderNeedsAction = (order, now = Date.now()) => ((order.state === 'paid' || order.state === 'cod_confirmed') && !order.ttn) || orderFlags(order, now).length > 0
+
+export const orderAdminRow = (id, order, now = Date.now()) => ({
+  id, orderNo: order.orderNo, state: order.state, method: order.method, sku: order.sku, titleUk: order.titleUk, total: order.total,
+  clientName: order.clientName || null, clientPhone: order.clientPhone || null, clientCityName: order.clientCityName || null, clientWarehouseName: order.clientWarehouseName || null,
+  ttn: order.ttn || null, receiptStatus: order.receipt?.status || 'none', createdAt: order.createdAt, paidAt: order.paidAt || null, shippedAt: order.shippedAt || null,
+  flags: orderFlags(order, now), needsAction: orderNeedsAction(order, now),
+})
+
+// Карточка: заказ целиком, кроме того, что открывает его снаружи или считается от телефона. Токен только как готовая ссылка для кнопки «Скопіювати посилання».
+const ADMIN_HIDDEN = ['statusToken', 'idempotencyKey', 'fingerprint', 'phoneKey', 'phoneCode']
+export function orderAdminView(id, order, { siteBaseUrl, now = Date.now() } = {}) {
+  const view = { id, ...order }
+  for (const k of ADMIN_HIDDEN) delete view[k]
+  view.statusUrl = siteBaseUrlOk(siteBaseUrl) && order.statusToken ? orderStatusUrl(siteBaseUrl, order.statusToken) : null
+  view.flags = orderFlags(order, now)
+  view.needsAction = orderNeedsAction(order, now)
+  return view
 }
 
 // ---------- Новая Почта ----------

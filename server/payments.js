@@ -44,8 +44,9 @@ const validateGoods = (goods) => {
 
 // Детерминированный uuid чека из orderId: sha256(rcpt-<orderId>) → байты в форме uuid v4.
 // Один и тот же заказ всегда даёт один id → повторная фискализация не создаст дубль чека.
-const receiptUuidFor = (orderId) => {
-  const h = crypto.createHash('sha256').update(`rcpt-${orderId}`).digest()
+// attempt: новый номер после осознанного повтора владельца (/receipt-retry магазина); у ремонтов его нет, id прежний.
+const receiptUuidFor = (orderId, attempt = 0) => {
+  const h = crypto.createHash('sha256').update(`rcpt-${orderId}${attempt ? `-${attempt}` : ''}`).digest()
   h[6] = (h[6] & 0x0f) | 0x40
   h[8] = (h[8] & 0x3f) | 0x80
   const x = h.subarray(0, 16).toString('hex')
@@ -261,7 +262,7 @@ export function registerPayments(app, deps) {
       // Checkbox требует body.id строго в формате uuid («Невірне значення uuid» на
       // rcpt-<orderId>). Детерминированно выводим uuid из orderId (sha256 → форма v4):
       // идемпотентность у Checkbox сохраняется, формат валиден.
-      receiptId: receiptUuidFor(order.orderId),
+      receiptId: receiptUuidFor(order.orderId, order.receiptAttempt),
       deliveryEmail: email,
     })
     try {
@@ -1197,7 +1198,7 @@ export function registerPayments(app, deps) {
     if (t.unref) t.unref()
   }
 
-  return { createPayment, loadOrder, saveOrder, settleMonoAcquire, amountAudit, notifyOwner, fiscalize, resolveFop, setShopHooks, addReconcileStep, receiptUuidFor }
+  return { createPayment, loadOrder, saveOrder, readByStatus, settleMonoAcquire, amountAudit, notifyOwner, fiscalize, resolveFop, setShopHooks, addReconcileStep, receiptUuidFor }
 }
 
 export default registerPayments

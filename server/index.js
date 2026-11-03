@@ -20,6 +20,7 @@ import { registerPayments } from './payments.js'
 import { createShopPaymentHooks } from './shopPayments.js'
 import { registerShopOrders } from './shopOrders.js'
 import { createShopReconcile } from './shopReconcile.js'
+import { registerShopAdmin } from './shopAdmin.js'
 import { registerFopsAdmin } from './fopsAdmin.js'
 import { registerNpTtn } from './novaPoshtaTtn.js'
 import { registerTelegramLinks } from './telegramLinks.js'
@@ -1266,6 +1267,8 @@ paymentsApi.setShopHooks(shopHooks)
 paymentsApi.addReconcileStep(createShopReconcile({ adminDb, payments: paymentsApi, hooks: shopHooks, siteUrl: SITE_URL }).step)
 // Магазин на runferry.ua: /api/shop/* для сервера сайта по токену x-shop-token (Secret Manager shop-site-token), без токена 503.
 registerShopOrders(app, { adminDb, npRequest, hooks: shopHooks, payments: paymentsApi, siteUrl: SITE_URL })
+// Страницы владельца: /api/shop/admin/* со входом Firebase (владелец, директор): заказы, накладная, настройки, готовность.
+registerShopAdmin(app, { adminDb, hooks: shopHooks, payments: paymentsApi, npRequest, sendSms, verifyStaff: verifyFirebaseStaff, siteUrl: SITE_URL })
 // Управление ФОПами (владелец): мета в Firestore, секреты write-only (fopSecrets, backend-only).
 registerFopsAdmin(app, { adminDb, refreshFops })
 // Создание ТТН Новой Почты (InternetDocument.save) по шаблону: власник — будь-який шаблон; директор із

@@ -17,7 +17,7 @@ const NP_BUDGET_MS = 7000
 const ADDRESS_BUDGET_MS = 4000
 const BANK_READ_BUDGET_MS = 4000
 const BANK_POLL_EVERY_MS = 10 * 1000
-const INVOICE_VALIDITY_SEC = 60 * 60
+export const INVOICE_VALIDITY_SEC = 60 * 60
 const CARD_RECEIPT_LABEL = 'Інтернет еквайринг'
 // Единственный текст портала, который покупатель видит сам (страница банка): остальные на сайте по кодам ошибок. Владелец ещё не утвердил.
 const invoiceDestination = (orderNo) => `Замовлення ${orderNo}`
@@ -44,7 +44,7 @@ const safeEqual = (a, b) => {
   return x.length === y.length && x.length > 0 && timingSafeEqual(x, y)
 }
 
-const withBudget = (p, ms) => new Promise((resolve, reject) => {
+export const withBudget = (p, ms) => new Promise((resolve, reject) => {
   const t = setTimeout(() => reject(new Error(`немає відповіді за ${ms} мс`)), ms)
   p.then((v) => { clearTimeout(t); resolve(v) }, (e) => { clearTimeout(t); reject(e) })
 })
@@ -55,7 +55,7 @@ const npRef = (v) => {
   return NP_REF_RE.test(ref) ? ref : ''
 }
 
-const isPostomat = (wh) => String(wh?.TypeOfWarehouse || '') === POSTOMAT_TYPE
+export const isPostomat = (wh) => String(wh?.TypeOfWarehouse || '') === POSTOMAT_TYPE
   || /поштомат|почтомат/i.test(`${wh?.Description || ''} ${wh?.DescriptionRu || ''}`)
 
 export function registerShopOrders(app, deps) {

@@ -3,7 +3,7 @@
 // Чек здесь не выбивается. В текстах алертов нет имени, телефона и отделения: только номер, сумма, что случилось и что делать.
 // Здесь же алерт владельцу и сообщение покупателю: повторы того и другого идут из сверки (shopReconcile.js).
 import * as monoAcquire from './monoAcquire.js'
-import { orderStatusUrl } from './shopCore.js'
+import { orderStatusUrl, transitionPatch } from './shopCore.js'
 
 const nowIso = () => new Date().toISOString()
 const HOUR_MS = 60 * 60 * 1000
@@ -18,8 +18,24 @@ const ageMs = (at) => Date.now() - Date.parse(at)
 const BUYER_MESSAGES = {
   paid: (order, link) => ({ text: `RunFerry: оплату ${order.total} грн отримано. Замовлення і умови: ${link}`, secret: link }),
   rcpt: (_order, url) => ({ text: `RunFerry: ваш чек: ${url}`, secret: url }),
+  ttn: (_order, ttn) => ({ text: `RunFerry: накладна створена, ТТН ${ttn}` }),
 }
-const MESSAGE_NAME = { paid: 'про оплату зі статусом замовлення', rcpt: 'із чеком' }
+const MESSAGE_NAME = { paid: 'про оплату зі статусом замовлення', rcpt: 'із чеком', ttn: 'із номером накладної' }
+
+// Вид сообщения о накладной: у каждого номера свой, новая накладная после удаления старой тоже уходит покупателю.
+export const ttnMessageKind = (ttn) => `ttn-${ttn}`
+
+// Отправить сообщение заново: попытки с нуля. Журнал оповещений не шлёт второй раз по тому же ключу, поэтому resends даёт новый ключ:
+// первое сообщение могло уйти на неверный номер и считаться доставленным.
+export const messageResetPatch = (order, kinds) => {
+  const sms = {}
+  const alerts = {}
+  for (const kind of kinds) {
+    sms[kind] = { status: null, at: null, tries: 0, resends: ((order.sms || {})[kind]?.resends || 0) + 1 }
+    alerts[`sms-${kind}`] = null
+  }
+  return { sms, alerts }
+}
 
 // Пора ли слать сообщение: не доставлено, попытки не кончились, прошлая не свежая.
 export const messageDue = (order, kind) => {
@@ -118,6 +134,17 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
     }
   }
 
+  // Заказ стал paid: склад уменьшается в той же транзакции.
+  const takeStock = (tx, salesRef, sales, shop, alerts, at, url) => {
+    const sku = sales && sales.exists ? (sales.data().skus || {})[shop.sku] : null
+    if (!sku || typeof sku.stock !== 'number') return
+    const head = `⚠️ Замовлення ${shop.orderNo}`
+    const left = sku.stock - (shop.qty || 1)
+    tx.set(salesRef, { skus: { [shop.sku]: { stock: Math.max(left, 0), ...(left <= 0 ? { inStock: false } : {}) } } }, { merge: true })
+    if (left < 0) alerts['stock-oversold'] = newAlert(at, `${head}: оплачено більше, ніж було на складі (${shop.sku}), продаж артикула вимкнено. Домовтеся з покупцем або поверніть гроші: ${url}`)
+    else if (left === 0) alerts['stock-out'] = newAlert(at, `${head}: артикул ${shop.sku} закінчився, продаж вимкнено. Поповніть залишок на сторінці замовлень: ${url}`)
+  }
+
   // Деньги по счёту пришли. mismatch: текст расхождения с банком, если он есть; missing: каких полей банк не прислал.
   const onShopPaid = async (payment, { source, mismatch = '', missing = [] } = {}) => {
     const ref = orderRef(payment.shopOrderId)
@@ -151,13 +178,7 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
 
       if (phone && phone.exists && (phone.data().openCard || {})[shop.sku] === ref.id) tx.set(phoneRef, { openCard: { [shop.sku]: null } }, { merge: true })
       if (day && day.exists && day.data().unpaid > 0) tx.set(dayRef, { unpaid: day.data().unpaid - 1 }, { merge: true })
-      const sku = sales && sales.exists ? (sales.data().skus || {})[shop.sku] : null
-      if (sku && typeof sku.stock === 'number') {
-        const left = sku.stock - (shop.qty || 1)
-        tx.set(salesRef, { skus: { [shop.sku]: { stock: Math.max(left, 0), ...(left <= 0 ? { inStock: false } : {}) } } }, { merge: true })
-        if (left < 0) alerts['stock-oversold'] = newAlert(at, `${head}: оплачено більше, ніж було на складі (${shop.sku}), продаж артикула вимкнено. Домовтеся з покупцем або поверніть гроші: ${url}`)
-        else if (left === 0) alerts['stock-out'] = newAlert(at, `${head}: артикул ${shop.sku} закінчився, продаж вимкнено. Поповніть залишок на сторінці замовлень: ${url}`)
-      }
+      takeStock(tx, salesRef, sales, shop, alerts, at, url)
 
       if (mismatch) alerts['amount-mismatch'] = newAlert(at, `${head}: ${shop.total} грн, дані банку не збігаються (${mismatch}). Чек не виписано. Звірте суму в кабінеті monobank і вирішіть на картці замовлення: ${url}`)
       if (!wasOpen) alerts['late-payment'] = newAlert(at, `${head}: ${payment.amount} грн оплачено вже після закриття замовлення. Вирішіть на картці замовлення: відправити чи повернути гроші: ${url}`)
@@ -180,6 +201,32 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
     if (result.nowPaid && notifyClient) {
       for (const send of [alertNewPaid, sendPaidMessage]) send(ref).catch((e) => console.error(`shop: сповіщення про оплату ${ref.id}:`, e.message))
     }
+  }
+
+  // Владелец сверил оплату с банком: amount в гривнах. Из payment_review заказ становится paid, склад уменьшается здесь: при входе в payment_review его не трогали.
+  // Заказ в paid только получает отметку: она разрешает накладную, если банк не показывает сумму. Заказ в другом состоянии не меняется, ответ false.
+  const onShopPaymentConfirmed = async (orderId, { by, amount } = {}) => {
+    const ref = orderRef(orderId)
+    const result = await adminDb.runTransaction(async (tx) => {
+      const snap = await tx.get(ref)
+      const shop = snap.exists ? snap.data() : null
+      if (!shop || (shop.state !== 'payment_review' && shop.state !== 'paid')) return null
+      const at = nowIso()
+      const amountConfirmed = { by: by || null, at, amount }
+      const alerts = {}
+      if (shop.state === 'paid') {
+        tx.set(ref, { amountConfirmed, updatedAt: at }, { merge: true })
+        return { alerts }
+      }
+      const salesRef = adminDb.collection('system').doc('shopSales')
+      takeStock(tx, salesRef, await tx.get(salesRef), shop, alerts, at, cardUrl(ref))
+      tx.set(ref, transitionPatch(shop, 'paid', { at, by, patch: { amountConfirmed, ...(Object.keys(alerts).length ? { alerts } : {}) } }), { merge: true })
+      return { alerts, nowPaid: true }
+    })
+    if (!result) return false
+    await sendAlerts(ref, result.alerts)
+    if (result.nowPaid && notifyClient) sendPaidMessage(ref).catch((e) => console.error(`shop: сповіщення про оплату ${ref.id}:`, e.message))
+    return true
   }
 
   // Банк вернул оплату. Заказ меняется, только если вернули именно оплативший счёт. refunded: сумма, если банк оставил часть денег.
@@ -270,7 +317,7 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
       if ((rec.tries || 0) >= SMS_TRIES) return { gaveUp: true }
       const tries = (rec.tries || 0) + 1
       tx.set(ref, { sms: { [kind]: { status: 'pending', at: nowIso(), tries } } }, { merge: true })
-      return { order: snap.data(), tries }
+      return { order: snap.data(), tries, clientKey: `${ref.id}-${kind}${rec.resends ? `-r${rec.resends}` : ''}` }
     })
     if (!claim) return
     let status = 'failed'
@@ -278,8 +325,8 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
       try {
         const { text, secret } = await build(claim.order)
         const sent = await notifyClient({
-          event: 'shop', text, phone: claim.order.clientPhone, clientKey: `${ref.id}-${kind}`, by: 'shop',
-          journal: { text: text.split(secret).join('…') },
+          event: 'shop', text, phone: claim.order.clientPhone, clientKey: claim.clientKey, by: 'shop',
+          journal: { text: secret ? text.split(secret).join('…') : text },
         })
         status = sent?.status === 'sent' || sent?.status === 'pending' ? sent.status : 'failed'
       } catch (e) {
@@ -288,7 +335,7 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
       await ref.set({ sms: { [kind]: { status, at: nowIso() } } }, { merge: true })
     }
     if (status === 'failed' && (claim.gaveUp || claim.tries >= SMS_TRIES)) {
-      await shopAlert(ref.id, `sms-${kind}`, (shop, url) => `⚠️ Замовлення ${shop.orderNo}: покупець не отримав повідомлення ${MESSAGE_NAME[kind] || ''}. Перевірте телефон на картці і надішліть ще раз: ${url}`)
+      await shopAlert(ref.id, `sms-${kind}`, (shop, url) => `⚠️ Замовлення ${shop.orderNo}: покупець не отримав повідомлення ${MESSAGE_NAME[kind.split('-')[0]] || ''}. Перевірте телефон на картці і надішліть ще раз: ${url}`)
     }
   }
 
@@ -300,6 +347,7 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
     return BUYER_MESSAGES.paid(order, orderStatusUrl(siteBaseUrl, order.statusToken))
   })
   const sendReceiptMessage = (ref, taxUrl) => sendBuyerMessage(ref, 'rcpt', async (order) => BUYER_MESSAGES.rcpt(order, taxUrl))
+  const sendTtnMessage = (ref, ttn) => sendBuyerMessage(ref, ttnMessageKind(ttn), async (order) => BUYER_MESSAGES.ttn(order, ttn))
 
   // Подписанный колбэк сказал «возврат», а прочитать статус не вышло. Заказ не трогаем: решит ответ банка в сверке.
   const onShopReversalSignal = (payment) => shopAlert(payment.shopOrderId, 'reversed-signal', (shop, url) =>
@@ -318,7 +366,7 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
     return snap.exists ? snap.data().email || null : null
   }
 
-  return { onShopPaid, onShopReversed, onShopPartialRefund, onShopReversalSignal, onShopUnknownStatus, receiptEmail, removeLiveInvoice, sendAlerts, shopAlert, sendBuyerMessage, alertNewPaid, sendPaidMessage, sendReceiptMessage }
+  return { onShopPaid, onShopPaymentConfirmed, onShopReversed, onShopPartialRefund, onShopReversalSignal, onShopUnknownStatus, receiptEmail, removeLiveInvoice, sendAlerts, shopAlert, sendBuyerMessage, alertNewPaid, sendPaidMessage, sendReceiptMessage, sendTtnMessage }
 }
 
 export default createShopPaymentHooks

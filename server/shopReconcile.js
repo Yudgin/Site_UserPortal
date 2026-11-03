@@ -6,7 +6,7 @@ import { loadFopFresh } from './fops.js'
 import * as monoAcquire from './monoAcquire.js'
 import * as checkbox from './checkbox.js'
 import { npCall as realNpCall } from './novaPoshtaTtn.js'
-import { KYIV_DAY, messageDue } from './shopPayments.js'
+import { KYIV_DAY, messageDue, ttnMessageKind } from './shopPayments.js'
 import {
   RECEIPT_FAILED, acceptsOrders, claimFresh, invoiceFinal, npDeliveredAt, npDeliveryFrom, npOutcome, piiPurgePatch, shopSellable, transitionPatch, ttnGonePatch,
 } from './shopCore.js'
@@ -25,7 +25,7 @@ const PAID_POLL_COLD_MS = DAY
 const PAID_WATCH_MS = 120 * DAY
 const RECEIPT_PUSH_AFTER_MS = 2 * MIN
 const RECEIPT_LATE_MS = 10 * MIN
-const RECEIPT_CLAIM_STALE_MS = 10 * MIN
+export const RECEIPT_CLAIM_STALE_MS = 10 * MIN
 const NO_TTN_AFTER_MS = DAY
 const NP_POLL_MS = 30 * MIN
 const NP_BATCH = 100
@@ -222,7 +222,7 @@ export function createShopReconcile(deps) {
     }
     let found
     try {
-      found = await cbx.getReceipt(fop, payments.receiptUuidFor(p.orderId))
+      found = await cbx.getReceipt(fop, payments.receiptUuidFor(p.orderId, p.receiptAttempt))
     } catch (e) {
       if (e?.response?.status !== 404) {
         console.error(`shop reconcile: чек ${p.orderId}:`, failText(e))
@@ -294,6 +294,11 @@ export function createShopReconcile(deps) {
     if ((order.state === 'paid' || order.state === 'shipped') && messageDue(order, 'paid')) await hooks.sendPaidMessage(ref)
   }
 
+  // Сообщение о накладной могло не уйти: сервер упал после записи номера или не ответил SMS. Наложка ждёт заготовку чека (вторая волна).
+  const announceTtn = async (ref, order) => {
+    if (order.state === 'shipped' && order.method === 'card' && order.ttn && messageDue(order, ttnMessageKind(order.ttn))) await hooks.sendTtnMessage(ref, order.ttn)
+  }
+
   // Срок считается от входа в состояние: после удаления накладной заказ снова ждёт новую, и старая дата оплаты ни при чём.
   const watchNoTtn = async (ref, order) => {
     if ((order.state !== 'paid' && order.state !== 'cod_confirmed') || order.ttn) return
@@ -333,6 +338,12 @@ export function createShopReconcile(deps) {
       const snap = await ref.get()
       if (snap.exists) await retryAlerts(ref, snap.data())
     }
+  }
+
+  // Накладная легла на закрытый заказ. Закрытые заказы сверка не читает, а алерт не должен потеряться.
+  const sweepClosedTtnAlerts = async () => {
+    const q = await orders().where('ttnOnClosed', '==', true).get()
+    for (const d of q.docs) await safely(`алерти ${d.id}`, () => retryAlerts(orders().doc(d.id), d.data()))
   }
 
   // ---------- п. 6: посылки ----------
@@ -383,6 +394,13 @@ export function createShopReconcile(deps) {
         if (doc) outcomes.set(ref.id, await safely(`посилка ${order.orderNo}`, () => applyParcel(ref, order, doc)))
       }
     }
+  }
+
+  // Кнопка на карточке заказа: тот же разбор, не дожидаясь прохода. undefined, если НП не вернула этот номер.
+  const refreshParcel = async (ref, order) => {
+    const outcomes = new Map()
+    await queryParcels([{ ref, order }], order.npFopId || order.fopId, outcomes, { deadline: Infinity })
+    return outcomes.get(ref.id)
   }
 
   const trackParcels = async (shipped, pass) => {
@@ -456,6 +474,7 @@ export function createShopReconcile(deps) {
     if (order.state === 'awaiting_payment') await part('рахунки', () => pollInvoices(ref, order, pass))
     if (order.paidPaymentId && order.state !== 'reversed') await part('оплата', () => reconcilePaid(ref, order, pass))
     await part('сповіщення про оплату', () => announcePaid(ref, order))
+    await part('сповіщення про накладну', () => announceTtn(ref, order))
     await part('накладна', () => watchNoTtn(ref, order))
     await part('строк повернення', () => watchRefundDeadline(ref, order))
     await part('алерти', () => retryAlerts(ref, order))
@@ -477,6 +496,7 @@ export function createShopReconcile(deps) {
       for (const item of [...hot, ...cold]) await reconcileOrder(item, pass)
       await safely('посилки', () => trackParcels(hot.filter(({ order }) => order.state === 'shipped' && order.ttn), pass))
       await safely('алерти дня', sweepDayAlerts)
+      await safely('алерти закритих', sweepClosedTtnAlerts)
       if (slowDue) await safely('гейт', checkGate)
       if (Date.now() - lastPurgeAt >= purgeEveryMs) {
         lastPurgeAt = Date.now()
@@ -488,7 +508,7 @@ export function createShopReconcile(deps) {
     return { checked: pass.checked }
   }
 
-  return { step }
+  return { step, refreshParcel }
 }
 
 export default createShopReconcile

@@ -154,4 +154,22 @@ export const getReceipt = async (fop, receiptId) => {
   return { receiptId: d.id || receiptId, fiscalCode: d.fiscal_code || null, taxUrl: d.tax_url || null, status: d.status || null }
 }
 
-export default { signin, ensureShift, sellReceipt, closeShift, getReceipt, buildSellPayload, toKop, goodsTotalKop }
+// Только чтение, для блока готовности: чеки и смену не трогают. Токен мог протухнуть → один повтор после переавторизации.
+const readAsCashier = async (fop, path) => {
+  await ensureToken(fop)
+  const read = () => axios.get(`${BASE}${path}`, { headers: headers(fop), timeout: 15000 })
+  try {
+    return (await read()).data
+  } catch (e) {
+    if (!is401(e)) throw e
+    tokenCache.delete(fop.id)
+    await signin(fop)
+    return (await read()).data
+  }
+}
+export const cashierMe = (fop) => readAsCashier(fop, '/api/v1/cashier/me')
+export const cashierShift = (fop) => readAsCashier(fop, '/api/v1/cashier/shift')
+// Касса по ключу лицензии: вход кассира не нужен.
+export const cashRegisterInfo = async (fop) => (await axios.get(`${BASE}/api/v1/cash-registers/info`, { headers: headers(fop, false), timeout: 15000 })).data
+
+export default { signin, ensureShift, sellReceipt, closeShift, getReceipt, cashierMe, cashierShift, cashRegisterInfo, buildSellPayload, toKop, goodsTotalKop }
