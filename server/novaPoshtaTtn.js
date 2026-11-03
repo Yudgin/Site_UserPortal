@@ -115,6 +115,113 @@ export async function computeCod(adminDb, { explicit, sr, srId, boId, tpl, fop, 
   return 0
 }
 
+// Кому едет посылка, если шаблон не сказал явно.
+const recipientTargetOf = (tpl, scenario) => tpl.recipientTarget || (scenario === 'incoming' ? 'service' : 'client')
+
+// Поля наложки для InternetDocument.save: control — «Контроль оплати», иначе денежный перевод. Сумма 0 — без наложки.
+export const codFields = (kind, amount) => {
+  if (!(amount > 0)) return {}
+  if (kind === 'control') return { AfterpaymentOnGoodsCost: String(amount) }
+  return { BackwardDeliveryData: [{ PayerType: 'Recipient', CargoType: 'Money', RedeliveryString: String(amount) }] }
+}
+
+// Стороны накладной: шаблон + ФОП + адрес клиента → { senderFields, recipientFields } или { problem }.
+const resolveParties = async ({ np, apiKey, npc, tpl, serviceType, senderTarget, recipientTarget, client }) => {
+  const { cityRef: clientCityRef, warehouseRef: clientWarehouseRef, phone: clientPhone, name: clientName } = client
+  // Режим доставки по каждой стороне из serviceType (Warehouse=отделение, Doors=адрес/курьер).
+  const senderDelivery = serviceType.startsWith('Warehouse') ? 'warehouse' : 'address'
+  const recipientDelivery = serviceType.endsWith('Warehouse') ? 'warehouse' : 'address'
+
+  // ---- Отправитель ---- (counterparty всегда = ФОП; адрес: заявка (если задана) → иначе шаблон)
+  const useClientSender = senderTarget === 'client' && clientCityRef && clientWarehouseRef
+  let senderCity, senderAddr
+  if (useClientSender) {
+    senderCity = clientCityRef; senderAddr = clientWarehouseRef // адрес из заявки клиента
+  } else {
+    senderCity = tpl.sender?.cityRef || npc.cityRef
+    senderAddr = senderDelivery === 'address'
+      ? await resolveAddressRef(np, apiKey, npc.senderRef, tpl.sender)
+      : (tpl.sender?.warehouseRef || npc.warehouseRef)
+  }
+  const senderFields = {
+    CitySender: senderCity, Sender: npc.senderRef, SenderAddress: senderAddr,
+    ContactSender: npc.contactRef, SendersPhone: npc.senderPhone || '',
+  }
+
+  // ---- Получатель ---- (сервис = ФОП; client/fixed = частное лицо через Counterparty.save)
+  // Для client: данные из заявки, если заданы; иначе fallback на фикс. данные шаблона.
+  let recipientFields
+  if (recipientTarget === 'service') {
+    const rCity = tpl.recipient?.cityRef || npc.cityRef
+    const rAddr = recipientDelivery === 'address'
+      ? await resolveAddressRef(np, apiKey, npc.senderRef, tpl.recipient)
+      : (tpl.recipient?.warehouseRef || npc.warehouseRef)
+    recipientFields = { CityRecipient: rCity, Recipient: npc.senderRef, RecipientAddress: rAddr, ContactRecipient: npc.contactRef, RecipientsPhone: npc.senderPhone || '' }
+  } else {
+    const useClientRecip = recipientTarget === 'client' && clientCityRef && clientWarehouseRef
+    const rCity = useClientRecip ? clientCityRef : (tpl.recipient?.cityRef || '')
+    const rName = useClientRecip ? clientName : (tpl.recipientName || 'Отримувач')
+    const rPhone = useClientRecip ? clientPhone : (tpl.recipientPhone || '')
+    if (!rCity) return { problem: { status: 400, code: 'NO_RECIP_CITY', message: 'Немає міста отримувача (ні в заявці, ні в шаблоні)', noDocument: true } }
+    const rec = await resolveRecipient(np, apiKey, { name: rName, phone: rPhone, cityRef: rCity })
+    let rAddr
+    if (useClientRecip) {
+      rAddr = clientWarehouseRef // клиент — только отделение (курьер клиенту — окремий крок)
+    } else if (recipientDelivery === 'address') {
+      rAddr = await resolveAddressRef(np, apiKey, rec.ref, tpl.recipient)
+    } else {
+      rAddr = tpl.recipient?.warehouseRef || ''
+      if (!rAddr) return { problem: { status: 400, code: 'NO_RECIP_ADDR', message: 'Немає відділення отримувача (ні в заявці, ні в шаблоні)', noDocument: true } }
+    }
+    recipientFields = { CityRecipient: rCity, Recipient: rec.ref, RecipientAddress: rAddr, ContactRecipient: rec.contactRef, RecipientsPhone: rPhone }
+  }
+  return { senderFields, recipientFields }
+}
+
+// Сама накладная, без заявки и прав: её зовут /api/np/ttn/create и магазин. client — { cityRef, warehouseRef, phone, name }.
+// Ответ: { doc, ttn } или { problem: { status, code, message, extra, noDocument } }. Исключение — сбой связи или отказ НП
+// на сторонах. noDocument (в problem и на исключении) значит «накладной точно нет»; без него исход неизвестен: таймаут
+// самого InternetDocument.save мог её создать.
+export async function saveInternetDocument({ np, apiKey, npc, tpl, scenario, description, cost, client, codAmount, codKind = 'money' }) {
+  const serviceType = tpl.serviceType || 'WarehouseWarehouse'
+  const senderTarget = tpl.senderTarget || 'service'
+  const recipientTarget = recipientTargetOf(tpl, scenario)
+
+  let parties
+  try {
+    parties = await resolveParties({ np, apiKey, npc, tpl, serviceType, senderTarget, recipientTarget, client })
+  } catch (e) {
+    e.noDocument = true // до InternetDocument.save не дошли
+    throw e
+  }
+  if (parties.problem) return parties
+
+  // ---- Плательщик ---- (приём: платит клиент-отправитель; иначе по шаблону)
+  const payerType = senderTarget === 'client' ? 'Sender' : (tpl.payerType === 'sender' ? 'Sender' : 'Recipient')
+
+  const mp = {
+    DateTime: npDate(),
+    CargoType: tpl.cargoType || 'Parcel',
+    Weight: String(tpl.weight || 1),
+    ServiceType: serviceType,
+    SeatsAmount: String(tpl.seatsAmount || 1),
+    Description: description,
+    Cost: String(cost),
+    ...(tpl.volumeGeneral ? { VolumeGeneral: String(tpl.volumeGeneral) } : {}),
+    PayerType: payerType, PaymentMethod: 'Cash',
+    ...parties.senderFields,
+    ...parties.recipientFields,
+    ...codFields(codKind, codAmount),
+  }
+
+  const npResp = await np(apiKey, 'InternetDocument', 'save', mp)
+  if (!npResp || npResp.success !== true || !npResp.data || !npResp.data[0]) {
+    return { problem: { status: 502, code: 'NP_ERROR', message: npErr(npResp, 'Нова Пошта відхилила запит'), extra: { npErrors: (npResp && (npResp.errors || npResp.warnings)) || [] }, noDocument: npResp?.success === false } }
+  }
+  const doc = npResp.data[0]
+  return { doc, ttn: doc.IntDocNumber || doc.Number || '' }
+}
+
 const err = (res, status, code, message, extra = {}) =>
   res.status(status).json({ success: false, error: { code, message, ...extra } })
 
@@ -240,14 +347,12 @@ export function registerNpTtn(app, deps = {}) {
       const { fop, problem: fopProblem } = fopOf(fopIdOverride || tpl.fopId)
       if (fopProblem) return err(res, fopProblem.status, fopProblem.code, fopProblem.message)
       const npc = fop.novaPoshta
-      const apiKey = npc.apiKey
       // Номер у описі: для заявки — номер ремонту; для замовлення кораблика номер не додаємо
       // (випадковий id у описі посилки ні до чого).
       const repairNo = srId ? (sr.externalRequestId || sr.id || '') : ''
       const description = `${tpl.description || 'Прикормочний кораблик'}${repairNo ? ` №${repairNo}` : ''}`.trim().slice(0, 500)
 
-      const senderTarget = tpl.senderTarget || 'service'
-      const recipientTarget = tpl.recipientTarget || (scenario === 'incoming' ? 'service' : 'client')
+      const recipientTarget = recipientTargetOf(tpl, scenario)
 
       // Адреса клієнта: з тіла (діалог/пікер у застосунку) або з заявки (форма /repair/new, пікер).
       const clientCityRef = String(b.clientCityRef || sr.clientCityRef || '')
@@ -260,82 +365,15 @@ export function registerNpTtn(app, deps = {}) {
         return err(res, 400, 'NO_CLIENT_ADDRESS', 'Вкажіть відділення Нової Пошти клієнта')
       }
 
-      // Режим доставки по каждой стороне из serviceType (Warehouse=отделение, Doors=адрес/курьер).
-      const serviceType = tpl.serviceType || 'WarehouseWarehouse'
-      const senderDelivery = serviceType.startsWith('Warehouse') ? 'warehouse' : 'address'
-      const recipientDelivery = serviceType.endsWith('Warehouse') ? 'warehouse' : 'address'
-
-      // ---- Отправитель ---- (counterparty всегда = ФОП; адрес: заявка (если задана) → иначе шаблон)
-      const useClientSender = senderTarget === 'client' && clientCityRef && clientWarehouseRef
-      let senderCity, senderAddr
-      if (useClientSender) {
-        senderCity = clientCityRef; senderAddr = clientWarehouseRef // адрес из заявки клиента
-      } else {
-        senderCity = tpl.sender?.cityRef || npc.cityRef
-        senderAddr = senderDelivery === 'address'
-          ? await resolveAddressRef(np, apiKey, npc.senderRef, tpl.sender)
-          : (tpl.sender?.warehouseRef || npc.warehouseRef)
-      }
-      const senderFields = {
-        CitySender: senderCity, Sender: npc.senderRef, SenderAddress: senderAddr,
-        ContactSender: npc.contactRef, SendersPhone: npc.senderPhone || '',
-      }
-
-      // ---- Получатель ---- (сервис = ФОП; client/fixed = частное лицо через Counterparty.save)
-      // Для client: данные из заявки, если заданы; иначе fallback на фикс. данные шаблона.
-      let recipientFields
-      if (recipientTarget === 'service') {
-        const rCity = tpl.recipient?.cityRef || npc.cityRef
-        const rAddr = recipientDelivery === 'address'
-          ? await resolveAddressRef(np, apiKey, npc.senderRef, tpl.recipient)
-          : (tpl.recipient?.warehouseRef || npc.warehouseRef)
-        recipientFields = { CityRecipient: rCity, Recipient: npc.senderRef, RecipientAddress: rAddr, ContactRecipient: npc.contactRef, RecipientsPhone: npc.senderPhone || '' }
-      } else {
-        const useClientRecip = recipientTarget === 'client' && clientCityRef && clientWarehouseRef
-        const rCity = useClientRecip ? clientCityRef : (tpl.recipient?.cityRef || '')
-        const rName = useClientRecip ? clientName : (tpl.recipientName || 'Отримувач')
-        const rPhone = useClientRecip ? clientPhone : (tpl.recipientPhone || '')
-        if (!rCity) return err(res, 400, 'NO_RECIP_CITY', 'Немає міста отримувача (ні в заявці, ні в шаблоні)')
-        const rec = await resolveRecipient(np, apiKey, { name: rName, phone: rPhone, cityRef: rCity })
-        let rAddr
-        if (useClientRecip) {
-          rAddr = clientWarehouseRef // клиент — только отделение (курьер клиенту — окремий крок)
-        } else if (recipientDelivery === 'address') {
-          rAddr = await resolveAddressRef(np, apiKey, rec.ref, tpl.recipient)
-        } else {
-          rAddr = tpl.recipient?.warehouseRef || ''
-          if (!rAddr) return err(res, 400, 'NO_RECIP_ADDR', 'Немає відділення отримувача (ні в заявці, ні в шаблоні)')
-        }
-        recipientFields = { CityRecipient: rCity, Recipient: rec.ref, RecipientAddress: rAddr, ContactRecipient: rec.contactRef, RecipientsPhone: rPhone }
-      }
-
-      // ---- Плательщик ---- (приём: платит клиент-отправитель; иначе по шаблону)
-      const payerType = senderTarget === 'client' ? 'Sender' : (tpl.payerType === 'sender' ? 'Sender' : 'Recipient')
-
       // ---- Наложенный платёж (COD) ---- (для отправки клиенту с флагом cod: сумма факта, снимаем если оплачено)
       const codAmount = await computeCod(adminDb, { explicit: codOverride, sr, srId, boId, tpl, fop, recipientTarget })
 
-      const mp = {
-        DateTime: npDate(),
-        CargoType: tpl.cargoType || 'Parcel',
-        Weight: String(tpl.weight || 1),
-        ServiceType: serviceType,
-        SeatsAmount: String(tpl.seatsAmount || 1),
-        Description: description,
-        Cost: String(cost),
-        ...(tpl.volumeGeneral ? { VolumeGeneral: String(tpl.volumeGeneral) } : {}),
-        PayerType: payerType, PaymentMethod: 'Cash',
-        ...senderFields,
-        ...recipientFields,
-        ...(codAmount > 0 ? { BackwardDeliveryData: [{ PayerType: 'Recipient', CargoType: 'Money', RedeliveryString: String(codAmount) }] } : {}),
-      }
-
-      const npResp = await np(apiKey, 'InternetDocument', 'save', mp)
-      if (!npResp || npResp.success !== true || !npResp.data || !npResp.data[0]) {
-        return res.status(502).json({ success: false, error: { code: 'NP_ERROR', message: npErr(npResp, 'Нова Пошта відхилила запит'), npErrors: (npResp && (npResp.errors || npResp.warnings)) || [] } })
-      }
-      const doc = npResp.data[0]
-      const ttn = doc.IntDocNumber || doc.Number || ''
+      const { problem: saveProblem, doc, ttn } = await saveInternetDocument({
+        np, apiKey: npc.apiKey, npc, tpl, scenario, description, cost,
+        client: { cityRef: clientCityRef, warehouseRef: clientWarehouseRef, phone: clientPhone, name: clientName },
+        codAmount,
+      })
+      if (saveProblem) return err(res, saveProblem.status, saveProblem.code, saveProblem.message, saveProblem.extra)
 
       // Куди писати номер: заявка — за напрямком (incoming → waybillNumber «до нас»; return/purchase/
       // parts → returnTtn «клієнту», щоб не затирати вхідну ТТН із 1С); замовлення кораблика — ttn.
