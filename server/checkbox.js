@@ -118,7 +118,19 @@ export const closeShift = async (fop) => {
 // (сразу после receipts/sell чек в статусе CREATED без кода — его добивает reconcile).
 export const getReceipt = async (fop, receiptId) => {
   await ensureToken(fop)
-  const res = await axios.get(`${BASE}/api/v1/receipts/${receiptId}`, { headers: headers(fop), timeout: 20000 })
+  let res
+  try {
+    res = await axios.get(`${BASE}/api/v1/receipts/${receiptId}`, { headers: headers(fop), timeout: 20000 })
+  } catch (e) {
+    // токен мог протухнуть → один повтор после переавторизации
+    if (e.response && e.response.status === 401) {
+      tokenCache.delete(fop.id)
+      await signin(fop)
+      res = await axios.get(`${BASE}/api/v1/receipts/${receiptId}`, { headers: headers(fop), timeout: 20000 })
+    } else {
+      throw e
+    }
+  }
   const d = res.data || {}
   return { receiptId: d.id || receiptId, fiscalCode: d.fiscal_code || null, taxUrl: d.tax_url || null, status: d.status || null }
 }

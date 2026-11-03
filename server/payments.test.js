@@ -14,6 +14,7 @@ process.env.FOPS_CONFIG = JSON.stringify([
   { id: 'fop-b', name: 'ФОП Б', monoAcquire: { token: 'MONO-B' }, checkbox: cashbox('B') },
   { id: 'fop-first', name: 'ФОП вхід', monoAcquire: { token: 'MONO-F' }, checkbox: cashbox('F') },
   { id: 'fop-401', name: 'ФОП 401', monoAcquire: { token: 'MONO-E' }, checkbox: cashbox('E') },
+  { id: 'fop-stale', name: 'ФОП старий токен', monoAcquire: { token: 'MONO-S' }, checkbox: cashbox('S') },
   { id: 'fop-login', name: 'ФОП логін', monoAcquire: { token: 'MONO-L' }, checkbox: { licenseKey: 'LIC-L', login: 'cashier', password: 'pass' } },
   { id: 'fop-nock', name: 'ФОП без каси', monoAcquire: { token: 'MONO-N' } },
   { id: 'fop-nomono', name: 'ФОП без еквайрингу', checkbox: cashbox('M') },
@@ -126,6 +127,8 @@ const net = {
       invoice: () => { n++; return { invoiceId: `inv-${n}`, pageUrl: `https://pay.example/inv-${n}` } },
       invoiceStatus: (invoiceId) => ({ invoiceId, status: 'processing' }),
       pubkey: () => pubkeyAnswer(KEY.publicKey),
+      invoiceRemove: () => ({}),
+      signin: (license) => ({ access_token: `cashier-${license}` }),
       sell: (payload) => ({ id: payload.id, status: 'DONE', fiscal_code: 'FC-1', tax_url: 'https://check.example/1' }),
       receipt: (id) => ({ id, status: 'DONE', fiscal_code: 'FC-1', tax_url: 'https://check.example/1' }),
       telegram: () => ({ ok: true }),
@@ -140,8 +143,9 @@ const dispatch = async (method, url, body, cfg = {}) => {
     const on = net.on
     if (method === 'POST' && url === `${MONO}/invoice/create`) return { data: await on.invoice(body) }
     if (method === 'GET' && url === `${MONO}/invoice/status`) return { data: await on.invoiceStatus(cfg.params.invoiceId) }
+    if (method === 'POST' && url === `${MONO}/invoice/remove`) return { data: await on.invoiceRemove(body) }
     if (method === 'GET' && url === `${MONO}/pubkey`) return { data: await on.pubkey() }
-    if (method === 'POST' && (url === `${CBX}/cashier/signinPinCode` || url === `${CBX}/cashier/signin`)) return { data: { access_token: `cashier-${cfg.headers['X-License-Key']}` } }
+    if (method === 'POST' && (url === `${CBX}/cashier/signinPinCode` || url === `${CBX}/cashier/signin`)) return { data: await on.signin(cfg.headers['X-License-Key']) }
     if (method === 'GET' && url === `${CBX}/cashier/shift`) return { data: { status: 'OPENED' } }
     if (method === 'POST' && url === `${CBX}/receipts/sell`) return { data: await on.sell(body) }
     if (method === 'GET' && url.startsWith(`${CBX}/receipts/`)) return { data: await on.receipt(url.slice(`${CBX}/receipts/`.length)) }
@@ -2306,4 +2310,230 @@ test('/refiscalize: магазин при amount-mismatch отвечает 409 �
   assert.equal(shop.status, 200)
   assert.equal(shop.json.data.receiptId, receiptUuid('shop-error'))
   assert.equal(sells().length, 2)
+})
+
+// ---------- снятие счёта в банке: настоящий monoAcquire и хуки, как в index.js ----------
+
+const removals = () => net.of('POST', `${MONO}/invoice/remove`)
+const realHooks = (a) => createShopPaymentHooks({ adminDb: a.db, payments: a.api, siteUrl: 'https://portal.example' })
+
+test('removeInvoice: точный запрос к банку с токеном ФОП, ответ банка как есть, есть и в default', async () => {
+  net.reset()
+  net.on.invoiceRemove = () => ({ answer: 'bank' })
+  assert.deepEqual(await realMono.removeInvoice({ id: 'fop-x', monoAcquire: { token: 'MONO-X' } }, 'inv-7'), { answer: 'bank' })
+  assert.equal(net.calls.length, 1)
+  assert.deepEqual(removals()[0].body, { invoiceId: 'inv-7' })
+  assert.deepEqual(removals()[0].headers, { 'X-Token': 'MONO-X', 'Content-Type': 'application/json' })
+  assert.equal(removals()[0].timeout, 15000)
+  assert.equal(realMono.default.removeInvoice, realMono.removeInvoice)
+})
+
+test('removeInvoice: без токена в сеть не идёт, отказ банка доходит до вызывающего', async () => {
+  net.reset()
+  await assert.rejects(realMono.removeInvoice({ id: 'fop-x' }, 'inv-7'), /ФОП fop-x: monobank еквайринг не налаштований/)
+  assert.equal(net.calls.length, 0)
+  net.on.invoiceRemove = () => { throw httpErr(400, { errCode: 'INVOICE_PAID' }) }
+  await assert.rejects(realMono.removeInvoice({ id: 'fop-x', monoAcquire: { token: 'MONO-X' } }, 'inv-7'), (e) => e.response.status === 400)
+})
+
+test('снятие счёта: removed только после ответа банка, токен ФОП платежа, повтор банк не зовёт', async (t) => {
+  const a = await mount(t, shopSeed({ fopId: 'fop-b' }))
+  const before = payDoc(a)
+  let atBank = null
+  net.on.invoiceRemove = () => { atBank = payDoc(a).status; return {} }
+  assert.equal(await realHooks(a).removeLiveInvoice('pay-1'), true)
+  assert.equal(atBank, 'pending')
+  assert.deepEqual(removals().map((c) => [c.body.invoiceId, c.headers['X-Token']]), [['inv-1', 'MONO-B']])
+  const { status, updatedAt, ...rest } = payDoc(a)
+  assert.equal(status, 'removed')
+  assert.match(updatedAt, ISO)
+  assert.deepEqual(rest, (({ status: _s, updatedAt: _u, ...other }) => other)(before), 'меняется только статус')
+
+  assert.equal(await realHooks(a).removeLiveInvoice('pay-1'), false)
+  assert.equal(removals().length, 1)
+})
+
+test('снятие счёта: банк отказал, документ не меняется и счёт остаётся в опросе', async (t) => {
+  const a = await mount(t, shopSeed({ createdAt: ago(60) }))
+  const before = payDoc(a)
+  net.on.invoiceRemove = () => { throw httpErr(400, { errCode: 'INVOICE_PAID' }) }
+  await assert.rejects(realHooks(a).removeLiveInvoice('pay-1'), (e) => e.response.status === 400)
+  assert.deepEqual(payDoc(a), before)
+  await reconcileNow(a)
+  assert.deepEqual(statusChecks().map((c) => c.params.invoiceId), ['inv-1'])
+})
+
+test('снятие счёта: пока банк отвечал, колбэк записал оплату: её не затираем', async (t) => {
+  const a = await mount(t, shopSeed())
+  net.on.invoiceRemove = async () => { await a.api.saveOrder({ orderId: 'pay-1', status: 'paid', paytype: 'mono-acquire' }); return {} }
+  assert.equal(await realHooks(a).removeLiveInvoice('pay-1'), false)
+  assert.equal(payDoc(a).status, 'paid')
+})
+
+test('снятый счёт не занимает очередь сверки: 60 снятых не закрывают живой, а 60 висящих закрыли бы', async (t) => {
+  const seed = (status) => {
+    const out = {}
+    for (let i = 0; i < 60; i++) out[`payments/a-${i}`] = shopPayment({ orderId: `a-${i}`, providerOrderId: `inv-a-${i}`, createdAt: ago(60), status })
+    // Сверка берёт первые 50: живой счёт в конце выборки.
+    out['payments/live'] = shopPayment({ orderId: 'live', providerOrderId: 'inv-live', createdAt: ago(60) })
+    return out
+  }
+  const a = await mount(t, seed('removed'))
+  await reconcileNow(a)
+  assert.deepEqual(statusChecks().map((c) => c.params.invoiceId), ['inv-live'])
+
+  const b = await mount(t, seed('pending'))
+  await reconcileNow(b)
+  assert.equal(statusChecks().length, 50)
+  assert.ok(!statusChecks().some((c) => c.params.invoiceId === 'inv-live'))
+})
+
+test('поздний успех по снятому счёту проводит оплату: paid, чек, заказ на проверке', async (t) => {
+  const a = await mount(t, shopSeed({}, { state: 'cancelled', cancelReason: 'superseded' }), { env: OWNER })
+  a.api.setShopHooks(realHooks(a))
+  await realHooks(a).removeLiveInvoice('pay-1')
+  assert.equal(payDoc(a).status, 'removed')
+  assert.equal(sells().length, 0)
+
+  bankSays()
+  await a.hook(ok())
+  assert.equal(payDoc(a).status, 'paid')
+  assert.equal(payDoc(a).receiptId, receiptUuid('pay-1'))
+  assert.deepEqual(sells().map((c) => c.body.id), [receiptUuid('pay-1')])
+  assert.equal(shopDoc(a).state, 'payment_review')
+  assert.equal(shopDoc(a).paidPaymentId, 'pay-1')
+  assert.equal(removals().length, 1, 'свой счёт второй раз не снимается')
+})
+
+test('оплата заказа снимает прочий живой счёт настоящим запросом к банку, с токеном его ФОП', async (t) => {
+  const a = await mount(t, {
+    ...shopSeed({}, { paymentIds: ['pay-1', 'pay-2'] }),
+    'payments/pay-2': shopPayment({ orderId: 'pay-2', providerOrderId: 'inv-2', fopId: 'fop-b' }),
+  })
+  a.api.setShopHooks(realHooks(a))
+  bankSays()
+  await a.hook(ok())
+  assert.deepEqual(removals().map((c) => [c.body.invoiceId, c.headers['X-Token']]), [['inv-2', 'MONO-B']])
+  assert.equal(payDoc(a, 'pay-2').status, 'removed')
+  assert.equal(payDoc(a).status, 'paid')
+  assert.equal(shopDoc(a).state, 'paid')
+  assert.equal(sells().length, 1)
+})
+
+// ---------- чтение чека при просроченном токене кассира: настоящий checkbox.js ----------
+
+const route = (c) => [c.method, c.url.replace(CBX, ''), c.headers.Authorization]
+const tokenSeq = () => {
+  let n = 0
+  return () => ({ access_token: `tok-${++n}` })
+}
+
+test('getReceipt: 401 лечится одним входом и одним повтором со свежим токеном, дальше токен из кэша', async () => {
+  net.reset()
+  net.on.signin = tokenSeq()
+  const fop = { id: 'read-401', checkbox: cashbox('R') }
+  await realCheckbox.getReceipt(fop, 'r-1')
+  assert.deepEqual(net.calls.map(route), [['POST', '/cashier/signinPinCode', undefined], ['GET', '/receipts/r-1', 'Bearer tok-1']])
+
+  net.calls = []
+  let expired = true
+  net.on.receipt = (id) => {
+    if (expired) { expired = false; throw httpErr(401, {}) }
+    return { id, status: 'DONE', fiscal_code: 'FC-2', tax_url: 'https://check.example/2' }
+  }
+  assert.deepEqual(await realCheckbox.getReceipt(fop, 'r-2'), { receiptId: 'r-2', fiscalCode: 'FC-2', taxUrl: 'https://check.example/2', status: 'DONE' })
+  assert.deepEqual(net.calls.map(route), [
+    ['GET', '/receipts/r-2', 'Bearer tok-1'],
+    ['POST', '/cashier/signinPinCode', undefined],
+    ['GET', '/receipts/r-2', 'Bearer tok-2'],
+  ])
+  assert.deepEqual(net.of('POST', `${CBX}/cashier/signinPinCode`)[0].body, { pin_code: 'PIN-R' })
+
+  net.calls = []
+  await realCheckbox.getReceipt(fop, 'r-3')
+  assert.deepEqual(net.calls.map(route), [['GET', '/receipts/r-3', 'Bearer tok-2']])
+})
+
+test('getReceipt: второй 401 не зацикливается, ошибка доходит до вызывающего, новый токен остаётся', async () => {
+  net.reset()
+  net.on.signin = tokenSeq()
+  const fop = { id: 'read-401-twice', checkbox: cashbox('T') }
+  await realCheckbox.signin(fop)
+  net.calls = []
+  net.on.receipt = () => { throw httpErr(401, {}) }
+  await assert.rejects(realCheckbox.getReceipt(fop, 'r-1'), (e) => e.response.status === 401)
+  assert.deepEqual(net.calls.map(route), [
+    ['GET', '/receipts/r-1', 'Bearer tok-1'],
+    ['POST', '/cashier/signinPinCode', undefined],
+    ['GET', '/receipts/r-1', 'Bearer tok-2'],
+  ])
+})
+
+test('getReceipt: другие ошибки входа не вызывают и токен не сбрасывают', async () => {
+  net.reset()
+  net.on.signin = tokenSeq()
+  const fop = { id: 'read-other', checkbox: cashbox('O2') }
+  await realCheckbox.signin(fop)
+  for (const err of [httpErr(403, {}), httpErr(404, {}), httpErr(500, {}), new Error('socket hang up')]) {
+    net.calls = []
+    net.on.receipt = () => { throw err }
+    await assert.rejects(realCheckbox.getReceipt(fop, 'r-1'), (e) => e === err)
+    assert.deepEqual(net.calls.map(route), [['GET', '/receipts/r-1', 'Bearer tok-1']])
+  }
+})
+
+test('getReceipt: вход при повторе не удался: ошибка входа наружу, старый токен забыт, следующий вызов входит заново', async () => {
+  net.reset()
+  const next = tokenSeq()
+  net.on.signin = next
+  const fop = { id: 'read-signin-down', checkbox: cashbox('D') }
+  await realCheckbox.signin(fop)
+  net.calls = []
+  let expired = true
+  net.on.receipt = (id) => {
+    if (expired) { expired = false; throw httpErr(401, {}) }
+    return { id, status: 'DONE' }
+  }
+  const down = httpErr(502, {})
+  net.on.signin = () => { throw down }
+  await assert.rejects(realCheckbox.getReceipt(fop, 'r-1'), (e) => e === down)
+  assert.deepEqual(net.calls.map(route), [['GET', '/receipts/r-1', 'Bearer tok-1'], ['POST', '/cashier/signinPinCode', undefined]])
+
+  net.calls = []
+  net.on.signin = next
+  assert.equal((await realCheckbox.getReceipt(fop, 'r-1')).status, 'DONE')
+  assert.deepEqual(net.calls.map(route), [['POST', '/cashier/signinPinCode', undefined], ['GET', '/receipts/r-1', 'Bearer tok-2']])
+})
+
+test('сверка: просроченный токен кассира не мешает дописать код чека; если вход не помог, документ цел и очередь идёт дальше', async (t) => {
+  const seed = {
+    'payments/pay-1': payment({ fopId: 'fop-stale', status: 'paid', paytype: 'mono-acquire', receiptId: 'r-1', receiptStatus: 'CREATED' }),
+    'payments/pay-2': payment({ orderId: 'pay-2', status: 'paid', paytype: 'mono-acquire', receiptId: 'r-2', receiptStatus: 'CREATED', estimateId: undefined, serviceRequestId: undefined }),
+  }
+  const a = await mount(t, seed)
+  net.on.signin = () => ({ access_token: 'tok-old' })
+  await realCheckbox.signin({ id: 'fop-stale', checkbox: cashbox('S') })
+
+  // Касса признаёт только новый токен, как после истечения срока.
+  net.on.signin = () => ({ access_token: 'tok-new' })
+  const answer = (id) => ({ id, status: 'DONE', fiscal_code: `FC-${id}`, tax_url: `https://check.example/${id}` })
+  net.on.receipt = (id) => {
+    if (id === 'r-1' && net.calls.at(-1).headers.Authorization !== 'Bearer tok-new') throw httpErr(401, {})
+    return answer(id)
+  }
+  await reconcileNow(a)
+  assert.equal(payDoc(a).receiptStatus, 'DONE')
+  assert.equal(payDoc(a).fiscalCode, 'FC-r-1')
+  assert.equal(payDoc(a).taxUrl, 'https://check.example/r-1')
+  assert.equal(payDoc(a, 'pay-2').fiscalCode, 'FC-r-2')
+  assert.equal(a.logged('error', 'reconcile receipt'), false)
+
+  const b = await mount(t, seed)
+  net.on.receipt = (id) => { if (id === 'r-1') throw httpErr(401, {}); return answer(id) }
+  await reconcileNow(b)
+  assert.equal(payDoc(b).receiptStatus, 'CREATED')
+  assert.equal(payDoc(b).fiscalCode, undefined)
+  assert.ok(b.logged('error', 'reconcile receipt pay-1 401'))
+  assert.equal(payDoc(b, 'pay-2').fiscalCode, 'FC-r-2')
+  assert.equal(sells().length, 0)
 })

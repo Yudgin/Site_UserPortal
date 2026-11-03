@@ -30,8 +30,14 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
     const fop = await payments.resolveFop(p.fopId)
     if (!fop) throw new Error(`ФОП ${p.fopId} не завантажено`)
     await mono.removeInvoice(fop, p.providerOrderId)
-    await payments.saveOrder({ orderId: paymentId, status: 'removed' })
-    return true
+    // Пока банк отвечал, колбэк мог записать оплату: её не затираем.
+    const ref = adminDb.collection('payments').doc(String(paymentId))
+    return adminDb.runTransaction(async (tx) => {
+      const snap = await tx.get(ref)
+      if (snap.data()?.status !== 'pending') return false
+      tx.set(ref, { status: 'removed', updatedAt: nowIso() }, { merge: true })
+      return true
+    })
   }
 
   const removeOtherInvoices = async (shop, paidId) => {
