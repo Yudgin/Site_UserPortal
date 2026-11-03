@@ -18,6 +18,7 @@ import { registerServiceRequests } from './serviceRequests.js'
 import { registerNotifications } from './notifications.js'
 import { registerPayments } from './payments.js'
 import { createShopPaymentHooks } from './shopPayments.js'
+import { registerShopOrders } from './shopOrders.js'
 import { registerFopsAdmin } from './fopsAdmin.js'
 import { registerNpTtn } from './novaPoshtaTtn.js'
 import { registerTelegramLinks } from './telegramLinks.js'
@@ -1258,7 +1259,10 @@ registerMasterEstimates(app, { adminDb, notifyClient })
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 const paymentsApi = registerPayments(app, { adminDb })
-paymentsApi.setShopHooks(createShopPaymentHooks({ adminDb, payments: paymentsApi, siteUrl: SITE_URL }))
+const shopHooks = createShopPaymentHooks({ adminDb, payments: paymentsApi, siteUrl: SITE_URL })
+paymentsApi.setShopHooks(shopHooks)
+// Магазин на runferry.ua: /api/shop/* для сервера сайта по токену x-shop-token (Secret Manager shop-site-token), без токена 503.
+registerShopOrders(app, { adminDb, npRequest, hooks: shopHooks, siteUrl: SITE_URL })
 // Управление ФОПами (владелец): мета в Firestore, секреты write-only (fopSecrets, backend-only).
 registerFopsAdmin(app, { adminDb, refreshFops })
 // Создание ТТН Новой Почты (InternetDocument.save) по шаблону: власник — будь-який шаблон; директор із

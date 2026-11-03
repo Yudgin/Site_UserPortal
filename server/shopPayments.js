@@ -5,7 +5,7 @@ import * as monoAcquire from './monoAcquire.js'
 
 const nowIso = () => new Date().toISOString()
 const DAY_MS = 24 * 60 * 60 * 1000
-const KYIV_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv' }) // YYYY-MM-DD, как id в shopDaily
+export const KYIV_DAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv' }) // YYYY-MM-DD, как id в shopDaily
 const newAlert = (at, text) => ({ at, sentAt: null, text })
 
 export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, siteUrl = 'https://my.runferry.com' }) {
@@ -228,7 +228,7 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
     return snap.exists ? snap.data().email || null : null
   }
 
-  return { onShopPaid, onShopReversed, onShopPartialRefund, onShopReversalSignal, onShopUnknownStatus, receiptEmail, removeLiveInvoice }
+  return { onShopPaid, onShopReversed, onShopPartialRefund, onShopReversalSignal, onShopUnknownStatus, receiptEmail, removeLiveInvoice, sendAlerts }
 }
 
 export default createShopPaymentHooks
