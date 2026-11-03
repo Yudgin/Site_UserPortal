@@ -117,11 +117,13 @@ export function registerPayments(app, deps) {
 
   // Уведомление владельцу в Telegram (для «гроші є, чек ні»). Один раз на заказ (ownerNotified).
   const notifyOwner = async (text) => {
-    if (!OWNER_CHAT || !TG_TOKEN) return
+    if (!OWNER_CHAT || !TG_TOKEN) return false
     try {
       await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, { chat_id: OWNER_CHAT, text }, { timeout: 8000 })
+      return true
     } catch (e) {
       console.error('notifyOwner:', e.message)
+      return false
     }
   }
   const notifyOwnerNoReceipt = async (order, reason) => {
@@ -248,8 +250,11 @@ export function registerPayments(app, deps) {
   // Ядро создания оплаты (переиспользуется HTTP-роутом и оплатой из сметы).
   // Возвращает { ok:true, data } или { ok:false, status, code, message }. Деньги — server-authoritative:
   // amount обязан точно совпадать с суммой позиций (в копейках), иначе чек и списание разойдутся.
-  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId, serviceRequestId, boatOrderId, paymentLabel }) => {
-    const fop = getFop(fopId)
+  // Только для кода магазина, телом запроса не задаются: shopOrderId; validitySec (у ремонтов и лодок срока нет:
+  // ссылку лодки владелец пересылает покупателю); webHookBase (PUBLIC_BASE_URL включил бы колбэки и ремонтам);
+  // fopOverride (ФОП, прошедший гейт магазина, а не копия из кэша). Чек выбивается по fopId, поэтому id обязан совпасть.
+  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId, serviceRequestId, boatOrderId, paymentLabel, shopOrderId, validitySec, webHookBase, fopOverride }) => {
+    const fop = fopOverride ? (fopOverride.id === fopId ? fopOverride : null) : getFop(fopId)
     if (!fop) return { ok: false, status: 400, code: 'BAD_FOP', message: 'Невідомий ФОП' }
     // Новую оплату НЕ принимаем на выключенный ФОП (но getFop его резолвит для старых заказов).
     if (fop.active === false) return { ok: false, status: 400, code: 'FOP_INACTIVE', message: 'ФОП вимкнено' }
@@ -271,6 +276,7 @@ export function registerPayments(app, deps) {
       ...(serviceRequestId ? { serviceRequestId: String(serviceRequestId) } : {}),
       ...(boatOrderId ? { boatOrderId: String(boatOrderId) } : {}),
       ...(paymentLabel ? { paymentLabel: String(paymentLabel) } : {}),
+      ...(shopOrderId ? { shopOrderId: String(shopOrderId) } : {}),
     }
 
     if (method.startsWith('liqpay')) {
@@ -310,9 +316,11 @@ export function registerPayments(app, deps) {
       const lineKop = (priceUah, qty) => Math.round((Math.round(Number(priceUah) * 100) * Math.round((qty || 1) * 1000)) / 1000)
       const basket = goods.map((g) => ({ name: String(g.name), qty: Number(g.qty) || 1, sumKop: lineKop(g.price, Number(g.qty) || 1), code: g.code }))
       const amountKop = basket.reduce((s, b) => s + b.sumKop, 0)
+      const hookBase = webHookBase ? String(webHookBase).replace(/\/$/, '') : PUBLIC
       const inv = await mono.createInvoice(fop, {
         amountKop, reference: orderId, destination: description || `Оплата RunFerry #${orderId}`, goods: basket,
-        redirectUrl: resultUrl, webHookUrl: PUBLIC ? `${PUBLIC}/api/mono/acquire/callback` : undefined,
+        redirectUrl: resultUrl, webHookUrl: hookBase ? `${hookBase}/api/mono/acquire/callback` : undefined,
+        ...(validitySec ? { validitySec } : {}),
       })
       order.provider = 'mono-acquire'
       order.providerOrderId = String(inv.invoiceId || orderId)
@@ -334,8 +342,8 @@ export function registerPayments(app, deps) {
     if (!adminDb) return res.status(503).json({ success: false, error: { code: 'NO_DB', message: 'Firestore не настроен' } })
     if (!hasAnyFop()) return res.status(503).json({ success: false, error: { code: 'NO_FOPS', message: 'ФОП не настроены (FOPS_CONFIG)' } })
     try {
-      // Сюда идёт всё тело, а подпись в чеке телом запроса не задаётся.
-      const { paymentLabel: _label, ...body } = req.body || {}
+      // Сюда идёт всё тело, а подпись в чеке и параметры счёта магазина телом запроса не задаются.
+      const { paymentLabel: _label, shopOrderId: _shop, validitySec: _validity, webHookBase: _hook, fopOverride: _fop, ...body } = req.body || {}
       const r = await createPayment(body)
       if (!r.ok) return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
       return res.json({ success: true, data: r.data })

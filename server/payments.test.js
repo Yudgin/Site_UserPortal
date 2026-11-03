@@ -1209,3 +1209,152 @@ test('сверка: повтор чека берёт ФОП из базы; ФО�
   assert.deepEqual(sells().map((c) => c.headers['X-License-Key']), ['LIC-A'], 'очередь дошла до ФОП из кэша')
   assert.equal(b.db.get('payments/cold').receiptStatus, 'error')
 })
+
+// ---------- параметры счёта магазина: только из кода, не из тела запроса ----------
+
+const CALLBACK = '/api/mono/acquire/callback'
+const SHOP_ARGS = { fopId: 'fop-a', amount: 1500.5, goods: GOODS, method: 'mono-acquire', description: 'Тест', resultUrl: RESULT_URL }
+// Тело счёта без того, что у каждого счёта своё или что добавляет магазин.
+const commonBody = ({ validity: _validity, webHookUrl: _hook, ...body }) => ({ ...body, merchantPaymInfo: { ...body.merchantPaymInfo, reference: 'x' } })
+
+test('счёт магазина: срок, адрес колбэка и связь с заказом доходят куда нужно, остальное как у ремонта', async (t) => {
+  const a = await mount(t)
+  const plain = await a.api.createPayment(SHOP_ARGS)
+  const shop = await a.api.createPayment({ ...SHOP_ARGS, validitySec: 3600, webHookBase: 'https://hook.example/', shopOrderId: 'so-1' })
+  assert.equal(shop.ok, true)
+  const [before, after] = invoices()
+  assert.equal(after.body.validity, 3600)
+  assert.equal(after.body.webHookUrl, `https://hook.example${CALLBACK}`)
+  assert.deepEqual(commonBody(after.body), commonBody(before.body))
+  assert.deepEqual(Object.keys(before.body).sort(), ['amount', 'ccy', 'merchantPaymInfo', 'paymentType', 'redirectUrl'])
+  assert.deepEqual(after.headers, before.headers)
+
+  const { orderId } = shop.data
+  assert.deepEqual(withoutTimes(a.db.get(`payments/${orderId}`)), {
+    orderId, fopId: 'fop-a', amount: 1500.5, goods: GOODS, method: 'mono-acquire', status: 'pending', provider: 'mono-acquire', providerOrderId: 'inv-2', shopOrderId: 'so-1',
+  })
+  assert.equal('shopOrderId' in a.db.get(`payments/${plain.data.orderId}`), false)
+  assert.deepEqual(shop.data, { orderId, provider: 'mono-acquire', pageUrl: 'https://pay.example/inv-2' }, 'ответ тот же, что у ремонта')
+})
+
+test('счёт магазина: каждый параметр работает сам по себе, пустые значения как их отсутствие', async (t) => {
+  const a = await mount(t)
+  const keys = async (over) => {
+    await a.api.createPayment({ ...SHOP_ARGS, ...over })
+    return Object.keys(invoices().at(-1).body).filter((k) => k === 'validity' || k === 'webHookUrl')
+  }
+  assert.deepEqual(await keys({ validitySec: 3600 }), ['validity'])
+  assert.deepEqual(await keys({ webHookBase: 'https://hook.example' }), ['webHookUrl'])
+  assert.equal(invoices().at(-1).body.webHookUrl, `https://hook.example${CALLBACK}`, 'адрес без косой черты на конце')
+  assert.deepEqual(await keys({ shopOrderId: 'so-1' }), [])
+  assert.deepEqual(await keys({ validitySec: 0, webHookBase: '', shopOrderId: '', fopOverride: null }), [])
+  const r = await a.api.createPayment({ ...SHOP_ARGS, shopOrderId: '' })
+  assert.equal('shopOrderId' in a.db.get(`payments/${r.data.orderId}`), false)
+  const n = await a.api.createPayment({ ...SHOP_ARGS, shopOrderId: 123 })
+  assert.equal(a.db.get(`payments/${n.data.orderId}`).shopOrderId, '123')
+})
+
+test('счёт магазина: свой адрес колбэка важнее PUBLIC_BASE_URL, ремонт остаётся на PUBLIC_BASE_URL', async (t) => {
+  const a = await mount(t, repairSeed(), { env: { PUBLIC_BASE_URL: 'https://public.example/' } })
+  await a.api.createPayment({ ...SHOP_ARGS, webHookBase: 'https://hook.example' })
+  assert.equal(invoices().at(-1).body.webHookUrl, `https://hook.example${CALLBACK}`)
+  await a.api.createPayment(SHOP_ARGS)
+  assert.equal(invoices().at(-1).body.webHookUrl, `https://public.example${CALLBACK}`)
+  await a.send('POST', '/api/estimates/pay', { estimateId: 'est-1', method: 'mono-acquire', webHookBase: 'https://evil.example' })
+  assert.equal(invoices().at(-1).body.webHookUrl, `https://public.example${CALLBACK}`)
+})
+
+test('fopOverride: счёт идёт по переданному ФОП, кэш не нужен и не важнее', async (t) => {
+  const a = await mount(t)
+  const cold = await a.api.createPayment({ ...SHOP_ARGS, fopId: 'fop-cold', fopOverride: { id: 'fop-cold', monoAcquire: { token: 'MONO-COLD' } } })
+  assert.equal(cold.ok, true)
+  assert.equal(invoices().at(-1).headers['X-Token'], 'MONO-COLD')
+  const doc = a.db.get(`payments/${cold.data.orderId}`)
+  assert.equal(doc.fopId, 'fop-cold')
+  assert.equal('fopOverride' in doc, false, 'ключи ФОП не попадают в документ оплаты')
+  assert.equal(JSON.stringify(doc).includes('MONO-COLD'), false)
+
+  await a.api.createPayment({ ...SHOP_ARGS, fopOverride: { id: 'fop-a', monoAcquire: { token: 'MONO-NEW' } } })
+  assert.equal(invoices().at(-1).headers['X-Token'], 'MONO-NEW', 'ключ только что сменили, в кэше ещё старый')
+
+  const sent = invoices().length
+  const refused = async (over, code) => {
+    const r = await a.api.createPayment({ ...SHOP_ARGS, ...over })
+    assert.equal(r.ok, false, code)
+    assert.equal(r.code, code)
+    assert.equal(r.status, 400)
+  }
+  const token = { monoAcquire: { token: 'MONO-X' } }
+  await refused({ fopOverride: { id: 'fop-b', ...token } }, 'BAD_FOP')
+  await refused({ fopOverride: { ...token } }, 'BAD_FOP')
+  await refused({ fopId: 'fop-cold' }, 'BAD_FOP')
+  await refused({ fopOverride: { id: 'fop-a', active: false, ...token } }, 'FOP_INACTIVE')
+  await refused({ fopOverride: { id: 'fop-a' } }, 'NO_MONO_ACQUIRE')
+  assert.equal(invoices().length, sent, 'при отказе банк не вызывается')
+})
+
+test('параметры магазина из тела запроса не действуют: /api/pay/create, смета, заказ лодки', async (t) => {
+  const boat = { status: 'new', total: 900, clientPhone: '+380000000000', lines: [{ label: 'Кораблик', price: 900, qty: 1 }] }
+  const a = await mount(t, { ...repairSeed(), 'boatOrders/bo-1': boat })
+  const foreign = {
+    validitySec: 60, webHookBase: 'https://evil.example', shopOrderId: 'so-evil', paymentLabel: 'Чужа підпис',
+    fopOverride: { id: 'fop-a', monoAcquire: { token: 'EVIL' } },
+  }
+  const create = { fopId: 'fop-a', amount: 1500.5, goods: GOODS, method: 'mono-acquire' }
+  const requests = [
+    ['/api/pay/create', { ...create, ...foreign }, ADMIN],
+    ['/api/pay/create', { ...create, ['__proto__']: foreign }, ADMIN],
+    ['/api/estimates/pay', { estimateId: 'est-1', method: 'mono-acquire', ...foreign }, {}],
+    ['/api/boat-orders/pay', { boatOrderId: 'bo-1', fopId: 'fop-a', method: 'mono-acquire', ...foreign }, ADMIN],
+  ]
+  for (const [path, body, headers] of requests) {
+    const r = await a.send('POST', path, body, headers)
+    assert.equal(r.status, 200, path)
+    const { orderId } = r.json.data
+    assert.deepEqual(Object.keys(r.json.data).sort(), ['orderId', 'pageUrl', 'provider'], path)
+    const inv = invoices().at(-1)
+    assert.equal(inv.headers['X-Token'], 'MONO-A', path)
+    assert.deepEqual(Object.keys(inv.body).sort(), ['amount', 'ccy', 'merchantPaymInfo', 'paymentType'], path)
+    const doc = a.db.get(`payments/${orderId}`)
+    for (const k of Object.keys(foreign)) assert.equal(k in doc, false, `${path}: ${k}`)
+    assert.equal(JSON.stringify(doc).includes('EVIL'), false, path)
+  }
+
+  const unknown = await a.send('POST', '/api/pay/create', { ...create, fopId: 'fop-cold', fopOverride: { id: 'fop-cold', monoAcquire: { token: 'EVIL' } } }, ADMIN)
+  assert.equal(unknown.status, 400, 'ФОП вне кэша телом запроса не подставить')
+  assert.equal(unknown.json.error.code, 'BAD_FOP')
+  const sent = invoices().length
+  const inactive = await a.send('POST', '/api/pay/create', { ...create, fopId: 'fop-off', fopOverride: { id: 'fop-off', active: true, monoAcquire: { token: 'EVIL' } } }, ADMIN)
+  assert.equal(inactive.json.error.code, 'FOP_INACTIVE', 'выключенный ФОП телом запроса не включить')
+  assert.equal(invoices().length, sent)
+})
+
+// ---------- алерт владельцу: результат отправки ----------
+
+test('notifyOwner: true при отправке, false без переменных и при сбое, ошибку наружу не бросает', async (t) => {
+  const env = { OWNER_TELEGRAM_CHAT_ID: '42', TELEGRAM_BOT_TOKEN: 'TG' }
+  const a = await mount(t, {}, { env })
+  assert.equal(await a.api.notifyOwner('Текст'), true)
+  net.on.telegram = () => { throw httpErr(403, { ok: false }) }
+  assert.equal(await a.api.notifyOwner('Текст'), false)
+  assert.ok(a.logged('error', 'notifyOwner: Request failed with status code 403'))
+
+  for (const partial of [{}, { OWNER_TELEGRAM_CHAT_ID: '42' }, { TELEGRAM_BOT_TOKEN: 'TG' }]) {
+    const silent = await mount(t, {}, { env: partial })
+    assert.equal(await silent.api.notifyOwner('Текст'), false)
+    assert.equal(net.calls.length, 0, 'без обеих переменных Telegram не вызывается')
+  }
+})
+
+test('notifyOwner: прежний алерт о чеке результат не читает, неудачная отправка не повторяется', async (t) => {
+  const a = await mount(t, paySeed(), { env: { OWNER_TELEGRAM_CHAT_ID: '42', TELEGRAM_BOT_TOKEN: 'TG' } })
+  net.on.sell = () => { throw new Error('timeout') }
+  net.on.telegram = () => { throw new Error('tg down') }
+  await a.hook(ok())
+  await a.hook(ok())
+  const doc = a.db.get('payments/pay-1')
+  assert.equal(doc.status, 'paid')
+  assert.equal(doc.receiptStatus, 'error')
+  assert.equal(doc.ownerNotified, true)
+  assert.equal(net.calls.filter((c) => c.url.includes('telegram')).length, 1)
+})
