@@ -713,6 +713,8 @@ test('алерт владельцу: один раз на оплату, точн
   await noCb.hook(ok())
   assert.match(net.of('POST', url)[0].body.text, /ЧЕК НЕ ВИБИТО \(ФОП без Checkbox\)\. ФОП fop-nock\./)
 
+  assert.ok(net.of('POST', url).every((c) => !c.body.text.includes("Пам'ятка")), 'у ремонта строки памятки нет')
+
   const silent = await mount(t, paySeed())
   net.on.sell = () => { throw new Error('timeout') }
   await silent.hook(ok())
@@ -1482,6 +1484,7 @@ test('settleMonoAcquire: тот же путь для следующих шаго
 // ---------- счёт магазина: сверка суммы, заказ догоняет оплату, возврат ----------
 
 const { createShopPaymentHooks } = await import('./shopPayments.js')
+const { withGuideStep } = await import('./shopCore.js')
 const realMono = await import('./monoAcquire.js')
 const CARD_URL = 'https://portal.example/shop-orders/so-1'
 const shopOrder = (over = {}) => ({
@@ -1603,6 +1606,14 @@ test('магазин: банк не ответил на чтение: докум
   assert.equal(sells().length, 1)
 })
 
+test('магазин: касса упала: общий алерт «ЧЕК НЕ ВИБИТО» ведёт на шаг памятки', async (t) => {
+  const a = await mountShop(t, shopSeed())
+  net.on.sell = () => { throw new Error('timeout') }
+  await a.hook(ok())
+  assert.deepEqual(alertTexts(), [withGuideStep('receipt-failed', '⚠️ RunFerry: оплата pay-1 на 1500.5 грн пройшла, але ЧЕК НЕ ВИБИТО (помилка Checkbox). ФОП fop-a. Перевірте в адмінці оплат.')])
+  assert.ok(alertTexts()[0].endsWith("\nПам'ятка, крок 7"))
+})
+
 test('магазин: сумма не сошлась при первой записи: paid, чек не выходит, payment_review, один алерт', async (t) => {
   const cases = [
     [{ amount: 150000 }, 'сума 150000 коп. замість 150050'],
@@ -1633,7 +1644,7 @@ test('магазин: сумма не сошлась при первой зап�
     assert.equal(stock(a), 5, 'склад решает владелец вместе с заказом')
     assert.equal(a.db.get('shopPhones/ph-1').openCard['V2-LID-R'], null)
     assert.equal(unpaid(a), 2)
-    const text = `⚠️ Замовлення RF-100001: 1500.5 грн, дані банку не збігаються (${part}). Чек не виписано. Звірте суму в кабінеті monobank і вирішіть на картці замовлення: ${CARD_URL}`
+    const text = withGuideStep('amount-mismatch', `⚠️ Замовлення RF-100001: 1500.5 грн, дані банку не збігаються (${part}). Чек не виписано. Звірте суму в кабінеті monobank і вирішіть на картці замовлення: ${CARD_URL}`)
     assert.deepEqual(alertTexts(), [text])
 
     await a.hook(ok())
@@ -1682,7 +1693,7 @@ test('магазин: банк не прислал сумму или валют�
     assert.equal(payDoc(a).receiptStatus, 'DONE')
     assert.equal(sells().length, 1)
     assert.equal(shopDoc(a).state, 'paid')
-    assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: 1500.5 грн оплачено, але банк не надіслав ${part}, суму не звірено. Звірте її в кабінеті monobank: ${CARD_URL}`])
+    assert.deepEqual(alertTexts(), [withGuideStep('amount-unverified', `⚠️ Замовлення RF-100001: 1500.5 грн оплачено, але банк не надіслав ${part}, суму не звірено. Звірте її в кабінеті monobank: ${CARD_URL}`)])
     await a.hook(ok())
     assert.equal(sells().length, 1)
     assert.equal(alertTexts().length, 1)
@@ -1741,7 +1752,7 @@ test('магазин: частичный возврат: receiptStatus не тр
   assert.equal(shopDoc(a).state, 'paid')
   assert.equal(shopDoc(a).partialRefund.amount, 500)
   assert.equal(sells().length, 1, 'второй чек не выходит')
-  const text500 = `⚠️ Замовлення RF-100001: банк повернув частину оплати, 500 грн. Оформіть чек повернення на різницю в Checkbox: ${CARD_URL}`
+  const text500 = withGuideStep('partial-refund-50000', `⚠️ Замовлення RF-100001: банк повернув частину оплати, 500 грн. Оформіть чек повернення на різницю в Checkbox: ${CARD_URL}`)
   assert.deepEqual(alertTexts(), [text500])
 
   const at = pay.partialRefund.at
@@ -1754,7 +1765,7 @@ test('магазин: частичный возврат: receiptStatus не тр
   pay = payDoc(a)
   assert.equal(pay.partialRefund.amount, 700)
   assert.equal(shopDoc(a).partialRefund.amount, 700)
-  assert.equal(alertTexts().at(-1), `⚠️ Замовлення RF-100001: банк повернув частину оплати, 700 грн. Оформіть чек повернення на різницю в Checkbox: ${CARD_URL}`)
+  assert.equal(alertTexts().at(-1), withGuideStep('partial-refund-70000', `⚠️ Замовлення RF-100001: банк повернув частину оплати, 700 грн. Оформіть чек повернення на різницю в Checkbox: ${CARD_URL}`))
   assert.equal(alertTexts().length, 2)
   assert.equal(sells().length, 1)
 })
@@ -1942,7 +1953,7 @@ test('магазин: второй успех: алерт «зайвий пла�
   assert.equal(shopDoc(a).paidPaymentId, 'pay-1')
   assert.equal(shopDoc(a).paidAt, shop.paidAt)
   assert.equal(stock(a), 5)
-  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: зайвий платіж 1500.5 грн, замовлення вже оплачено іншим рахунком. Поверніть ці гроші в кабінеті monobank і оформіть чек повернення в Checkbox: ${CARD_URL}`])
+  assert.deepEqual(alertTexts(), [withGuideStep('extra-payment-pay-2', `⚠️ Замовлення RF-100001: зайвий платіж 1500.5 грн, замовлення вже оплачено іншим рахунком. Поверніть ці гроші в кабінеті monobank і оформіть чек повернення в Checkbox: ${CARD_URL}`)])
   assert.deepEqual(Object.keys(shopDoc(a).alerts), ['extra-payment-pay-2'])
   await a.hook(ok({ invoiceId: 'inv-2', reference: 'pay-2' }))
   assert.equal(alertTexts().length, 1)
@@ -1969,7 +1980,7 @@ test('магазин: оплата по cancelled и expired: payment_review, а
     assert.equal(sells().length, 1)
     assert.equal(stock(a), 5)
     assert.equal(unpaid(a), 3)
-    assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: 1500.5 грн оплачено вже після закриття замовлення. Вирішіть на картці замовлення: відправити чи повернути гроші: ${CARD_URL}`])
+    assert.deepEqual(alertTexts(), [withGuideStep('late-payment', `⚠️ Замовлення RF-100001: 1500.5 грн оплачено вже після закриття замовлення. Вирішіть на картці замовлення: відправити чи повернути гроші: ${CARD_URL}`)])
   }
 })
 
@@ -1978,7 +1989,7 @@ test('магазин: второй оплаченный заказ того же
   const a = await mountShop(t, { ...shopSeed(), 'shopOrders/so-0': other() })
   await a.hook(ok())
   await a.hook(ok())
-  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: можливий дубль, той самий покупець за добу оплатив RF-100000. Перевірте обидва перед відправкою: ${CARD_URL}`])
+  assert.deepEqual(alertTexts(), [withGuideStep('possible-duplicate', `⚠️ Замовлення RF-100001: можливий дубль, той самий покупець за добу оплатив RF-100000. Перевірте обидва перед відправкою: ${CARD_URL}`)])
   assert.equal(shopDoc(a).state, 'paid')
   assert.equal(sells().length, 1)
   assert.match(shopDoc(a).alerts['possible-duplicate'].sentAt, ISO)
@@ -2028,13 +2039,13 @@ test('магазин: склад: 1 даёт 0 и выключение, 0 даё
   const a = await mountShop(t, withStock({ stock: 1 }))
   await a.hook(ok())
   assert.deepEqual(a.db.get('system/shopSales').skus, { 'V2-LID-R': { enabled: true, inStock: false, stock: 0 }, OTHER: { stock: 9 } })
-  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: артикул V2-LID-R закінчився, продаж вимкнено. Поповніть залишок на сторінці замовлень: ${CARD_URL}`])
+  assert.deepEqual(alertTexts(), [withGuideStep('stock-out', `⚠️ Замовлення RF-100001: артикул V2-LID-R закінчився, продаж вимкнено. Поповніть залишок на сторінці замовлень: ${CARD_URL}`)])
 
   const b = await mountShop(t, withStock({ stock: 0 }))
   await b.hook(ok())
   assert.equal(stock(b), 0)
   assert.equal(b.db.get('system/shopSales').skus['V2-LID-R'].inStock, false)
-  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: оплачено більше, ніж було на складі (V2-LID-R), продаж артикула вимкнено. Домовтеся з покупцем або поверніть гроші: ${CARD_URL}`])
+  assert.deepEqual(alertTexts(), [withGuideStep('stock-oversold', `⚠️ Замовлення RF-100001: оплачено більше, ніж було на складі (V2-LID-R), продаж артикула вимкнено. Домовтеся з покупцем або поверніть гроші: ${CARD_URL}`)])
   assert.equal(shopDoc(b).state, 'paid')
   assert.equal(sells().length, 1, 'деньги пришли, чек выходит')
 
@@ -2106,8 +2117,8 @@ test('магазин: в алертах нет имени, телефона и �
 
 // ---------- возврат всей суммы ----------
 
-const REVERSED_RECEIPT = `⚠️ Замовлення RF-100001: банк повернув 1500.5 грн. Чек було виписано: оформіть чек повернення в Checkbox. Накладну не створюйте, а якщо посилка вже пішла, зупиніть її: ${CARD_URL}`
-const REVERSED_NO_RECEIPT = `⚠️ Замовлення RF-100001: банк повернув 1500.5 грн. У нас чека немає: чек повернення потрібен, лише якщо чек є в кабінеті Checkbox. Накладну не створюйте, а якщо посилка вже пішла, зупиніть її: ${CARD_URL}`
+const REVERSED_RECEIPT = withGuideStep('reversed', `⚠️ Замовлення RF-100001: банк повернув 1500.5 грн. Чек було виписано: оформіть чек повернення в Checkbox. Накладну не створюйте, а якщо посилка вже пішла, зупиніть її: ${CARD_URL}`)
+const REVERSED_NO_RECEIPT = withGuideStep('reversed', `⚠️ Замовлення RF-100001: банк повернув 1500.5 грн. У нас чека немає: чек повернення потрібен, лише якщо чек є в кабінеті Checkbox. Накладну не створюйте, а якщо посилка вже пішла, зупиніть її: ${CARD_URL}`)
 
 test('магазин: reversed по оплатившему счёту: документ, заказ, алерт про чек, повтор ничего не меняет', async (t) => {
   const a = await mountShop(t, shopSeed())
@@ -2217,14 +2228,14 @@ test('магазин: reversed лишнего счёта: заказ тот же
   assert.equal(payDoc(a).status, 'paid', 'оплативший счёт цел')
   assert.equal(shopDoc(a).state, 'shipped')
   assert.deepEqual(shopDoc(a).history, shop.history)
-  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: повернуто зайвий платіж 700 грн, замовлення лишається без змін. Чек було виписано: оформіть чек повернення в Checkbox. ${CARD_URL}`])
+  assert.deepEqual(alertTexts(), [withGuideStep('extra-reversed-pay-2', `⚠️ Замовлення RF-100001: повернуто зайвий платіж 700 грн, замовлення лишається без змін. Чек було виписано: оформіть чек повернення в Checkbox. ${CARD_URL}`)])
   await a.hook(ok({ invoiceId: 'inv-2', reference: 'pay-2' }))
   assert.equal(alertTexts().length, 1)
 
   const b = await mountShop(t, seed({ receiptStatus: 'error', fiscalizeClaimedAt: null }))
   bankSays({ status: 'reversed', reference: 'pay-2' })
   await b.hook(ok({ invoiceId: 'inv-2', reference: 'pay-2' }))
-  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: повернуто зайвий платіж 700 грн, замовлення лишається без змін. У нас чека немає: чек повернення потрібен, лише якщо чек є в кабінеті Checkbox. ${CARD_URL}`])
+  assert.deepEqual(alertTexts(), [withGuideStep('extra-reversed-pay-2', `⚠️ Замовлення RF-100001: повернуто зайвий платіж 700 грн, замовлення лишається без змін. У нас чека немає: чек повернення потрібен, лише якщо чек є в кабінеті Checkbox. ${CARD_URL}`)])
 })
 
 test('магазин: reversed из любого состояния после оплаты; payment_review тоже закрывается', async (t) => {
@@ -2553,7 +2564,7 @@ const pad = (i) => String(i).padStart(3, '0')
 const shopAhead = (n, over = {}) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`payments/a-${pad(i)}`, shopPayment({ orderId: `a-${pad(i)}`, providerOrderId: `inv-a-${pad(i)}`, ...over })]))
 const paidShop = (pay = {}, order = {}) => shopSeed({ status: 'paid', paytype: 'mono-acquire', ...pay }, { state: 'paid', paidPaymentId: 'pay-1', paidAt: ago(5), ...order })
 const bankDown = () => { net.on.invoiceStatus = () => { throw httpErr(500, {}) } }
-const SIGNAL = `⚠️ Замовлення RF-100001: банк повідомив про повернення 1500.5 грн, але статус не вдалося перечитати. Чек не вийде, доки банк не відповість. Накладну не створюйте, звірте оплату в кабінеті monobank: ${CARD_URL}`
+const SIGNAL = withGuideStep('reversed-signal', `⚠️ Замовлення RF-100001: банк повідомив про повернення 1500.5 грн, але статус не вдалося перечитати. Чек не вийде, доки банк не відповість. Накладну не створюйте, звірте оплату в кабінеті monobank: ${CARD_URL}`)
 
 test('сверка: счета магазина впереди по id не закрывают ремонт: свежие не занимают лимит, ремонты опрашиваются первыми', async (t) => {
   const repair = () => ({ ...repairSeed(), 'payments/z-repair': payment({ orderId: 'z-repair', providerOrderId: 'inv-repair' }) })
@@ -2819,7 +2830,8 @@ test('магазин: незнакомый статус по оплаченно�
   assert.equal(sells().length, 0)
   assert.equal(shopDoc(a).state, 'paid')
   assert.ok(a.logged('warn', 'mono acquire webhook: статус chargeback за оплаченим рахунком pay-1'))
-  const text = (s) => `⚠️ Замовлення RF-100001: банк показує статус «${s}» за оплатою 1500.5 грн. Чек і накладну не робіть, доки не звірите оплату в кабінеті monobank: ${CARD_URL}`
+  const stored = (s) => `⚠️ Замовлення RF-100001: банк показує статус «${s}» за оплатою 1500.5 грн. Чек і накладну не робіть, доки не звірите оплату в кабінеті monobank: ${CARD_URL}`
+  const text = (s) => withGuideStep(`unknown-status-${s}`, stored(s))
   assert.deepEqual(alertTexts(), [text('chargeback')])
 
   await a.hook(ok())
@@ -2830,7 +2842,7 @@ test('магазин: незнакомый статус по оплаченно�
   bankSays({ status: 'a.b c' })
   await a.hook(ok())
   assert.equal(alertTexts().at(-1), text('a.b c'))
-  assert.equal(shopDoc(a).alerts['unknown-status-a_b_c'].text, text('a.b c'))
+  assert.equal(shopDoc(a).alerts['unknown-status-a_b_c'].text, stored('a.b c'))
 
   for (const status of ['failure', 'expired']) {
     const b = await mountShop(t, paidShop({ receiptId: 'r-1', receiptStatus: 'DONE' }))
@@ -2898,7 +2910,7 @@ test('магазин: reversed с остатком денег: заказ зак
   assert.equal(payDoc(a).partialRefund.amount, 500.5)
   assert.equal(shopDoc(a).state, 'reversed')
   assert.equal(shopDoc(a).partialRefund.amount, 500.5)
-  assert.deepEqual(alertTexts(), [`⚠️ Замовлення RF-100001: банк повернув 500.5 грн із 1500.5 грн. Чек було виписано: оформіть чек повернення в Checkbox. На рахунку лишилась решта: звірте суму в кабінеті monobank. Накладну не створюйте, а якщо посилка вже пішла, зупиніть її: ${CARD_URL}`])
+  assert.deepEqual(alertTexts(), [withGuideStep('reversed', `⚠️ Замовлення RF-100001: банк повернув 500.5 грн із 1500.5 грн. Чек було виписано: оформіть чек повернення в Checkbox. На рахунку лишилась решта: звірте суму в кабінеті monobank. Накладну не створюйте, а якщо посилка вже пішла, зупиніть її: ${CARD_URL}`)])
 
   for (const finalAmount of [0, null, 150050, 200000]) {
     const b = await mountShop(t, paidShop({ receiptId: 'r-1', receiptStatus: 'DONE' }))

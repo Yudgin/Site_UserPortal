@@ -3,7 +3,7 @@
 // Чек здесь не выбивается. В текстах алертов нет имени, телефона и отделения: только номер, сумма, что случилось и что делать.
 // Здесь же алерт владельцу и сообщение покупателю: повторы того и другого идут из сверки (shopReconcile.js).
 import * as monoAcquire from './monoAcquire.js'
-import { orderStatusUrl, transitionPatch } from './shopCore.js'
+import { orderStatusUrl, transitionPatch, withGuideStep } from './shopCore.js'
 
 const nowIso = () => new Date().toISOString()
 const HOUR_MS = 60 * 60 * 1000
@@ -74,8 +74,9 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
   const sendAlerts = async (ref, alerts) => {
     for (const [kind, alert] of Object.entries(alerts)) {
       try {
-        if (await payments.notifyOwner(alert.text)) await ref.set({ alerts: { [kind]: { sentAt: nowIso() } } }, { merge: true })
-        else await smsOwner(ref, kind, alert)
+        const text = withGuideStep(kind, alert.text)
+        if (await payments.notifyOwner(text)) await ref.set({ alerts: { [kind]: { sentAt: nowIso() } } }, { merge: true })
+        else await smsOwner(ref, kind, { ...alert, text })
       } catch (e) {
         console.error(`shop: алерт ${kind} ${ref.id}:`, e.message)
       }

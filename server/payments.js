@@ -24,6 +24,7 @@ import * as monoChast from './monoChast.js'
 import * as monoAcquire from './monoAcquire.js'
 import * as checkbox from './checkbox.js'
 import { statusTimes, paidRequestPatch } from './statusTimes.js'
+import { withGuideStep } from './shopCore.js'
 
 const nowIso = () => new Date().toISOString()
 const ADMIN_EMAIL = 'admin@runferry.de'
@@ -165,7 +166,8 @@ export function registerPayments(app, deps) {
       return
     }
     if (!claimed) return
-    await notifyOwner(`⚠️ RunFerry: оплата ${order.orderId} на ${order.amount} грн пройшла, але ЧЕК НЕ ВИБИТО (${reason}). ФОП ${order.fopId}. Перевірте в адмінці оплат.`)
+    const text = `⚠️ RunFerry: оплата ${order.orderId} на ${order.amount} грн пройшла, але ЧЕК НЕ ВИБИТО (${reason}). ФОП ${order.fopId}. Перевірте в адмінці оплат.`
+    await notifyOwner(order.shopOrderId ? withGuideStep('receipt-failed', text) : text)
   }
 
   // Обратная запись «деньги пришли» в документ-источник оплаты: фактическую смету

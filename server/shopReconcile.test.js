@@ -12,7 +12,7 @@ const { registerPayments } = await import('./payments.js')
 const { createShopPaymentHooks, KYIV_DAY } = await import('./shopPayments.js')
 const { createShopReconcile } = await import('./shopReconcile.js')
 const { registerNotifications } = await import('./notifications.js')
-const { orderPublicView } = await import('./shopCore.js')
+const { orderPublicView, withGuideStep } = await import('./shopCore.js')
 const realCheckbox = await import('./checkbox.js')
 
 const logs = []
@@ -795,7 +795,7 @@ test('оплата: владельцу алерт, покупателю ссыл
   const s = await stand(SETTLE_DOCS())
   await s.api.settleMonoAcquire(s.pay(), BANK_PAID, 'webhook')
   await until(() => s.order().sms?.paid?.status === 'sent' && s.order().alerts['new-paid']?.sentAt, 'объявление об оплате')
-  assert.deepEqual(s.calls.alerts, [`✅ Замовлення RF-AAAAAA: оплачено 800 грн, V2-LID-R. Створіть накладну: https://portal.test/shop-orders/so-1`])
+  assert.deepEqual(s.calls.alerts, [withGuideStep('new-paid', `✅ Замовлення RF-AAAAAA: оплачено 800 грн, V2-LID-R. Створіть накладну: https://portal.test/shop-orders/so-1`)])
   assert.deepEqual(s.calls.client.map((c) => c.clientKey), ['so-1-paid'])
   const link = `${SITE}/uk/order/${STATUS_TOKEN}`
   assert.equal(s.calls.client[0].text, `RunFerry: оплату 800 грн отримано. Замовлення і умови: ${link}`)
@@ -1267,7 +1267,7 @@ test('п. 8: непосланные алерты повторяются, в то
     },
   }), paidInvoice()))
   await s.step()
-  assert.deepEqual(s.calls.alerts.sort(), ['сигнал', 'чарджбек'])
+  assert.deepEqual(s.calls.alerts.sort(), [withGuideStep('reversed-signal', 'сигнал'), withGuideStep('unknown-status-chargeback', 'чарджбек')])
   const { alerts } = s.order()
   assert.ok(alerts['reversed-signal'].sentAt)
   assert.ok(alerts['unknown-status-chargeback'].sentAt)
@@ -1312,7 +1312,7 @@ test('п. 8: алерт у заказа в конечном состоянии �
   for (const state of ['reversed', 'delivered', 'returned']) {
     const s = await stand(docsOf(paidOrder({ state, alerts: { reversed: unsent({ text: 'повернули' }) } }), paidInvoice({ status: state === 'reversed' ? 'reversed' : 'paid' })), { slowScanMs: HOUR })
     await s.step()
-    assert.deepEqual(s.calls.alerts, ['повернули'], state)
+    assert.deepEqual(s.calls.alerts, [withGuideStep('reversed', 'повернули')], state)
     s.patchOrder({ alerts: { reversed: { sentAt: null, triedAt: ago(10 * MIN) } } })
     await s.step()
     assert.equal(s.calls.alerts.length, 1, 'до следующего часового прохода не читаем')
@@ -1328,7 +1328,7 @@ test('п. 8: алерты дня за сегодня и вчера: лимит �
     [`shopDaily/${old}`]: { alerts: { x: unsent({ text: 'позавчора' }) } },
   }))
   await s.step()
-  assert.deepEqual(s.calls.alerts.sort(), ['вчора', 'ліміт'])
+  assert.deepEqual(s.calls.alerts.sort(), [withGuideStep('feed-V2-LID-H', 'вчора'), withGuideStep('day-limit', 'ліміт')])
   assert.ok(s.db.docs[`shopDaily/${today()}`].alerts['day-limit'].sentAt)
   assert.ok(s.db.docs[`shopDaily/${yesterday}`].alerts['feed-V2-LID-H'].sentAt)
 })
@@ -1340,7 +1340,7 @@ const alertDocs = (extra = {}) => docsOf(paidOrder(), paidInvoice(), extra)
 test('алерт: Telegram не ответил: SMS на телефон владельца с тем же текстом, метка smsAt, sentAt пуст', async () => {
   const s = await stand(alertDocs(), { notify: async () => false })
   await s.hooks.shopAlert('so-1', 'test-kind', (o, url) => `Замовлення ${o.orderNo}: ${url}`)
-  assert.deepEqual(s.calls.sms, [{ phone: OWNER_PHONE, text: 'Замовлення RF-AAAAAA: https://portal.test/shop-orders/so-1' }])
+  assert.deepEqual(s.calls.sms, [{ phone: OWNER_PHONE, text: withGuideStep('test-kind', 'Замовлення RF-AAAAAA: https://portal.test/shop-orders/so-1') }])
   const a = s.order().alerts['test-kind']
   assert.equal(a.sentAt, null)
   assert.ok(a.smsAt)
@@ -1350,11 +1350,11 @@ test('алерт: SMS не чаще раза в час на все заказы 
   const s = await stand(alertDocs(), { notify: async () => false })
   await s.hooks.shopAlert('so-1', 'a', () => 'перший')
   await s.hooks.shopAlert('so-1', 'b', () => 'другий')
-  assert.deepEqual(s.calls.sms.map((c) => c.text), ['перший'])
+  assert.deepEqual(s.calls.sms.map((c) => c.text), [withGuideStep('a', 'перший')])
   s.patch('system/shopOwnerSms', { at: ago(HOUR + SEC) })
   s.patchOrder({ alerts: { b: { at: ago(5 * MIN) } } })
   await s.step()
-  assert.deepEqual(s.calls.sms.map((c) => c.text).sort(), ['другий', 'перший'])
+  assert.deepEqual(s.calls.sms.map((c) => c.text).sort(), [withGuideStep('b', 'другий'), withGuideStep('a', 'перший')])
   assert.ok(s.order().alerts.b.smsAt)
 })
 
@@ -1399,7 +1399,7 @@ test('алерт: нет заказа: не падает; один алерт н
   assert.ok(logs.some((l) => l.includes('алерт a без замовлення so-x')))
   await s.hooks.shopAlert('so-1', 'a', () => 'перший')
   await s.hooks.shopAlert('so-1', 'a', () => 'другий')
-  assert.deepEqual(s.calls.alerts, ['перший'])
+  assert.deepEqual(s.calls.alerts, [withGuideStep('a', 'перший')])
 })
 
 test('сообщение покупателю: нет notifyClient или заказа: ничего не происходит', async () => {

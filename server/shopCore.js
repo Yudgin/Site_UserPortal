@@ -508,6 +508,32 @@ export const ttnGonePatch = (order, code, at) => ({
   ttnHistory: [...(order.ttnHistory || []), { ttn: order.ttn, at, reason: `np-${code}` }],
 })
 
+// ---------- шаг памятки в алерте ----------
+
+// Какой шаг памятки владельца решает алерт (runferry-briefs, catalog/ua-shop-owner-guide-2026-11.md). Номера менять только вместе с памяткой.
+// Шаги 2 и 12 не из алертов: отказ на экране накладной и аварийное выключение. Шаг 13 о подготовке к продажам, на него ведёт тест алерта.
+const ALERT_GUIDE_STEPS = [
+  [1, /^(new-paid$|no-ttn-)/],
+  [3, /^(ttn-gone-|np-not-handed-|ttn-on-closed-)/],
+  [4, /^(np-stale-|np-no-final-)/],
+  [5, /^(refused-|refund-day-20$|reversed$|extra-payment-|extra-reversed-|partial-refund-)/],
+  [6, /^(amount-mismatch$|late-payment$|amount-unverified$|reversed-signal$|unknown-status-|ttn-payment-blocked$)/],
+  [7, /^receipt-(failed|late|claim)$/],
+  [8, /^sms-/],
+  [9, /^possible-duplicate$/],
+  [10, /^(stock-out$|stock-oversold$|feed-)/],
+  [11, /^(day-limit$|gate-card$)/],
+  [13, /^test-alert$/],
+]
+
+export const alertGuideStep = (kind) => ALERT_GUIDE_STEPS.find(([, re]) => re.test(kind))?.[0] ?? null
+
+// Строка в конце алерта, текст в заказе остаётся без неё. Вид без шага ведёт на памятку в целом.
+export const withGuideStep = (kind, text) => {
+  const step = alertGuideStep(kind)
+  return `${text}\nПам'ятка${step ? `, крок ${step}` : ''}`
+}
+
 // ---------- стирание ----------
 
 // Что стирается у заказа: всё, по чему можно узнать покупателя. fingerprint и phoneKey считаются от телефона и перебираются.

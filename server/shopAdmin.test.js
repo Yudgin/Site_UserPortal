@@ -15,7 +15,7 @@ const { createShopReconcile } = await import('./shopReconcile.js')
 const { registerShopAdmin } = await import('./shopAdmin.js')
 const { registerNotifications } = await import('./notifications.js')
 const { ADMIN_EMAIL } = await import('./adminAuth.js')
-const { npTemplateProblems, orderFlags, orderNeedsAction, orderPublicView, phoneKeyOf, salesSettingsNext, validateRecipient, transitionPatch } = await import('./shopCore.js')
+const { npTemplateProblems, orderFlags, orderNeedsAction, orderPublicView, phoneKeyOf, salesSettingsNext, validateRecipient, transitionPatch, withGuideStep } = await import('./shopCore.js')
 const realCheckbox = await import('./checkbox.js')
 
 const logs = []
@@ -1707,7 +1707,9 @@ test('test-alert: Telegram дошёл: ownerTestOkAt и запасной SMS п�
   assert.equal(s.settings().fopId, 'fop-2')
   assert.equal(s.calls.alerts.length, 1)
   assert.ok(s.calls.alerts[0].includes('перевірка сповіщень'))
+  assert.ok(s.calls.alerts[0].endsWith("\nПам'ятка, крок 13"), s.calls.alerts[0])
   assert.equal(s.calls.sms[0].phone, OWNER_PHONE)
+  assert.equal(s.calls.sms[0].text, s.calls.alerts[0])
 
   const down = await stand(t, docsOf(), { notify: async () => false, sms: async () => ({ ok: false, error: 'x' }) })
   down.patch('system/shopSales', { ownerTestOkAt: null })
@@ -1960,7 +1962,7 @@ test('сверка: алерт о накладной на закрытом за�
   })
   const s = await stand(t, docsOf(order), { notify: async () => !down })
   await s.step()
-  assert.equal(s.calls.alerts.filter((a) => a === 'накладна на закритому').length, 1)
+  assert.equal(s.calls.alerts.filter((a) => a === withGuideStep(`ttn-on-closed-${TTN}`, 'накладна на закритому')).length, 1)
   assert.equal(s.order().alerts[`ttn-on-closed-${TTN}`].sentAt, null)
   down = false
   s.patch('shopOrders/so-1', { alerts: { [`ttn-on-closed-${TTN}`]: { triedAt: ago(10 * MIN) } } })

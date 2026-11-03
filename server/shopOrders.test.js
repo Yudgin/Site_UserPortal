@@ -7,6 +7,7 @@ import express from 'express'
 import { rateLimit } from './rateLimit.js'
 import { createShopPaymentHooks, KYIV_DAY } from './shopPayments.js'
 import { registerShopOrders } from './shopOrders.js'
+import { withGuideStep } from './shopCore.js'
 
 const TOKEN = 'shop-test-token-0123456789'
 const CITY = '8d5a980d-391c-11dd-90d9-001a92567626'
@@ -395,7 +396,7 @@ for (const [reason, materials] of Object.entries(DROPS)) {
     const text = s.calls.alerts[0]
     assert.match(text, /V2-LID-R/)
     assert.match(text, DROP_WORDS[reason])
-    assert.match(text, /https:\/\/portal\.test\/shop-orders$/)
+    assert.ok(text.endsWith("https://portal.test/shop-orders\nПам'ятка, крок 10"), text)
     assert.ok(!text.includes('undefined'))
     assert.ok(!text.includes(TOKEN))
   })
@@ -413,7 +414,7 @@ test('алерт ленты: один в сутки на артикул, на в
   assert.equal(a.calls.alerts.length, 1)
   assert.equal(b.calls.alerts.length, 0)
   const saved = db.docs[`shopDaily/${today()}`].alerts['feed-V2-LID-R']
-  assert.equal(saved.text, a.calls.alerts[0])
+  assert.equal(withGuideStep('feed-V2-LID-R', saved.text), a.calls.alerts[0])
   assert.ok(Date.parse(saved.at) && Date.parse(saved.sentAt))
 })
 

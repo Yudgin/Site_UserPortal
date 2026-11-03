@@ -13,7 +13,7 @@ import { KYIV_DAY, messageResetPatch, ttnMessageKind } from './shopPayments.js'
 import { RECEIPT_CLAIM_STALE_MS, createShopReconcile } from './shopReconcile.js'
 import {
   acceptsOrders, canTransition, claimFresh, npMissing, npTemplateProblems, orderAdminRow, orderAdminView, orderNeedsAction, phoneKeyOf, pricedItem, publicSeller,
-  salesSettingsNext, shopLimit, shopPhone, shopSellable, siteBaseUrlOk, transitionPatch, ttnGonePatch, validateRecipient,
+  salesSettingsNext, shopLimit, shopPhone, shopSellable, siteBaseUrlOk, transitionPatch, ttnGonePatch, validateRecipient, withGuideStep,
 } from './shopCore.js'
 
 const LIST_LIMIT = 200
@@ -25,7 +25,7 @@ const READINESS_BUDGET_MS = 12000
 const RESEND_PAUSE_MS = 30 * 1000
 // Чек только при этих статусах кассы или если касса его не знает: иначе новый чек мог бы стать вторым.
 const RECEIPT_RETRY_STATUSES = new Set(['ERROR', 'CANCELLED'])
-const TEST_ALERT_TEXT = '✅ RunFerry: перевірка сповіщень магазину. Якщо ви це читаєте, алерти доходять.'
+const TEST_ALERT_TEXT = withGuideStep('test-alert', '✅ RunFerry: перевірка сповіщень магазину. Якщо ви це читаєте, алерти доходять.')
 
 const TEMPLATE_PROBLEM_TEXT = {
   missing: 'шаблон не вибрано або його немає',

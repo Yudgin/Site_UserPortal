@@ -8,7 +8,7 @@ import {
   shopPhone, maskPhone, validateOrderInput, orderFingerprint, orderIdFromKey, phoneKeyOf, newStatusToken, phoneCodeHash,
   canTransition, transitionPatch, sellerFilled, publicSeller, npMissing, codPairAllowed, shopSellable,
   pricedItem, skuOnSale, buildCatalogFeed, npOutcome,
-  orderNoFromId, shopLimit, claimFresh, acceptsOrders, cardOpenFor, buildOrderDoc, invoiceView, orderPublicView,
+  orderNoFromId, shopLimit, claimFresh, acceptsOrders, cardOpenFor, buildOrderDoc, invoiceView, orderPublicView, alertGuideStep, withGuideStep,
 } from './shopCore.js'
 import { findMaterial } from './siteCatalog.js'
 import { npDateToIso as npDateOriginal } from './incomingRefresh.js'
@@ -1069,4 +1069,31 @@ test('статус: ровно условленные поля, данных п�
   assert.equal(orderPublicView(orderDoc({ seller: undefined }), { now: NOW }).seller, null)
   assert.equal(view.cancelReason, null)
   assert.equal(orderPublicView(orderDoc({ state: 'cancelled', cancelReason: 'superseded' }), { now: NOW }).cancelReason, 'superseded')
+})
+
+// ---------- шаг памятки в алерте ----------
+
+test('шаг памятки: у каждого вида алерта свой шаг, в том числе с хвостом из номера или id', () => {
+  const steps = {
+    1: ['new-paid', 'no-ttn-1', 'no-ttn-12'],
+    3: ['ttn-gone-20450000000001', 'np-not-handed-20450000000001', 'ttn-on-closed-20450000000001'],
+    4: ['np-stale-20450000000001-2', 'np-no-final-20450000000001'],
+    5: ['refused-20450000000001', 'refund-day-20', 'reversed', 'extra-payment-pay-2', 'extra-reversed-pay-2', 'partial-refund-50000'],
+    6: ['amount-mismatch', 'late-payment', 'amount-unverified', 'reversed-signal', 'unknown-status-chargeback', 'ttn-payment-blocked'],
+    7: ['receipt-failed', 'receipt-late', 'receipt-claim'],
+    8: ['sms-paid', 'sms-rcpt', 'sms-ttn-20450000000001'],
+    9: ['possible-duplicate'],
+    10: ['stock-out', 'stock-oversold', 'feed-V2-LID-R'],
+    11: ['day-limit', 'gate-card'],
+    13: ['test-alert'],
+  }
+  for (const [step, kinds] of Object.entries(steps)) {
+    for (const kind of kinds) assert.equal(alertGuideStep(kind), Number(step), kind)
+  }
+})
+
+test('шаг памятки: похожий вид чужой шаг не получает, незнакомый ведёт на памятку в целом', () => {
+  for (const kind of ['reversed-other', 'new-paid-2', 'receipt-other', 'gate-cod', 'test-alert-2', 'x', '']) assert.equal(alertGuideStep(kind), null, kind)
+  assert.equal(withGuideStep('reversed', 'текст'), "текст\nПам'ятка, крок 5")
+  assert.equal(withGuideStep('x', 'текст'), "текст\nПам'ятка")
 })
