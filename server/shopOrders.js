@@ -8,7 +8,8 @@ import * as monoAcquire from './monoAcquire.js'
 import { KYIV_DAY } from './shopPayments.js'
 import {
   NP_REF_RE, SALES_MODES, STATUS_TOKEN_RE, acceptsOrders, buildCatalogFeed, buildOrderDoc, canTransition, cardOpenFor, claimFresh, invoiceView,
-  newStatusToken, orderFingerprint, orderIdFromKey, orderPublicView, orderStatusUrl, pricedItem, shopLimit, shopSellable, skuOnSale, transitionPatch, validateOrderInput,
+  newStatusToken, orderFingerprint, orderIdFromKey, orderPublicView, orderStatusUrl, payInFlight, pricedItem, sameBuyerNames, shopLimit, shopSellable, skuOnSale,
+  transitionPatch, validateOrderInput,
 } from './shopCore.js'
 
 // Сервер сайта ждёт чтение 8 с: отвечаем раньше, чтобы сбой НП не выглядел сбоем портала.
@@ -17,6 +18,9 @@ const NP_BUDGET_MS = 7000
 const ADDRESS_BUDGET_MS = 4000
 const BANK_READ_BUDGET_MS = 4000
 const BANK_POLL_EVERY_MS = 10 * 1000
+// Справочники НП в памяти экземпляра: города и отделения меняются редко, а повторы не должны тратить общий лимит.
+const NP_CACHE_MS = 15 * 60 * 1000
+const NP_CACHE_MAX = 500
 export const INVOICE_VALIDITY_SEC = 60 * 60
 const CARD_RECEIPT_LABEL = 'Інтернет еквайринг'
 // Единственный текст портала, который покупатель видит сам (страница банка): остальные на сайте по кодам ошибок. Владелец ещё не утвердил.
@@ -58,6 +62,24 @@ const npRef = (v) => {
 export const isPostomat = (wh) => String(wh?.TypeOfWarehouse || '') === POSTOMAT_TYPE
   || /поштомат|почтомат/i.test(`${wh?.Description || ''} ${wh?.DescriptionRu || ''}`)
 
+// Самая старая запись уходит первой. Сбой сюда не попадает: его повторит следующий запрос.
+const memoryCache = (ttlMs, max) => {
+  const map = new Map()
+  return {
+    get(key) {
+      const hit = map.get(key)
+      if (hit && Date.now() - hit.at < ttlMs) return hit.value
+      map.delete(key)
+      return undefined
+    },
+    set(key, value) {
+      map.delete(key)
+      if (map.size >= max) map.delete(map.keys().next().value)
+      map.set(key, { at: Date.now(), value })
+    },
+  }
+}
+
 export function registerShopOrders(app, deps) {
   const {
     adminDb, npRequest, hooks, payments, mono = monoAcquire, siteUrl = 'https://my.runferry.com', npBudgetMs = NP_BUDGET_MS,
@@ -81,6 +103,18 @@ export function registerShopOrders(app, deps) {
     return s.exists ? s.data() : null
   }
 
+  // Без приёма заказов ленте нужен только продавец для страницы оферты: секреты ФОП не читаем, а сбой чтения даёт ленту без продавца.
+  // Иначе выключенные продажи зависели бы от чтения ФОП, а сайт при сбое ленты держит прежнюю кнопку до 10 минут.
+  const sellerOnly = async (fopId) => {
+    try {
+      const meta = await adminDb.collection('fops').doc(fopId).get()
+      return meta.exists ? { id: fopId, seller: (meta.data() || {}).seller } : null
+    } catch (e) {
+      console.error('shop: продавець для стрічки:', e.message)
+      return null
+    }
+  }
+
   // Ошибку чтения не глотаем: сайт заменяет кэш любым ответом 200, а пустой прайс выглядел бы как снятые с продажи товары.
   // При off прайс не нужен: выключатель не должен зависеть от его чтения.
   const loadFeed = async () => {
@@ -89,7 +123,7 @@ export function registerShopOrders(app, deps) {
     const fopId = str(sales?.fopId)
     const [prices, fop] = await Promise.all([
       withPrices ? adminDb.collection('priceList').doc('current').get() : null,
-      fopId ? loadFopFresh(adminDb, fopId) : null,
+      fopId ? (acceptsOrders(sales) ? loadFopFresh(adminDb, fopId) : sellerOnly(fopId)) : null,
     ])
     return { sales, ...buildCatalogFeed({ sales, priceList: prices?.exists ? prices.data() : null, fop }) }
   }
@@ -145,12 +179,12 @@ export function registerShopOrders(app, deps) {
       .filter((c) => c.ref && c.name)
   }
 
-  // Полный список города без поштоматов: отделение покупатель ищет на своей стороне.
+  // Полный список города без поштоматов: отделение покупатель ищет на своей стороне. cityName только для заказа, сайту не уходит.
   const warehousesOf = async (cityRef, budgetMs) => {
     const data = await npData('getWarehouses', { CityRef: cityRef, FindByString: '', Limit: 5000 }, budgetMs)
     return data
       .filter((wh) => !isPostomat(wh))
-      .map((wh) => ({ ref: npRef(wh?.Ref), name: str(wh?.Description) }))
+      .map((wh) => ({ ref: npRef(wh?.Ref), name: str(wh?.Description), cityName: str(wh?.CityDescription) }))
       .filter((w) => w.ref && w.name)
   }
 
@@ -159,21 +193,39 @@ export function registerShopOrders(app, deps) {
     return fail(res, 502, 'NP_UNAVAILABLE', 'Nova Poshta is temporarily unavailable')
   }
 
-  app.post('/api/shop/np/cities', guard, npLimiter, async (req, res) => {
+  // Повтор отвечает из памяти раньше лимита: общий на экземпляр лимит НП иначе выключал бы поиск всем покупателям, если поток идёт с нескольких адресов.
+  const cityCache = memoryCache(NP_CACHE_MS, NP_CACHE_MAX)
+  const warehouseCache = memoryCache(NP_CACHE_MS, NP_CACHE_MAX)
+  const cityKey = (body) => {
+    const q = str(body?.q)
+    return q.length >= 2 && q.length <= 60 ? q.toLowerCase() : ''
+  }
+  const fromCache = (cache, keyOf) => (req, res, next) => {
+    const key = keyOf(req.body)
+    const items = key ? cache.get(key) : undefined
+    if (items) return res.json({ success: true, data: { items } })
+    return next()
+  }
+
+  app.post('/api/shop/np/cities', guard, fromCache(cityCache, cityKey), npLimiter, async (req, res) => {
     const q = str(req.body?.q)
     if (q.length < 2 || q.length > 60) return fail(res, 400, 'BAD_INPUT', 'q must be 2-60 characters', { fields: ['q'] })
     try {
-      res.json({ success: true, data: { items: await citiesLike(q) } })
+      const items = await citiesLike(q)
+      cityCache.set(cityKey(req.body), items)
+      res.json({ success: true, data: { items } })
     } catch (e) {
       npFail(res, 'міста', e)
     }
   })
 
-  app.post('/api/shop/np/warehouses', guard, npLimiter, async (req, res) => {
+  app.post('/api/shop/np/warehouses', guard, fromCache(warehouseCache, (b) => npRef(b?.cityRef)), npLimiter, async (req, res) => {
     const cityRef = npRef(req.body?.cityRef)
     if (!cityRef) return fail(res, 400, 'BAD_INPUT', 'cityRef must be a Nova Poshta ref', { fields: ['cityRef'] })
     try {
-      res.json({ success: true, data: { items: await warehousesOf(cityRef) } })
+      const items = (await warehousesOf(cityRef)).map(({ ref, name }) => ({ ref, name }))
+      warehouseCache.set(cityRef, items)
+      res.json({ success: true, data: { items } })
     } catch (e) {
       npFail(res, 'відділення', e)
     }
@@ -277,10 +329,11 @@ export function registerShopOrders(app, deps) {
 
   // ---------- создание заказа ----------
 
-  // true или false, если НП ответила; null, если нет: заказ не срываем, накладную всё равно создаёт человек.
+  // Запись отделения { ref, name, cityName } или false, если НП ответила; null, если нет: заказ не срываем, накладную всё равно создаёт человек.
+  // Без памяти: заказ проверяет отделение по свежему ответу.
   const warehouseFits = async (cityRef, warehouseRef) => {
     try {
-      return (await warehousesOf(cityRef, addressBudgetMs)).some((w) => w.ref === warehouseRef)
+      return (await warehousesOf(cityRef, addressBudgetMs)).find((w) => w.ref === warehouseRef) || false
     } catch (e) {
       console.warn('shop: відділення не перевірено:', e.message)
       return null
@@ -322,12 +375,16 @@ export function registerShopOrders(app, deps) {
     if (!fop) return gateFail(res, gate)
     const fits = await warehouseFits(v.cityRef, v.warehouseRef)
     if (fits === false) return fail(res, 422, 'BAD_WAREHOUSE', 'Warehouse does not fit the city')
+    // Названия из ответа НП: накладная уйдёт по рефу, а текст браузера мог относиться к другому отделению. НП не ответила: текст браузера.
+    const address = fits ? { ...v, warehouseName: fits.name, cityName: fits.cityName || v.cityName } : v
 
     const at = nowIso()
-    const doc = buildOrderDoc({ id: ref.id, value: v, fingerprint, item, fop, statusToken: newStatusToken(), addressVerified: fits === true, at })
+    const doc = buildOrderDoc({ id: ref.id, value: address, fingerprint, item, fop, statusToken: newStatusToken(), addressVerified: !!fits, at })
     const dayRef = adminDb.collection('shopDaily').doc(KYIV_DAY.format(new Date(at)))
     const phoneRef = adminDb.collection('shopPhones').doc(doc.phoneKey)
+    const replacedRef = v.replacesKey ? orders().doc(orderIdFromKey(v.replacesKey)) : null
     const limit = shopLimit(cfg, 'unpaidPerDay')
+    const supersede = (tx, oldRef, old) => tx.set(oldRef, transitionPatch(old, 'cancelled', { at, by: 'superseded', patch: { cancelReason: 'superseded', payment: { pageUrl: null } } }), { merge: true })
     // Оплата уменьшает счётчик, замена и отмена нет: иначе скрипт создавал бы и снимал счета без предела.
     const out = await adminDb.runTransaction(async (tx) => {
       const snap = await tx.get(ref)
@@ -344,12 +401,21 @@ export function registerShopOrders(app, deps) {
       const prevId = phone.exists ? (phone.data().openCard || {})[v.sku] : null
       const prevRef = prevId ? orders().doc(prevId) : null
       const prevSnap = prevRef ? await tx.get(prevRef) : null
-      const prev = prevSnap?.exists && prevSnap.data().state === 'awaiting_payment' ? prevSnap.data() : null
-      if (prev) tx.set(prevRef, transitionPatch(prev, 'cancelled', { at, by: 'superseded', patch: { cancelReason: 'superseded', payment: { pageUrl: null } } }), { merge: true })
+      // Пара «телефон + артикул» закрывает прежний заказ, только если и имя то же: иначе оба живут, а вторую оплату ловит алерт дубля.
+      const prev = prevSnap?.exists && prevSnap.data().state === 'awaiting_payment' && sameBuyerNames(prevSnap.data(), v) ? prevSnap.data() : null
+      // Прежний заказ этой вкладки по его ключу: телефон или имя могли исправить, тогда пара его не найдёт или не узнает.
+      const replacedSnap = !replacedRef || replacedRef.id === ref.id ? null : replacedRef.id === prevRef?.id ? prevSnap : await tx.get(replacedRef)
+      const replacedDoc = replacedSnap?.exists ? replacedSnap.data() : null
+      const replaced = replacedDoc && replacedDoc.state === 'awaiting_payment' && replacedDoc.sku === v.sku && !(prev && replacedRef.id === prevRef.id) ? replacedDoc : null
+      const replacedPhoneRef = replaced?.phoneKey && replaced.phoneKey !== doc.phoneKey ? adminDb.collection('shopPhones').doc(replaced.phoneKey) : null
+      const replacedPhone = replacedPhoneRef ? await tx.get(replacedPhoneRef) : null
+      if (prev) supersede(tx, prevRef, prev)
+      if (replaced) supersede(tx, replacedRef, replaced)
+      if (replacedPhone?.exists && (replacedPhone.data().openCard || {})[v.sku] === replacedRef.id) tx.set(replacedPhoneRef, { openCard: { [v.sku]: null } }, { merge: true })
       tx.set(ref, doc)
       tx.set(dayRef, { unpaid: unpaid + 1 }, { merge: true })
       tx.set(phoneRef, { openCard: { [v.sku]: ref.id } }, { merge: true })
-      return { prev }
+      return { prev, replaced }
     })
     if (out.existing) return answerRepeat(res, out.existing, fingerprint)
     if (out.dayLimit) {
@@ -357,6 +423,7 @@ export function registerShopOrders(app, deps) {
       return fail(res, 429, 'DAY_LIMIT', 'Daily order limit reached')
     }
     if (out.prev) removeInvoices(out.prev)
+    if (out.replaced) removeInvoices(out.replaced)
     const next = await issueInvoice(ref, doc, fop, cfg)
     return answer(res, 201, orderAnswer(doc, next || { type: 'status', payIssue: 'BANK_UNAVAILABLE' }))
   }))
@@ -440,6 +507,12 @@ export function registerShopOrders(app, deps) {
       }
     }
 
+    // Новый счёт только по действующей цене: прайс могли исправить или снять позицию с продажи, пока заказ ждал. Сайт предложит новый заказ.
+    const prices = await adminDb.collection('priceList').doc('current').get()
+    const { item } = pricedItem(prices.exists ? prices.data() : null, order.sku, (cfg.skus || {})[order.sku])
+    if (!item) return fail(res, 409, 'NOT_FOR_SALE', 'Item is not for sale')
+    if (item.priceUah !== order.total) return fail(res, 409, 'PRICE_CHANGED', 'Price has changed', { priceUah: item.priceUah })
+
     const maxAttempts = shopLimit(cfg, 'payAttemptsPerOrder')
     const claim = await adminDb.runTransaction(async (tx) => {
       const o = (await tx.get(ref)).data()
@@ -465,10 +538,12 @@ export function registerShopOrders(app, deps) {
     if (!found) return orderNotFound(res)
     const { ref, order } = found
     const phoneRef = order.phoneKey ? adminDb.collection('shopPhones').doc(order.phoneKey) : null
+    // Оплата могла уже идти: тогда отмена обещала бы покупателю то, чего не будет, а деньги всё равно пришли бы.
+    const paymentDocs = await Promise.all((order.paymentIds || []).map((id) => payments.loadOrder(id)))
     const out = await adminDb.runTransaction(async (tx) => {
       const cur = (await tx.get(ref)).data()
       if (cur.state === 'cancelled') return { order: cur }
-      if (claimFresh(cur.ttnCreatingAt) || !canTransition(cur, 'cancelled')) return { refused: true }
+      if (claimFresh(cur.ttnCreatingAt) || !canTransition(cur, 'cancelled') || payInFlight(cur, paymentDocs)) return { refused: true }
       const phone = phoneRef ? await tx.get(phoneRef) : null
       const patch = transitionPatch(cur, 'cancelled', { by: 'buyer', patch: { cancelReason: 'buyer', payment: { pageUrl: null } } })
       tx.set(ref, patch, { merge: true })

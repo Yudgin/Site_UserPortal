@@ -187,6 +187,7 @@ export interface ShopSalesSettings {
   ownerTestOkAt?: string | null
   skus?: Record<string, ShopSkuRule>
   limits?: Record<string, number | null>
+  staffUids?: string[] // кроме владельца, заказы видят только эти сотрудники
 }
 
 export type ShopCheckStatus = 'ok' | 'bad' | 'unknown' | 'none'

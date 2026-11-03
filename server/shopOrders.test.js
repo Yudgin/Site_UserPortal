@@ -526,6 +526,28 @@ test('лента: сбой чтения настроек, прайса или Ф
   }
 })
 
+test('лента: без приёма заказов секреты ФОП не читаются, сбой чтения ФОП не держит у покупателей прежнюю кнопку', async (t) => {
+  for (const mode of ['off', 'prices', 'LIVE']) {
+    const db = new FakeDb(shopDocs({ cfg: sales({ mode }) }))
+    db.broken['fopSecrets/fop-2'] = true
+    const s = await stand(t, { db })
+    const d = await s.feed()
+    assert.deepEqual(d.seller, publicSeller, mode)
+    assert.ok(!db.reads.includes('fopSecrets/fop-2'), mode)
+    if (mode !== 'prices') assert.deepEqual(d.items, [], mode)
+    else assert.deepEqual(d.items, [closedItem()], mode)
+  }
+  const logs = t.mock.method(console, 'error', () => {})
+  const db = new FakeDb(shopDocs({ cfg: sales({ mode: 'off' }) }))
+  db.broken['fops/fop-2'] = true
+  const s = await stand(t, { db })
+  const d = await s.feed()
+  logs.mock.restore()
+  assert.equal(d.mode, 'off')
+  assert.equal(d.seller, null)
+  assert.deepEqual(d.items, [])
+})
+
 test('лента: Firestore не поднялся (adminDb null): 503', async (t) => {
   const logs = t.mock.method(console, 'error', () => {})
   const s = await stand(t, { db: null })
@@ -650,7 +672,8 @@ test('НП, города: q короче 2 или длиннее 60, не стр
 
 test('НП, города: границы q и обрезка пробелов', async (t) => {
   const s = await stand(t, { np: citiesOk() })
-  for (const [q, sent] of [['яя', 'яя'], ['я'.repeat(60), 'я'.repeat(60)], [`  Київ  `, 'Київ'], [` ${'я'.repeat(60)} `, 'я'.repeat(60)]]) {
+  // Каждый раз новая строка: повтор отвечает из памяти и в НП не идёт.
+  for (const [q, sent] of [['яя', 'яя'], ['я'.repeat(60), 'я'.repeat(60)], [`  Київ  `, 'Київ'], [` ${'ю'.repeat(60)} `, 'ю'.repeat(60)]]) {
     assert.equal((await s.call('POST', '/api/shop/np/cities', { body: { q } })).status, 200, q)
     assert.equal(s.calls.np.at(-1)[2].CityName, sent)
   }
@@ -778,7 +801,8 @@ test('НП: лимит общий на оба маршрута: 429 в стил�
   }
   assert.equal((await s.call('POST', '/api/shop/np/cities', { body: { q: 'Київ' } })).status, 200)
   assert.equal((await s.call('POST', '/api/shop/np/warehouses', { body: { cityRef: CITY } })).status, 200)
-  for (const [path, body] of [['/api/shop/np/cities', { q: 'Київ' }], ['/api/shop/np/warehouses', { cityRef: CITY }]]) {
+  // Повтор берётся из памяти и лимит не тратит, поэтому за пределом проверяем новые запросы.
+  for (const [path, body] of [['/api/shop/np/cities', { q: 'Львів' }], ['/api/shop/np/warehouses', { cityRef: WH }]]) {
     const r = await s.call('POST', path, { body })
     assert.equal(r.status, 429, path)
     assert.equal(r.json.success, false)
@@ -787,6 +811,40 @@ test('НП: лимит общий на оба маршрута: 429 в стил�
   assert.equal(s.calls.np.length, 2)
   // Лента под этот лимит не подпадает.
   assert.equal((await s.catalog()).status, 200)
+})
+
+test('НП: ответы справочников живут в памяти 15 минут: повтор не идёт в НП и не тратит лимит, сбой не запоминается', async (t) => {
+  const npLimiter = rateLimit({ name: 'test-cache', windowMs: 60 * 1000, max: 2, keyFn: () => 'x' })
+  let fail = true
+  const s = await stand(t, {
+    npLimiter,
+    np: async (...args) => {
+      if (fail) throw new Error('мережа')
+      return citiesOk(address())(...args)
+    },
+  })
+  assert.equal((await s.call('POST', '/api/shop/np/cities', { body: { q: 'Київ' } })).status, 502)
+  fail = false
+  const first = await s.call('POST', '/api/shop/np/cities', { body: { q: 'Київ' } })
+  assert.equal(first.status, 200)
+  for (const q of ['Київ', ' київ ', 'КИЇВ']) {
+    const r = await s.call('POST', '/api/shop/np/cities', { body: { q } })
+    assert.equal(r.status, 200, q)
+    assert.deepEqual(r.json, first.json, q)
+  }
+  assert.equal(s.calls.np.length, 2, 'в НП только сбой и первый успех')
+  // Лимит исчерпан двумя промахами, а запомненный ответ всё равно отдаётся.
+  assert.equal((await s.call('POST', '/api/shop/np/cities', { body: { q: 'Львів' } })).status, 429)
+  assert.equal((await s.call('POST', '/api/shop/np/cities', { body: { q: 'Київ' } })).status, 200)
+  // Отделения: наружу только ref и name, как и без памяти.
+  const w = await stand(t, { np: npOk([wh({ CityDescription: 'Київ' })]) })
+  const a = await w.call('POST', '/api/shop/np/warehouses', { body: { cityRef: CITY } })
+  const b = await w.call('POST', '/api/shop/np/warehouses', { body: { cityRef: CITY.toUpperCase() } })
+  assert.deepEqual(a.json.data.items, [{ ref: WH, name: wh().Description }])
+  assert.deepEqual(b.json, a.json)
+  assert.equal(w.calls.np.length, 1)
+  // Без токена память не отвечает.
+  assert.equal((await w.call('POST', '/api/shop/np/warehouses', { body: { cityRef: CITY }, headers: {} })).status, 403)
 })
 
 test('НП: лимит по умолчанию 300 в минуту и не зависит от адреса: сервер сайта один', async (t) => {

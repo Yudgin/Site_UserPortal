@@ -56,6 +56,8 @@ export function validateOrderInput(body) {
     consentOffer: b.consentOffer,
     consentPersonalData: b.consentPersonalData,
     expectedTotalUah: b.expectedTotalUah,
+    // Ключ прежнего заказа этой вкладки: покупатель исправил данные, в том числе телефон, и прежний неоплаченный надо закрыть.
+    replacesKey: str(b.replacesKey),
   }
   const checks = {
     idempotencyKey: KEY_RE.test(value.idempotencyKey),
@@ -75,6 +77,7 @@ export function validateOrderInput(body) {
     consentOffer: value.consentOffer === true,
     consentPersonalData: value.consentPersonalData === true,
     expectedTotalUah: Number.isFinite(value.expectedTotalUah) && value.expectedTotalUah >= 0,
+    replacesKey: !value.replacesKey || KEY_RE.test(value.replacesKey),
   }
   const fields = Object.keys(checks).filter((k) => !checks[k])
   return fields.length ? { ok: false, fields } : { ok: true, value }
@@ -87,6 +90,11 @@ export const orderFingerprint = (v) => sha256(JSON.stringify([
 
 export const orderIdFromKey = (idempotencyKey) => 'so-' + sha256(idempotencyKey).slice(0, 32)
 export const phoneKeyOf = (phone) => sha256(phone)
+
+// Тот же ли покупатель по имени: регистр, вид апострофа и по батькові не в счёт. Телефон сам по себе не доказывает,
+// что это тот же человек: знающий чужой номер иначе закрывал бы чужой неоплаченный заказ.
+const nameKey = (v) => str(v).toLowerCase().replace(/[’ʼ]/g, "'")
+export const sameBuyerNames = (a, b) => !!a && !!b && nameKey(a.lastName) === nameKey(b.lastName) && nameKey(a.firstName) === nameKey(b.firstName)
 
 // Адрес страницы статуса: 128 случайных бит, не зависят от телефона и номера заказа.
 export const STATUS_TOKEN_RE = /^[A-Za-z0-9_-]{22}$/
@@ -138,6 +146,12 @@ export function buildOrderDoc({ id, value: v, fingerprint, item, fop, statusToke
 
 const INVOICE_CLOSED = new Set(['failure', 'expired', 'removed'])
 const BANK_BUSY = new Set(['processing', 'hold', 'success', 'reversed'])
+
+// Неоплаченный заказ, по которому деньги уже идут или пришли, а хук оплаты ещё не дошёл: последний ответ банка по текущему счёту
+// или документ оплаты. Отменять такой заказ нельзя.
+const PAY_IN_FLIGHT = new Set(['processing', 'hold', 'success'])
+export const payInFlight = (order, payments = []) => order?.state === 'awaiting_payment'
+  && (PAY_IN_FLIGHT.has(order.payment?.status) || payments.some((p) => p?.status === 'paid'))
 
 // Документ оплаты показывает, что денег по счёту нет: сверка может закрыть заказ, если так у всех его счетов.
 export const invoiceFinal = (payment) => !payment || INVOICE_CLOSED.has(payment.status) || payment.status === 'reversed'
@@ -266,6 +280,8 @@ export function npTemplateProblems(tpl, fopId) {
   check((tpl.senderTarget || 'service') === 'service', 'sender')
   check((tpl.recipientTarget || 'client') === 'client', 'recipient')
   check(String(tpl.serviceType || 'WarehouseWarehouse').endsWith('Warehouse'), 'service-type')
+  // Оферта обещает доставку за тарифами НП при получении: плательщик-отправитель отправлял бы каждую посылку за счёт ФОП.
+  check((tpl.payerType || 'recipient') !== 'sender', 'payer')
   return problems
 }
 
@@ -370,6 +386,12 @@ const skuRuleOk = (r) => isMap(r) && typeof r.enabled === 'boolean' && typeof r.
 
 export const siteBaseUrlOk = (v) => SITE_BASE_RE.test(str(v))
 
+// Кто, кроме владельца, видит заказы магазина: uid из users, список ведёт владелец. Роль директора не годится сама по себе:
+// она ограничена центрами, а покупатели магазина ни к одному центру не относятся.
+const STAFF_UID_RE = /^[\w-]{1,128}$/
+const STAFF_UIDS_MAX = 20
+export const shopStaffAllowed = (cfg, uid) => !!uid && Array.isArray(cfg?.staffUids) && cfg.staffUids.includes(uid)
+
 // Что можно менять страницей: всё остальное в теле, включая ownerTestOkAt, не проходит. skus заменяются целиком, чтобы артикул можно было убрать,
 // methods и limits дополняются. Настройки проверяются вместе с прежними: одно поле mode=off проходит всегда, это аварийный выключатель.
 export function salesSettingsNext(body, prev = {}) {
@@ -397,6 +419,8 @@ export function salesSettingsNext(body, prev = {}) {
   const limitOk = ([k, v]) => (k === 'piiPaidDays' ? v === null || (Number.isInteger(v) && v > 0) : LIMIT_NAMES.includes(k) && COUNT(v))
   take('limits', { ...prev.limits, ...b.limits }, isMap(b.limits) && Object.entries(b.limits).every(limitOk))
   take('skus', b.skus, isMap(b.skus) && Object.entries(b.skus).every(([sku, rule]) => SKU_RE.test(sku) && skuRuleOk(rule)))
+  const staffUids = Array.isArray(b.staffUids) ? [...new Set(b.staffUids.map(str))] : null
+  take('staffUids', staffUids, !!staffUids && staffUids.length <= STAFF_UIDS_MAX && b.staffUids.every((u) => typeof u === 'string') && staffUids.every((u) => STAFF_UID_RE.test(u)))
   if (fields.length) return { ok: false, code: 'BAD_SETTINGS', fields }
 
   const next = { ...prev, ...patch }

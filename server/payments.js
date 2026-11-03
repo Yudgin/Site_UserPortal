@@ -55,6 +55,8 @@ const receiptUuidFor = (orderId, attempt = 0) => {
 }
 
 const STATUS_PAGE = 200
+// Захват кассы старше этого считается зависшим (процесс упал у кассы), как в сверке магазина: был ли чек, неизвестно.
+const RECEIPT_CLAIM_LIVE_MS = 10 * 60 * 1000
 // Обращений к банку за проход сверки по документам pending.
 const PENDING_POLLS = 50
 // Статусы банка, при которых оплаченный счёт просто живёт дальше: всё прочее по нему владелец должен увидеть.
@@ -106,7 +108,8 @@ export function registerPayments(app, deps) {
 
   // Атомарно «застолбить» право выбить чек. true → фискализируем МЫ; false → уже выбит/в процессе.
   // Закрывает гонку двух параллельных success-колбэков (иначе оба прошли бы проверку receiptId).
-  const claimFiscalization = async (orderId) =>
+  // attempt: номер попытки из снимка, с которым поток пойдёт к кассе.
+  const claimFiscalization = async (orderId, attempt) =>
     adminDb.runTransaction(async (tx) => {
       const ref = col().doc(orderId)
       const snap = await tx.get(ref)
@@ -115,6 +118,8 @@ export function registerPayments(app, deps) {
       if (d.receiptId || d.fiscalizeClaimedAt) return false
       // Магазин: деньги вернули или сумма не сошлась, пока этот поток шёл к кассе.
       if (d.shopOrderId && (d.status === 'reversed' || d.receiptStatus === 'amount-mismatch')) return false
+      // Магазин: владелец начал новую попытку, а снимок старый: его чек вышел бы с прежним id, который касса уже знает.
+      if (d.shopOrderId && (d.receiptAttempt || 0) !== (attempt || 0)) return false
       tx.set(ref, { fiscalizeClaimedAt: nowIso() }, { merge: true })
       return true
     })
@@ -255,7 +260,7 @@ export function registerPayments(app, deps) {
       console.warn(`payments: ⚠️ ФОП ${order.fopId} без Checkbox — ГРОШІ Є, ЧЕК НЕ ВИБИТО для ${order.orderId}`)
       return
     }
-    const claimed = await claimFiscalization(order.orderId)
+    const claimed = await claimFiscalization(order.orderId, order.receiptAttempt)
     if (!claimed) return // другой колбэк/поток уже фискализирует или чек выбит
     const deliveryEmail = await receiptEmail(order)
     const sell = (email) => cbx.sellReceipt(fop, {
@@ -345,7 +350,9 @@ export function registerPayments(app, deps) {
         })
         if (wasPaid) marked = true
       }
-      if (wasPaid) await finishRecheck(await runShopHook('onShopReversed', order, { hadReceipt: !!(order.receiptId || order.fiscalizeClaimedAt), source, refunded: refund ? refund.amount : null }))
+      // Живой захват: чек, скорее всего, выходит прямо сейчас. Зависший ничего не доказывает: владельцу текст «проверьте кабинет Checkbox».
+      const claimLive = !!order.fiscalizeClaimedAt && Date.now() - Date.parse(order.fiscalizeClaimedAt) < RECEIPT_CLAIM_LIVE_MS
+      if (wasPaid) await finishRecheck(await runShopHook('onShopReversed', order, { hadReceipt: !!order.receiptId || claimLive, source, refunded: refund ? refund.amount : null }))
       else await finishRecheck(true)
       return
     }

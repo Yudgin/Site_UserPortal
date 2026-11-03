@@ -59,8 +59,9 @@ const orderPath = (id: string, tail = '') => `/orders/${encodeURIComponent(id)}$
 export const shopAdminApi = {
   actionList: () => call<{ items: ShopOrderRow[]; counters: ShopCounters }>('get', '/orders', { params: { view: 'action' } }),
   allOrders: () => call<{ items: ShopOrderRow[] }>('get', '/orders'),
-  findByPhone: (phone: string) => call<{ items: ShopOrderRow[] }>('get', '/orders', { params: { phone } }),
-  findByOrderNo: (orderNo: string) => call<{ items: ShopOrderRow[] }>('get', '/orders', { params: { orderNo } }),
+  // Телом, а не в адресе: адрес запроса попадает в журнал Cloud Run, телефон покупателя там не нужен.
+  findByPhone: (phone: string) => call<{ items: ShopOrderRow[] }>('post', '/orders/search', { body: { phone } }),
+  findByOrderNo: (orderNo: string) => call<{ items: ShopOrderRow[] }>('post', '/orders/search', { body: { orderNo } }),
   order: (id: string) => call<ShopOrderCard>('get', orderPath(id)),
 
   // force: коды отказов, которые владелец проверил и принял (TTN_UNKNOWN, NO_RECEIPT, TTN_NOT_FOUND).

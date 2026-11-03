@@ -9,6 +9,7 @@ import {
   canTransition, transitionPatch, sellerFilled, publicSeller, npMissing, codPairAllowed, shopSellable,
   pricedItem, skuOnSale, buildCatalogFeed, npOutcome,
   orderNoFromId, shopLimit, claimFresh, acceptsOrders, cardOpenFor, buildOrderDoc, invoiceView, orderPublicView, alertGuideStep, withGuideStep,
+  sameBuyerNames, payInFlight, shopStaffAllowed,
 } from './shopCore.js'
 import { findMaterial } from './siteCatalog.js'
 import { npDateToIso as npDateOriginal } from './incomingRefresh.js'
@@ -109,7 +110,7 @@ test('вход заказа: цена, ФОП, язык и адрес возвр
   assert.equal(r.ok, true)
   assert.deepEqual(Object.keys(r.value).sort(), [
     'cityName', 'cityRef', 'consentOffer', 'consentPersonalData', 'email', 'expectedTotalUah', 'firstName', 'idempotencyKey', 'lastName',
-    'method', 'middleName', 'offerVersion', 'phone', 'qty', 'sku', 'warehouseName', 'warehouseRef',
+    'method', 'middleName', 'offerVersion', 'phone', 'qty', 'replacesKey', 'sku', 'warehouseName', 'warehouseRef',
   ])
 })
 
@@ -139,6 +140,7 @@ const BAD_FIELDS = [
   ['consentOffer', [false, 'true', 1, null, undefined]],
   ['consentPersonalData', [false, 'true', 1, null, undefined]],
   ['expectedTotalUah', ['800', -1, NaN, Infinity, null, undefined]],
+  ['replacesKey', ['short', 'a'.repeat(65), 'кривий ключ 1234567890']],
 ]
 
 for (const [field, values] of BAD_FIELDS) {
@@ -150,6 +152,26 @@ for (const [field, values] of BAD_FIELDS) {
     }
   })
 }
+
+test('sameBuyerNames: фамилия и имя без учёта регистра и вида апострофа; отчество не в счёт', () => {
+  assert.equal(sameBuyerNames({ lastName: 'Шевченко', firstName: "Мар'яна" }, { lastName: 'шевченко', firstName: 'МАР’ЯНА', middleName: 'Петрівна' }), true)
+  assert.equal(sameBuyerNames({ lastName: 'Шевченко', firstName: 'Тарас' }, { lastName: 'Шевченко', firstName: 'Петро' }), false)
+  assert.equal(sameBuyerNames({ lastName: 'Шевченко', firstName: 'Тарас' }, { lastName: 'Коваль', firstName: 'Тарас' }), false)
+  assert.equal(sameBuyerNames(null, { lastName: '', firstName: '' }), false)
+})
+
+test('payInFlight: только неоплаченный заказ, по которому банк уже проводит деньги или документ оплаты paid', () => {
+  const awaiting = (status) => ({ state: 'awaiting_payment', payment: { status } })
+  for (const status of ['processing', 'hold', 'success']) assert.equal(payInFlight(awaiting(status)), true, status)
+  for (const status of ['created', 'failure', 'expired', 'reversed', null]) assert.equal(payInFlight(awaiting(status)), false, String(status))
+  assert.equal(payInFlight(awaiting('created'), [{ status: 'pending' }, { status: 'paid' }]), true)
+  assert.equal(payInFlight({ state: 'cod_confirmed', payment: { status: 'success' } }, [{ status: 'paid' }]), false)
+})
+
+test('shopStaffAllowed: только uid из списка владельца', () => {
+  assert.equal(shopStaffAllowed({ staffUids: ['a', 'b'] }, 'b'), true)
+  for (const [cfg, uid] of [[{ staffUids: ['a'] }, 'b'], [{}, 'a'], [null, 'a'], [{ staffUids: 'a' }, 'a'], [{ staffUids: [''] }, '']]) assert.equal(shopStaffAllowed(cfg, uid), false)
+})
 
 test('вход заказа: настоящие имена и адреса проходят', () => {
   for (const name of ['Нечуй-Левицький', "Мар'яна", 'Мар’яна', 'Марʼяна', 'Ґе', 'Їжак', 'Єва', 'Ли', "О'Коннор", 'я'.repeat(40)]) {

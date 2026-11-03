@@ -640,6 +640,25 @@ test('отделение: НП недоступна, отвечает неусп
   }
 })
 
+test('отделение: названия города и отделения из ответа НП, а не из браузера: накладная уйдёт по рефу', async (t) => {
+  const s = await stand(t, { np: async () => ({ success: true, data: [{ Ref: WH, Description: 'Відділення №12: вул. Шевченка, 1', CityDescription: 'Черкаси', TypeOfWarehouse: 'x' }] }) })
+  const d = await s.created({ cityName: 'Київ', warehouseName: 'Відділення №5' })
+  const o = s.order(d.token)
+  assert.equal(o.clientWarehouseName, 'Відділення №12: вул. Шевченка, 1')
+  assert.equal(o.clientCityName, 'Черкаси')
+  assert.equal(o.addressVerified, true)
+  // НП не назвала город: остаётся текст браузера, отделение всё равно из НП.
+  const noCity = await stand(t)
+  const e = await noCity.created({ cityName: 'Київ', warehouseName: 'Відділення №5' })
+  assert.equal(noCity.order(e.token).clientWarehouseName, 'Відділення №1')
+  assert.equal(noCity.order(e.token).clientCityName, 'Київ')
+  // НП не ответила: проверки не было, остаётся текст браузера.
+  const down = await stand(t, { np: async () => { throw new Error('мережа') } })
+  const f = await down.created({ warehouseName: 'Відділення №5' })
+  assert.equal(down.order(f.token).clientWarehouseName, 'Відділення №5')
+  assert.equal(down.order(f.token).addressVerified, false)
+})
+
 test('бюджет: проверка отделения и чтение статуса вместе со счётом укладываются в 25 с сайта', () => {
   const src = readFileSync(new URL('./shopOrders.js', import.meta.url), 'utf8')
   const budget = (name) => Number(src.match(new RegExp(`const ${name} = (\\d+)`))[1])
@@ -795,6 +814,73 @@ test('замена: разные телефоны и разные артикул
   for (const d of [a, otherSku, otherPhone]) assert.equal(s.order(d.token).state, 'awaiting_payment')
   await settle()
   assert.deepEqual(s.bank.removed, [])
+})
+
+test('замена: тот же телефон, но другое имя: прежний заказ не закрывается, его счёт живёт', async (t) => {
+  const s = await stand(t)
+  const a = await s.created()
+  const b = await s.created({ lastName: 'Коваленко', firstName: 'Петро', middleName: '', warehouseRef: WH2 })
+  assert.equal(s.order(a.token).state, 'awaiting_payment')
+  assert.equal(s.order(a.token).cancelReason, null)
+  assert.equal(s.order(b.token).state, 'awaiting_payment')
+  await settle()
+  assert.deepEqual(s.bank.removed, [])
+  // Регистр, апостроф и по батькові не делают другого покупателя.
+  const same = await stand(t)
+  const c = await same.created({ firstName: "Мар'яна" })
+  await same.created({ lastName: 'шевченко', firstName: 'МАР’ЯНА', middleName: '', warehouseRef: WH2 })
+  assert.equal(same.order(c.token).cancelReason, 'superseded')
+})
+
+test('замена: исправленный телефон: прежний заказ этой вкладки закрывается по его ключу, счёт снимается', async (t) => {
+  const s = await stand(t)
+  const first = orderBody({ phone: '+380671111111' })
+  const a = await s.call('POST', BASE, { body: first })
+  assert.equal(a.status, 201, a.text)
+  const b = await s.created({ phone: '+380672222222', replacesKey: first.idempotencyKey })
+  const old = s.order(a.json.data.token)
+  assert.equal(old.state, 'cancelled')
+  assert.equal(old.cancelReason, 'superseded')
+  assert.equal(old.payment.pageUrl, null)
+  await until(() => s.bank.removed.includes('inv-1'), 'счёт снят')
+  assert.equal(s.db.docs[`shopPhones/${old.phoneKey}`].openCard['V2-LID-R'], null, 'место прежнего телефона свободно')
+  const fresh = s.order(b.token)
+  assert.equal(fresh.state, 'awaiting_payment')
+  assert.equal(s.db.docs[`shopPhones/${fresh.phoneKey}`].openCard['V2-LID-R'], fresh.id)
+
+  // Оплаченный, другой артикул и неизвестный ключ не трогаются; кривой ключ: 400.
+  const paidBody = orderBody({ phone: '+380673333333' })
+  const paid = (await s.call('POST', BASE, { body: paidBody })).json.data
+  await payViaStatus(s, paid.token)
+  const otherBody = orderBody({ phone: '+380674444444', sku: 'V2-LID-H' })
+  const other = (await s.call('POST', BASE, { body: otherBody })).json.data
+  await s.created({ phone: '+380675555555', replacesKey: paidBody.idempotencyKey })
+  await s.created({ phone: '+380676666666', replacesKey: otherBody.idempotencyKey })
+  await s.created({ phone: '+380677777777', replacesKey: 'key-never-used-000000' })
+  assert.equal(s.order(paid.token).state, 'paid')
+  assert.equal(s.order(other.token).state, 'awaiting_payment')
+  const bad = await s.create({ replacesKey: 'кривий' })
+  assert.equal(bad.status, 400)
+  assert.deepEqual(bad.json.error.fields, ['replacesKey'])
+})
+
+test('дубль: тот же покупатель с другим телефоном оплатил два заказа за сутки: алерт «можливий дубль»', async (t) => {
+  const s = await stand(t)
+  const a = await s.created({ phone: '+380671111111' })
+  const b = await s.created({ phone: '+380672222222' })
+  await payViaStatus(s, a.token)
+  await payViaStatus(s, b.token)
+  await until(() => s.calls.alerts.some((x) => x.includes('можливий дубль')), 'алерт дубля')
+  assert.ok(s.order(b.token).alerts['possible-duplicate'])
+  assert.equal(s.order(a.token).alerts['possible-duplicate'], undefined, 'алерт один, у второго')
+  // Однофамилец в другом отделении и с другой почтой дублем не считается.
+  const c = await stand(t)
+  const x = await c.created({ phone: '+380671111111', email: 'a@example.com' })
+  const y = await c.created({ phone: '+380672222222', email: 'b@example.com', warehouseRef: WH2 })
+  await payViaStatus(c, x.token)
+  await payViaStatus(c, y.token)
+  await settle()
+  assert.ok(!c.calls.alerts.some((m) => m.includes('можливий дубль')))
 })
 
 test('замена: новый заказ не трогает прежний, если тот уже оплачен, отменён или закрыт', async (t) => {
@@ -1574,6 +1660,35 @@ test('/pay: повтор после expired и failure: новый счёт, п�
   }
 })
 
+test('/pay: новый счёт только по действующей цене: прайс исправили или позицию сняли, счёта нет; живой счёт остаётся', async (t) => {
+  const s = await stand(t)
+  const d = await s.created()
+  await expireInvoice(s, d.token)
+  const m = s.db.docs['priceList/current'].materials[0]
+  m.price = 850
+  const changed = await s.pay(d.token)
+  assert.equal(changed.status, 409, changed.text)
+  assert.equal(errorOf(changed), 'PRICE_CHANGED')
+  assert.equal(changed.json.error.priceUah, 850)
+  m.price = 800
+  m.site.status = 'draft'
+  assert.equal(errorOf(await s.pay(d.token)), 'NOT_FOR_SALE')
+  assert.equal(s.bank.created.length, 1)
+  assert.equal(s.order(d.token).payAttempts, 1)
+  assert.equal(s.order(d.token).payment.initiatedAt, null)
+  m.site.status = 'published'
+  assert.equal((await s.pay(d.token)).status, 200)
+  assert.equal(s.bank.created.length, 2)
+
+  // Уже выданный счёт покупатель оплачивает по цене своего заказа.
+  const live = await stand(t)
+  const e = await live.created()
+  live.db.docs['priceList/current'].materials[0].price = 850
+  const r = await live.pay(e.token)
+  assert.equal(r.status, 200, r.text)
+  assert.deepEqual(r.json.data.next, { type: 'redirect', url: 'https://pay.test/page-1' })
+})
+
 test('/pay: заказ без счёта и счёт removed: новый счёт сразу, без вопроса банку', async (t) => {
   const s = await stand(t)
   const d = await s.created()
@@ -1787,6 +1902,25 @@ test('отмена: заказ закрыт, счёт снят в банке, п
   const again = await s.created()
   assert.equal(s.order(again.token).state, 'awaiting_payment')
   assert.equal(s.order(d.token).cancelReason, 'buyer', 'причина не заменилась на superseded')
+})
+
+test('отмена: банк уже проводит оплату или оплата записана, а хук не дошёл: NOT_CANCELLABLE, заказ ждёт банк', async (t) => {
+  for (const status of ['processing', 'hold', 'success']) {
+    const s = await stand(t)
+    const d = await s.created()
+    s.patchOrder(d.token, { payment: { status } })
+    const r = await s.cancel(d.token)
+    assert.equal(r.status, 409, status)
+    assert.equal(errorOf(r), 'NOT_CANCELLABLE', status)
+    assert.equal(s.order(d.token).state, 'awaiting_payment', status)
+    await settle()
+    assert.deepEqual(s.bank.removed, [], status)
+  }
+  const s = await stand(t)
+  const d = await s.created()
+  s.db.docs[`payments/${s.order(d.token).payment.paymentId}`].status = 'paid'
+  assert.equal(errorOf(await s.cancel(d.token)), 'NOT_CANCELLABLE')
+  assert.equal(s.order(d.token).state, 'awaiting_payment')
 })
 
 test('отмена: повтор отвечает статусом, счёт второй раз не снимается; заменённый заказ тоже', async (t) => {

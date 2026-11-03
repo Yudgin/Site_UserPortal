@@ -2196,6 +2196,13 @@ test('магазин: чек мог уйти в этот момент: живо�
   assert.deepEqual(sells().map((s) => s.body), [sellBody('pay-1')])
 })
 
+test('магазин: захват кассы завис (процесс упал у кассы): при возврате чек не считается выписанным', async (t) => {
+  const a = await mountShop(t, shopSeed({ status: 'paid', fiscalizeClaimedAt: ago(11) }, { state: 'paid', paidPaymentId: 'pay-1', paidAt: ago(12) }))
+  bankSays({ status: 'reversed' })
+  await a.hook(ok())
+  assert.deepEqual(alertTexts(), [REVERSED_NO_RECEIPT])
+})
+
 test('магазин: заказ не прочитался при reversed: документ уже закрыт первой записью, повтор догоняет заказ', async (t) => {
   const a = await mountShop(t, shopSeed())
   await a.hook(ok())

@@ -10,8 +10,11 @@ import { Add as AddIcon, Delete as DeleteIcon, Refresh as RefreshIcon, Save as S
 import { shopAdminApi } from '@/api/endpoints/shopAdmin'
 import { fopsAdminApi, type FopAdmin } from '@/api/endpoints/fopsAdmin'
 import { npTemplateService } from '@/api/npTemplateService'
+import { userProfileService } from '@/api/userProfileService'
+import { isAdminEmail } from '@/config/access'
 import { formatMoney } from '@/utils/pricing'
 import type { NpTemplate } from '@/types/npTemplate'
+import type { UserProfile } from '@/types/access'
 import { SHOP_MODES, fmtShopDate, type ShopCheckStatus, type ShopReadiness, type ShopSalesMode, type ShopSalesSettings, type ShopSkuRule } from '@/types/shopOrder'
 
 const CHECK_CHIP: Record<ShopCheckStatus, { label: string; color: 'success' | 'error' | 'warning' | 'default' }> = {
@@ -70,6 +73,7 @@ const FIELD_TEXT: Record<string, string> = {
   methods: 'способи оплати',
   limits: 'ліміти',
   skus: 'позиції',
+  staffUids: 'доступ співробітників',
 }
 
 // Умолчания для первого сохранения: документа настроек ещё нет. Режим остаётся «Вимкнено».
@@ -84,7 +88,7 @@ const LIMIT_FIELDS = ['unpaidPerDay', 'payAttemptsPerOrder'] as const
 
 type SkuDraft = { enabled: boolean; inStock: boolean; stock: string; minUah: string; maxUah: string }
 const TEXT_FIELDS = ['fopId', 'npTemplateId', 'siteBaseUrl', 'offerVersion', 'cardReceiptLabel', 'ownerPhone'] as const
-type Draft = Record<(typeof TEXT_FIELDS)[number] | (typeof LIMIT_FIELDS)[number] | 'piiPaidDays', string> & { card: boolean; skus: Record<string, SkuDraft> }
+type Draft = Record<(typeof TEXT_FIELDS)[number] | (typeof LIMIT_FIELDS)[number] | 'piiPaidDays', string> & { card: boolean; skus: Record<string, SkuDraft>; staffUids: string[] }
 
 const numText = (v: number | null | undefined) => (v === null || v === undefined ? '' : String(v))
 const skuDraft = (r: ShopSkuRule): SkuDraft => ({ enabled: r.enabled, inStock: r.inStock, stock: numText(r.stock), minUah: numText(r.minUah), maxUah: numText(r.maxUah) })
@@ -101,7 +105,10 @@ const draftOf = (cfg: ShopSalesSettings | null): Draft => ({
   payAttemptsPerOrder: numText(cfg?.limits?.payAttemptsPerOrder),
   piiPaidDays: numText(cfg?.limits?.piiPaidDays),
   skus: Object.fromEntries(Object.entries(cfg ? cfg.skus || {} : FIRST_SKUS).map(([sku, r]) => [sku, skuDraft(r)])),
+  staffUids: cfg?.staffUids || [],
 })
+
+const sameList = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort())
 
 const wholeOf = (s: string) => (/^\d+$/.test(s.trim()) ? Number(s.trim()) : NaN)
 const amountOf = (s: string) => {
@@ -114,6 +121,7 @@ function patchOf(d: Draft, cfg: ShopSalesSettings | null): { patch: Partial<Shop
   const patch: Partial<ShopSalesSettings> = {}
   for (const k of TEXT_FIELDS) if (d[k].trim() !== (cfg?.[k] || '')) patch[k] = d[k].trim()
   if (d.card !== (cfg?.methods?.card === true)) patch.methods = { card: d.card }
+  if (!sameList(d.staffUids, cfg?.staffUids || [])) patch.staffUids = d.staffUids
 
   const limits: Record<string, number | null> = {}
   for (const k of LIMIT_FIELDS) {
@@ -166,6 +174,7 @@ export default function ShopSetupPanel({ full, mode, onChanged, notify }: { full
   const [draft, setDraft] = useState<Draft | null>(null)
   const [fops, setFops] = useState<FopAdmin[]>([])
   const [templates, setTemplates] = useState<NpTemplate[]>([])
+  const [staff, setStaff] = useState<UserProfile[]>([])
   const [newSku, setNewSku] = useState('')
   const [formErr, setFormErr] = useState('')
   const [busy, setBusy] = useState('')
@@ -193,6 +202,7 @@ export default function ShopSetupPanel({ full, mode, onChanged, notify }: { full
     if (!full) return
     fopsAdminApi.list().then(setFops)
     npTemplateService.list().then(setTemplates)
+    userProfileService.listActive().then((all) => setStaff(all.filter((u) => (u.role === 'director' || u.role === 'owner') && !isAdminEmail(u.email))))
   }, [full])
 
   const fieldsText = (fields: string[]) => (fields.length ? `: ${fields.map((f) => FIELD_TEXT[f] || f).join(', ')}` : '')
@@ -276,6 +286,9 @@ export default function ShopSetupPanel({ full, mode, onChanged, notify }: { full
   }
 
   const parts = templates.filter((t) => t.scenario === 'parts' && (t.active !== false || t.id === draft?.npTemplateId))
+  const toggleStaff = (uid: string, on: boolean) => setDraft((d) => (d ? { ...d, staffUids: on ? [...new Set([...d.staffUids, uid])] : d.staffUids.filter((u) => u !== uid) } : d))
+  // В списке может остаться выключенный сотрудник: его видно, чтобы владелец мог убрать.
+  const staffRows = [...staff.map((u) => ({ uid: u.uid, label: u.displayName || u.email || u.uid })), ...(draft?.staffUids || []).filter((uid) => !staff.some((u) => u.uid === uid)).map((uid) => ({ uid, label: `${uid} (неактивний)` }))]
 
   return (
     <Stack spacing={2}>
@@ -399,6 +412,17 @@ export default function ShopSetupPanel({ full, mode, onChanged, notify }: { full
               <TextField fullWidth size="small" label="Телефон для запасних SMS" value={draft.ownerPhone} onChange={(e) => setField('ownerPhone', e.target.value)} placeholder="+380…" />
             </Stack>
             <FormControlLabel control={<Switch checked={draft.card} onChange={(e) => setField('card', e.target.checked)} />} label="Оплата карткою онлайн" />
+
+            <Box>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Хто ще бачить замовлення</Typography>
+              <Typography variant="caption" color="text.secondary" component="div">Директори з дозволом бачать імена, телефони й адреси покупців, створюють накладні й можуть аварійно вимкнути продажі. Без позначки доступу немає.</Typography>
+              {staffRows.length === 0
+                ? <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>Активних директорів немає.</Typography>
+                : staffRows.map((r) => (
+                  <FormControlLabel key={r.uid} sx={{ display: 'flex' }} label={r.label}
+                    control={<Checkbox size="small" checked={draft.staffUids.includes(r.uid)} onChange={(e) => toggleStaff(r.uid, e.target.checked)} />} />
+                ))}
+            </Box>
 
             <Box>
               <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Позиції на продаж</Typography>

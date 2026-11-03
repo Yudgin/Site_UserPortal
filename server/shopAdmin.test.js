@@ -128,9 +128,10 @@ const fopMeta = (over = {}) => ({
 const fopSecret = (over = {}) => ({ monoAcquire: { token: 'SECRET-mono' }, checkbox: { licenseKey: 'SECRET-lic', pinCode: 'SECRET-pin' }, novaPoshta: { apiKey: 'NP-KEY-2' }, ...over })
 const template = (over = {}) => ({ name: 'Кришка', scenario: 'parts', fopId: 'fop-2', description: 'Запчастина для кораблика', weight: 0.5, seatsAmount: 1, payerType: 'recipient', active: true, cod: false, ...over })
 const skuRule = (over = {}) => ({ enabled: true, inStock: true, stock: null, minUah: 600, maxUah: 1200, ...over })
+// Директор стенда в списке допущенных владельцем: без него у директора доступа нет.
 const sales = (over = {}) => ({
   mode: 'live', methods: { card: true, cod: false }, fopId: 'fop-2', npTemplateId: 'tpl-1', siteBaseUrl: SITE, offerVersion: '2026-11-03', ownerPhone: OWNER_PHONE,
-  ownerTestOkAt: ago(DAY), codKind: 'control', codReceiptMode: 'ettn', cardReceiptLabel: 'Інтернет еквайринг', skus: { 'V2-LID-R': skuRule() }, ...over,
+  ownerTestOkAt: ago(DAY), codKind: 'control', codReceiptMode: 'ettn', cardReceiptLabel: 'Інтернет еквайринг', skus: { 'V2-LID-R': skuRule() }, staffUids: ['dir-uid'], ...over,
 })
 const priceList = () => ({ materials: [{ code: 'V2-LID-R', active: true, price: 800, name: { uk: 'Кришка' }, site: { status: 'published', slug: 'lid-r' } }] })
 
@@ -303,6 +304,44 @@ test('вход: роль owner в users без почты владельца н�
   assert.equal((await s.put('/settings', { mode: 'off' })).error.code, 'OWNER_ONLY')
 })
 
+test('вход: директор не из списка владельца не видит ни заказов, ни данных покупателей, ни аварийной кнопки', async (t) => {
+  for (const staffUids of [undefined, [], ['someone-else'], 'dir-uid']) {
+    const docs = docsOf()
+    docs['system/shopSales'] = sales({ staffUids })
+    if (staffUids === undefined) delete docs['system/shopSales'].staffUids
+    const s = await stand(t, docs, { staff: DIRECTOR })
+    for (const [method, path] of [
+      ['GET', '/orders'], ['GET', '/orders/so-1'], ['POST', '/orders/so-1/ttn'], ['POST', '/orders/so-1/recipient'], ['POST', '/orders/search'],
+      ['GET', '/readiness'], ['GET', '/settings'], ['POST', '/disable-and-remove-invoices'],
+    ]) {
+      const r = await s.call(method, `/api/shop/admin${path}`, { body: method === 'GET' ? undefined : { phone: NEW_PHONE } })
+      assert.equal(r.status, 403, `${JSON.stringify(staffUids)} ${path}`)
+      assert.equal(r.error.code, 'NOT_ALLOWED', path)
+      assert.ok(!r.text.includes(PHONE) && !r.text.includes('Шевченко'), path)
+    }
+    assert.equal(s.settings().mode, 'live')
+    assert.equal(s.order().clientPhone, PHONE)
+    assert.equal(s.np.calls.length, 0)
+  }
+  // Владелец по почте входит без списка.
+  const owner = await stand(t)
+  assert.equal((await owner.get('/orders')).status, 200)
+})
+
+test('settings PUT: список допущенных директоров задаёт только владелец; кривой список не проходит', async (t) => {
+  const s = await stand(t)
+  const r = await s.put('/settings', { staffUids: ['dir-uid', 'dir-uid', ' u-2 '] })
+  assert.equal(r.status, 200, r.text)
+  assert.deepEqual(s.settings().staffUids, ['dir-uid', 'u-2'])
+  for (const staffUids of ['dir-uid', [''], [5], ['a b'], Array.from({ length: 21 }, (_, i) => `u${i}`)]) {
+    const bad = await s.put('/settings', { staffUids })
+    assert.equal(bad.status, 400, JSON.stringify(staffUids))
+    assert.deepEqual(bad.error.fields, ['staffUids'])
+  }
+  assert.equal((await s.put('/settings', { staffUids: [] })).status, 200)
+  assert.deepEqual(s.settings().staffUids, [])
+})
+
 test('неизвестный адрес и битое тело отвечают JSON, а не страницей HTML; тело в журнал не попадает', async (t) => {
   const s = await stand(t)
   const missing = await s.get('/nothing')
@@ -364,13 +403,25 @@ test('поиск: по телефону через хэш в любом напи
   const key = phoneKeyOf(PHONE)
   const s = await stand(t, docsOf(paidOrder({ phoneKey: key }), payment(), { 'shopOrders/so-2': paidOrder({ phoneKey: 'other', orderNo: 'RF-BBBBBB' }) }))
   for (const phone of ['+380671234567', '0671234567', '380 67 123 45 67']) {
-    const r = await s.get(`/orders?phone=${encodeURIComponent(phone)}`)
+    const r = await s.post('/orders/search', { phone })
     assert.deepEqual(r.data.items.map((i) => i.id), ['so-1'], phone)
   }
-  const bad = await s.get('/orders?phone=abc')
+  const bad = await s.post('/orders/search', { phone: 'abc' })
   assert.equal(bad.status, 400)
   assert.equal(bad.error.code, 'BAD_INPUT')
-  assert.deepEqual((await s.get('/orders?orderNo=rf-bbbbbb')).data.items.map((i) => i.id), ['so-2'])
+  assert.deepEqual((await s.post('/orders/search', { orderNo: 'rf-bbbbbb' })).data.items.map((i) => i.id), ['so-2'])
+  assert.deepEqual((await s.post('/orders/search', {})).error.fields, ['phone'])
+})
+
+test('поиск: телефон в адресе запроса не принимается: адрес попадает в журнал запросов Cloud Run', async (t) => {
+  const s = await stand(t, docsOf(paidOrder({ phoneKey: phoneKeyOf(PHONE) })))
+  const r = await s.get(`/orders?phone=${encodeURIComponent(PHONE)}`)
+  assert.equal(r.status, 400)
+  assert.equal(r.error.code, 'BAD_INPUT')
+  assert.ok(!r.text.includes('Шевченко'))
+  assert.deepEqual((await s.get('/orders?orderNo=rf-aaaaaa')).data.items.map((i) => i.id), ['so-1'], 'номер заказа данных покупателя не раскрывает')
+  const src = readFileSync(new URL('../src/api/endpoints/shopAdmin.ts', import.meta.url), 'utf8')
+  assert.ok(!/params: \{ phone/.test(src), 'страница шлёт телефон телом')
 })
 
 test('первый экран: только то, что требует действия, счётчики панели и живые счета', async (t) => {
@@ -537,6 +588,8 @@ test('накладная: шаблон не подходит, ни банка, �
     [{ recipientTarget: 'fixed' }, 'recipient'],
     [{ senderTarget: 'client' }, 'sender'],
     [{ serviceType: 'WarehouseDoors' }, 'service-type'],
+    // Оферта обещает доставку за счёт покупателя: шаблон, где платит отправитель, отправлял бы каждую посылку за счёт ФОП.
+    [{ payerType: 'sender' }, 'payer'],
   ]
   for (const [over, problem, extra] of cases) {
     const s = await stand(t, docsOf(paidOrder(), payment(), { 'npTemplates/tpl-1': template(over), ...extra }))
@@ -1082,6 +1135,25 @@ test('cancel: оплаченное отменить нельзя, деньги �
   assert.equal((await free.post('/orders/so-1/cancel')).status, 200)
 })
 
+test('cancel: банк уже проводит оплату или документ оплаты paid, а хук не дошёл: отмены нет, заказ ждёт банк', async (t) => {
+  for (const status of ['processing', 'hold', 'success']) {
+    const s = await stand(t, docsOf(awaitingOrder({ payment: { ...awaitingOrder().payment, status } }), payment({ status: 'pending', receiptId: null, taxUrl: null, receiptStatus: null })))
+    const r = await s.post('/orders/so-1/cancel')
+    assert.equal(r.status, 409, status)
+    assert.equal(r.error.code, 'PAY_IN_PROGRESS', status)
+    assert.equal(s.order().state, 'awaiting_payment', status)
+    assert.deepEqual(s.bank.removed, [], status)
+  }
+  const paid = await stand(t, docsOf(awaitingOrder(), payment({ status: 'paid', receiptId: null, taxUrl: null, receiptStatus: null })))
+  assert.equal((await paid.post('/orders/so-1/cancel')).error.code, 'PAY_IN_PROGRESS')
+  assert.equal(paid.order().state, 'awaiting_payment')
+  // Конечный ответ банка отмене не мешает.
+  for (const status of ['created', 'failure', 'expired', null]) {
+    const s = await stand(t, docsOf(awaitingOrder({ payment: { ...awaitingOrder().payment, status } }), payment({ status: 'pending', receiptId: null, taxUrl: null, receiptStatus: null })))
+    assert.equal((await s.post('/orders/so-1/cancel')).status, 200, String(status))
+  }
+})
+
 test('cancel: банк отказал снять счёт: заказ всё равно закрыт, ошибка только в журнале', async (t) => {
   const s = await stand(t, docsOf(awaitingOrder(), payment({ status: 'pending', receiptId: null, taxUrl: null, receiptStatus: null })))
   s.bank.removeFail['inv-1'] = httpErr(400)
@@ -1195,6 +1267,27 @@ test('recipient: имя и адрес проверяются как в ново�
   assert.equal(slow.order().addressVerified, false)
 })
 
+test('recipient: названия города и отделения из ответа НП: накладная уйдёт по рефу, а текст браузера мог быть о другом', async (t) => {
+  const NEW_CITY = '33333333-3333-4333-8333-333333333333'
+  const NEW_WH = '44444444-4444-4444-8444-444444444444'
+  const addr = { cityRef: NEW_CITY, cityName: 'Інше місто', warehouseRef: NEW_WH, warehouseName: 'Відділення №5' }
+  const s = await stand(t, docsOf(), { npRequest: async () => ({ success: true, data: [{ Ref: NEW_WH, Description: 'Відділення №12: вул. Шевченка, 1', CityDescription: 'Черкаси' }] }) })
+  assert.equal((await s.post('/orders/so-1/recipient', addr)).status, 200)
+  assert.equal(s.order().clientWarehouseName, 'Відділення №12: вул. Шевченка, 1')
+  assert.equal(s.order().clientCityName, 'Черкаси')
+  assert.equal(s.order().addressVerified, true)
+  // НП не назвала город: остаётся текст браузера, отделение всё равно из ответа НП.
+  const noCity = await stand(t, docsOf(), { npRequest: async () => ({ success: true, data: [{ Ref: NEW_WH, Description: 'Відділення №12' }] }) })
+  await noCity.post('/orders/so-1/recipient', addr)
+  assert.equal(noCity.order().clientWarehouseName, 'Відділення №12')
+  assert.equal(noCity.order().clientCityName, 'Інше місто')
+  // НП не ответила: проверки не было, текст браузера и addressVerified:false.
+  const down = await stand(t, docsOf(), { npRequest: async () => { throw timeoutErr() } })
+  await down.post('/orders/so-1/recipient', addr)
+  assert.equal(down.order().clientWarehouseName, 'Відділення №5')
+  assert.equal(down.order().addressVerified, false)
+})
+
 test('recipient: накладная уже есть: имя и адрес только в кабинете НП, телефон и почта можно; стёртые данные и живой захват не трогаем', async (t) => {
   const s = await stand(t, docsOf(paidOrder({ state: 'shipped', ttn: TTN })))
   assert.equal((await s.post('/orders/so-1/recipient', { lastName: 'Коваль' })).error.code, 'TTN_EXISTS')
@@ -1255,15 +1348,16 @@ test('mark refund-requested: первая дата остаётся, сверк�
   }
 })
 
+// Сумма и валюта сошлись, не сошёлся только наш номер оплаты: такую оплату владелец может подтвердить.
 test('mark confirm-payment: payment_review становится paid, склад уменьшен, метка снята и чек выбит ровно один', async (t) => {
-  const docs = docsOf(paidOrder({ state: 'payment_review', alerts: {}, sms: {} }), payment({ receiptId: null, taxUrl: null, receiptStatus: 'amount-mismatch', receiptError: 'сума 800 коп.' }))
+  const docs = docsOf(paidOrder({ state: 'payment_review', alerts: {}, sms: {} }), payment({ receiptId: null, taxUrl: null, receiptStatus: 'amount-mismatch', receiptError: 'reference pay-other' }))
   docs['system/shopSales'] = sales({ skus: { 'V2-LID-R': skuRule({ stock: 1 }) } })
   const s = await stand(t, docs, { staff: DIRECTOR })
-  s.bank.statuses['inv-1'] = { status: 'success', amount: 75000, finalAmount: 75000, ccy: 980 }
+  s.bank.statuses['inv-1'] = { status: 'success', amount: 80000, finalAmount: 80000, ccy: 980, reference: 'pay-other' }
   const r = await s.post('/orders/so-1/mark', { action: 'confirm-payment' })
   assert.equal(r.status, 200, r.text)
   assert.equal(r.data.state, 'paid')
-  assert.equal(r.data.amountConfirmed.amount, 750)
+  assert.equal(r.data.amountConfirmed.amount, 800)
   assert.equal(r.data.amountConfirmed.by, DIRECTOR.email)
   const o = s.order()
   assert.equal(o.state, 'paid')
@@ -1325,9 +1419,37 @@ test('mark confirm-payment: finalAmount важнее amount, а пустой н�
   const s = await stand(t, docsOf(paidOrder({ state: 'payment_review' })))
   s.bank.statuses['inv-1'] = { status: 'success', amount: 80000, ccy: 980, finalAmount: 60000 }
   assert.equal((await s.post('/orders/so-1/mark', { action: 'confirm-payment' })).data.amountConfirmed.amount, 600)
+  // Пустой finalAmount не ноль: сверяется списанная сумма, и она не та.
   const e = await stand(t, docsOf(paidOrder({ state: 'payment_review' })))
   e.bank.statuses['inv-1'] = { status: 'success', amount: 70000, ccy: 980, finalAmount: '' }
-  assert.equal((await e.post('/orders/so-1/mark', { action: 'confirm-payment' })).data.amountConfirmed.amount, 700)
+  const r = await e.post('/orders/so-1/mark', { action: 'confirm-payment' })
+  assert.equal(r.error.code, 'AMOUNT_DIFFERS')
+  assert.ok(r.error.message.includes('700 грн'), r.error.message)
+})
+
+test('mark confirm-payment: банк списал другую сумму или валюту: чек на сумму заказа не выходит, метка остаётся', async (t) => {
+  const mismatch = () => docsOf(paidOrder({ state: 'payment_review', alerts: {}, sms: {} }), payment({ receiptId: null, taxUrl: null, receiptStatus: 'amount-mismatch', receiptError: 'сума 75000 коп. замість 80000' }))
+  for (const [bank, words] of [
+    [{ status: 'success', amount: 75000, finalAmount: 75000, ccy: 980 }, ['750 грн', '800 грн']],
+    [{ status: 'success', amount: 80000, finalAmount: 80000, ccy: 840 }, ['840']],
+  ]) {
+    const s = await stand(t, mismatch())
+    s.bank.statuses['inv-1'] = bank
+    const r = await s.post('/orders/so-1/mark', { action: 'confirm-payment' })
+    assert.equal(r.status, 409, r.text)
+    assert.equal(r.error.code, 'AMOUNT_DIFFERS')
+    for (const w of words) assert.ok(r.error.message.includes(w), r.error.message)
+    assert.equal(s.calls.sells.length, 0, 'чек не вышел')
+    assert.equal(s.order().state, 'payment_review')
+    assert.equal(s.order().amountConfirmed, undefined)
+    assert.equal(s.pay().receiptStatus, 'amount-mismatch')
+    assert.equal((await s.post('/orders/so-1/ttn')).status, 409, 'накладная не разрешена')
+  }
+  // Уже оплаченный заказ с чужой суммой тоже не получает отметки, которая разрешила бы накладную.
+  const paidState = await stand(t)
+  paidState.bank.statuses['inv-1'] = { status: 'success', amount: 75000, finalAmount: 75000, ccy: 980 }
+  assert.equal((await paidState.post('/orders/so-1/mark', { action: 'confirm-payment' })).error.code, 'AMOUNT_DIFFERS')
+  assert.equal(paidState.order().amountConfirmed, undefined)
 })
 
 test('mark confirm-payment: банк не подтверждает или молчит: заказ не меняется; не то состояние отказ', async (t) => {
@@ -1478,6 +1600,57 @@ test('receipt-retry: касса или банк не ответили, день�
   assert.equal(claimed.calls.getReceipt.length, 0)
   const noFop = await stand(t, docsOf(paidOrder({ fopId: 'fop-x' }), failedReceipt({ fopId: 'fop-x' })))
   assert.equal((await noFop.post('/orders/so-1/receipt-retry')).error.code, 'NO_FOP')
+})
+
+test('receipt-retry: пока шли касса и банк, сверка начала выбивать чек: её захват не затираем, второго чека нет', async (t) => {
+  const gate = held()
+  let reconcileSelling
+  const selling = new Promise((ok) => { reconcileSelling = ok })
+  const s = await stand(t, docsOf(paidOrder({ receipt: { status: 'none' } }), payment({ receiptId: null, taxUrl: null, receiptStatus: 'error', fiscalizeClaimedAt: null })), {
+    getReceipt: async () => {
+      // Другой экземпляр повторяет чек со статусом error (общая сверка, шаг 2), пока маршрут спрашивает кассу.
+      s.api.settleMonoAcquire(s.pay(), BANK_PAID, 'reconcile')
+      await selling
+      throw httpErr(404)
+    },
+    sell: async (_fop, args) => {
+      if (s.calls.sells.length === 1) { reconcileSelling(); await gate.gate }
+      return { receiptId: args.receiptId, fiscalCode: 'FC', taxUrl: TAX_URL, status: 'DONE' }
+    },
+  })
+  const r = await s.post('/orders/so-1/receipt-retry')
+  assert.equal(r.status, 409, r.text)
+  assert.equal(r.error.code, 'RECEIPT_IN_PROGRESS')
+  assert.ok(s.pay().fiscalizeClaimedAt, 'захват сверки на месте')
+  assert.equal(s.pay().receiptAttempt, undefined)
+  gate.release()
+  await until(() => s.pay().receiptId, 'чек сверки')
+  await sleep(20)
+  assert.deepEqual(s.calls.sells.map((c) => c.receiptId), [s.api.receiptUuidFor('pay-1')])
+  assert.equal(s.pay().receiptStatus, 'DONE')
+})
+
+test('receipt-retry: два нажатия разом: новый номер и чек один, второму 409', async (t) => {
+  let asked = 0
+  const both = held()
+  const s = await stand(t, docsOf(paidOrder({ receipt: { status: 'failed' } }), failedReceipt()), {
+    getReceipt: async () => { asked += 1; if (asked === 2) both.release(); await both.gate; return { receiptId: 'rcpt-old', status: 'ERROR', taxUrl: null } },
+  })
+  const [a, b] = await Promise.all([s.post('/orders/so-1/receipt-retry'), s.post('/orders/so-1/receipt-retry')])
+  assert.deepEqual([a.status, b.status].sort(), [200, 409])
+  assert.equal([a, b].find((x) => x.status === 409).error.code, 'RECEIPT_IN_PROGRESS')
+  assert.equal(s.calls.sells.length, 1)
+  assert.equal(s.pay().receiptAttempt, 1)
+  assert.equal(s.pay().receiptId, 'rcpt-new')
+})
+
+test('fiscalize магазина со старым номером попытки: после сброса владельцем захват не берёт', async (t) => {
+  const s = await stand(t, docsOf(paidOrder({ receipt: { status: 'none' } }), payment({ receiptId: null, taxUrl: null, receiptStatus: null, receiptAttempt: 1, fiscalizeClaimedAt: null })))
+  await s.api.fiscalize({ ...s.pay(), receiptAttempt: undefined }, 'x')
+  assert.equal(s.calls.sells.length, 0)
+  assert.equal(s.pay().fiscalizeClaimedAt ?? null, null)
+  await s.api.fiscalize(s.pay(), 'x')
+  assert.deepEqual(s.calls.sells.map((c) => c.receiptId), [s.api.receiptUuidFor('pay-1', 1)])
 })
 
 test('receiptUuidFor: без попытки прежний id ремонтов, попытки дают разные', async (t) => {
@@ -1861,6 +2034,12 @@ test('readiness: что не так, то и показано: шаблон, ц�
   assert.deepEqual(d.sellable.card.missing, ['seller'])
   assert.deepEqual(d.npTemplate.problemTexts, ['шаблон іншого ФОП'])
   assert.deepEqual(d.items.map((i) => [i.sku, i.problem]), [['V2-LID-R', 'price-out-of-range'], ['V2-LID-X', 'no-material']])
+
+  const payer = await stand(t, docsOf(paidOrder(), payment(), { 'npTemplates/tpl-1': template({ payerType: 'sender' }) }))
+  const p = (await payer.get('/readiness')).data
+  assert.ok(p.problems.includes('npTemplate'))
+  assert.deepEqual(p.npTemplate.problemTexts, ['у шаблоні доставку оплачує відправник'])
+  assert.equal(p.ready, false)
 })
 
 test('readiness: касса и банк не отвечают или отказывают: unknown и bad, блок всё равно приходит', async (t) => {
@@ -1992,6 +2171,8 @@ test('npTemplateProblems: пустой список только у годног
   assert.deepEqual(npTemplateProblems(template({ senderTarget: 'service', recipientTarget: 'client', serviceType: 'DoorsWarehouse' }), 'fop-2'), [])
   assert.deepEqual(npTemplateProblems(null, 'fop-2'), ['missing'])
   assert.deepEqual(npTemplateProblems(template({ active: false, scenario: 'incoming', fopId: 'x', description: '' }), 'fop-2'), ['inactive', 'scenario', 'fop', 'description'])
+  assert.deepEqual(npTemplateProblems(template({ payerType: undefined }), 'fop-2'), [], 'без плательщика накладная за счёт получателя')
+  assert.deepEqual(npTemplateProblems(template({ payerType: 'sender' }), 'fop-2'), ['payer'])
 })
 
 test('orderFlags: плашки гаснут вместе с причиной', () => {

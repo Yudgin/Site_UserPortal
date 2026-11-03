@@ -674,6 +674,34 @@ test('п. 3: касса ответила иначе: один алерт, чек
   assert.ok(s.pay().fiscalizeClaimedAt)
 })
 
+test('п. 3: лишний платёж заказа: его зависший захват чека тоже проверяется, чека нет: выбиваем через банк', async () => {
+  const extra = (over = {}) => invoice({ orderId: 'pay-2', providerOrderId: 'inv-2', status: 'paid', fiscalizeClaimedAt: ago(HOUR), ...over })
+  const order = (alerts = { 'extra-payment-pay-2': { at: ago(HOUR), sentAt: ago(HOUR), text: 'x' } }) => paidOrder({
+    paymentIds: ['pay-1', 'pay-2'], receipt: { status: 'ready', taxUrl: TAX_URL }, sms: { paid: { status: 'sent', at: ago(MIN), tries: 1 }, rcpt: { status: 'sent', at: ago(MIN), tries: 1 } },
+    alerts: { 'new-paid': { at: ago(MIN), sentAt: ago(MIN), text: 'x' }, ...alerts },
+  })
+  const s = await stand(docsOf(order(), paidInvoice(), { 'payments/pay-2': extra() }), { getReceipt: async () => { throw httpErr(404) } })
+  s.bank.statuses['inv-2'] = { ...BANK_PAID, reference: 'pay-2' }
+  await s.step()
+  assert.deepEqual(s.calls.getReceipt, [s.api.receiptUuidFor('pay-2')])
+  assert.deepEqual(s.calls.sells.map((c) => c.receiptId), [s.api.receiptUuidFor('pay-2')])
+  assert.equal(s.pay('pay-2').receiptStatus, 'DONE')
+  assert.equal(s.pay('pay-1').receiptId, 'rcpt-1', 'оплативший счёт не тронут')
+
+  const found = await stand(docsOf(order(), paidInvoice(), { 'payments/pay-2': extra() }), { getReceipt: async (_f, id) => ({ receiptId: id, taxUrl: TAX_URL, status: 'DONE' }) })
+  await found.step()
+  assert.equal(found.pay('pay-2').receiptId, found.api.receiptUuidFor('pay-2'))
+  assert.equal(found.calls.sells.length, 0)
+
+  // Свежий захват и платёж без алерта о лишней оплате не трогаем.
+  for (const docs of [docsOf(order(), paidInvoice(), { 'payments/pay-2': extra({ fiscalizeClaimedAt: ago(MIN) }) }), docsOf(order({}), paidInvoice(), { 'payments/pay-2': extra() })]) {
+    const quiet = await stand(docs)
+    await quiet.step()
+    assert.deepEqual(quiet.calls.getReceipt, [])
+    assert.equal(quiet.calls.sells.length, 0)
+  }
+})
+
 test('п. 3: захват свежий: кассу не трогаем, ФОП не загружен: ждём', async () => {
   const fresh = await stand(docsOf(paidOrder({ paidAt: ago(HOUR) }), invoice({ status: 'paid', fiscalizeClaimedAt: ago(9 * MIN) })))
   await fresh.step()

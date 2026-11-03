@@ -1,6 +1,6 @@
 // Страницы владельца «Замовлення з сайту»: заказы, накладная, отметки, настройки, блок готовности. Браузер ходит только сюда:
-// shopOrders, shopPhones, shopDaily и system/* закрыты правилом Firestore по умолчанию. Вход: владелец или директор;
-// настройки, тест алерта, сброс счётчика и разблокировка номера только владелец по почте.
+// shopOrders, shopPhones, shopDaily и system/* закрыты правилом Firestore по умолчанию. Вход: владелец или директор из списка
+// владельца (system/shopSales.staffUids); настройки, тест алерта, сброс счётчика и разблокировка номера только владелец по почте.
 // Цена, ФОП, наложка и адрес накладной берутся из заказа и настроек, телом запроса не задаются. Токен статуса и данные покупателя в журнал не пишем.
 import { ADMIN_EMAIL, verifyFirebaseStaff } from './adminAuth.js'
 import { loadFopFresh } from './fops.js'
@@ -12,8 +12,8 @@ import { INVOICE_VALIDITY_SEC, isPostomat, withBudget } from './shopOrders.js'
 import { KYIV_DAY, messageResetPatch, ttnMessageKind } from './shopPayments.js'
 import { RECEIPT_CLAIM_STALE_MS, createShopReconcile } from './shopReconcile.js'
 import {
-  acceptsOrders, canTransition, claimFresh, npMissing, npTemplateProblems, orderAdminRow, orderAdminView, orderNeedsAction, phoneKeyOf, pricedItem, publicSeller,
-  salesSettingsNext, shopLimit, shopPhone, shopSellable, siteBaseUrlOk, transitionPatch, ttnGonePatch, validateRecipient, withGuideStep,
+  acceptsOrders, canTransition, claimFresh, npMissing, npTemplateProblems, orderAdminRow, orderAdminView, orderNeedsAction, payInFlight, phoneKeyOf, pricedItem, publicSeller,
+  salesSettingsNext, shopLimit, shopPhone, shopSellable, shopStaffAllowed, siteBaseUrlOk, transitionPatch, ttnGonePatch, validateRecipient, withGuideStep,
 } from './shopCore.js'
 
 const LIST_LIMIT = 200
@@ -36,6 +36,7 @@ const TEMPLATE_PROBLEM_TEXT = {
   sender: 'відправник у шаблоні не сервіс',
   recipient: 'отримувач у шаблоні не клієнт',
   'service-type': 'у шаблоні доставка не до відділення',
+  payer: 'у шаблоні доставку оплачує відправник',
 }
 
 const ALERT = {
@@ -92,6 +93,8 @@ export function registerShopAdmin(app, deps) {
       const full = staff.email === ADMIN_EMAIL
       if (ownerOnly && !full) return fail(res, 403, 'OWNER_ONLY', 'Це може зробити лише власник')
       if (!adminDb) return fail(res, 503, 'NO_DB', 'База недоступна')
+      // Заказы магазина с данными покупателей: директору только по списку владельца, роль сама по себе доступа не даёт.
+      if (!full && !shopStaffAllowed(await loadSales(), staff.uid)) return fail(res, 403, 'NOT_ALLOWED', 'Доступ до замовлень магазину надає власник у налаштуваннях магазину')
       await handler(req, res, { ...staff, full, by: staff.email || staff.uid })
     } catch (e) {
       console.error(`shop admin: ${what}:`, failText(e))
@@ -133,17 +136,21 @@ export function registerShopAdmin(app, deps) {
     }
   }
 
+  const byOrderNo = async (raw) => rowsOf((await orders().where('orderNo', '==', str(raw).toUpperCase()).get()).docs)
+
+  // Телефон в адресе запроса попал бы в журнал запросов Cloud Run, где его не стирает ни один срок: поиск по телефону только телом.
   app.get('/api/shop/admin/orders', route('список', async (req, res) => {
-    const rawPhone = str(req.query.phone)
-    if (rawPhone) {
-      const phone = shopPhone(rawPhone)
-      if (!phone) return fail(res, 400, 'BAD_INPUT', 'Вкажіть телефон у форматі +380…', { fields: ['phone'] })
-      return answer(res, { items: rowsOf((await orders().where('phoneKey', '==', phoneKeyOf(phone)).get()).docs) })
-    }
-    const orderNo = str(req.query.orderNo).toUpperCase()
-    if (orderNo) return answer(res, { items: rowsOf((await orders().where('orderNo', '==', orderNo).get()).docs) })
+    if (req.query.phone !== undefined) return fail(res, 400, 'BAD_INPUT', 'Пошук за телефоном лише через POST /orders/search', { fields: ['phone'] })
+    if (str(req.query.orderNo)) return answer(res, { items: await byOrderNo(req.query.orderNo) })
     if (req.query.view === 'action') return answer(res, await actionList())
     return answer(res, { items: rowsOf((await orders().orderBy('createdAt', 'desc').limit(LIST_LIMIT).get()).docs) })
+  }))
+
+  app.post('/api/shop/admin/orders/search', route('пошук', async (req, res) => {
+    if (str(req.body?.orderNo)) return answer(res, { items: await byOrderNo(req.body.orderNo) })
+    const phone = shopPhone(req.body?.phone)
+    if (!phone) return fail(res, 400, 'BAD_INPUT', 'Вкажіть телефон у форматі +380… або номер замовлення', { fields: ['phone'] })
+    return answer(res, { items: rowsOf((await orders().where('phoneKey', '==', phoneKeyOf(phone)).get()).docs) })
   }))
 
   const invoiceRow = (p, order) => ({
@@ -379,11 +386,13 @@ export function registerShopAdmin(app, deps) {
   // Только без денег: оплаченное возвращается в кабинете банка, а заказ закрывает reversed. Счётчик дня не уменьшается, как и у отмены покупателем.
   app.post('/api/shop/admin/orders/:id/cancel', orderRoute('скасування', async ({ res, staff, ref, order }) => {
     const phoneRef = order.phoneKey ? adminDb.collection('shopPhones').doc(order.phoneKey) : null
+    const paymentDocs = await Promise.all((order.paymentIds || []).map((id) => payments.loadOrder(id)))
     const out = await adminDb.runTransaction(async (tx) => {
       const cur = (await tx.get(ref)).data()
       // Любой захват: зависший тоже значит, что накладная могла появиться.
       if (cur.ttnError || cur.ttnCreatingAt) return refusal(409, 'TTN_UNKNOWN', 'Накладна створюється або могла створитись: спершу перевірте кабінет НП')
       if (!canTransition(cur, 'cancelled')) return refusal(409, 'NOT_CANCELLABLE', 'Це замовлення скасувати не можна')
+      if (payInFlight(cur, paymentDocs)) return refusal(409, 'PAY_IN_PROGRESS', 'Банк уже проводить оплату за цим замовленням: скасувати не можна. Оновіть сторінку за кілька хвилин')
       const phone = phoneRef ? await tx.get(phoneRef) : null
       const patch = transitionPatch(cur, 'cancelled', { by: staff.by, patch: { cancelReason: 'owner', payment: { pageUrl: null } } })
       tx.set(ref, patch, { merge: true })
@@ -396,11 +405,12 @@ export function registerShopAdmin(app, deps) {
     return answer(res, { state: 'cancelled' })
   }))
 
+  // Запись отделения из ответа НП или false, если НП ответила; null, если нет.
   const warehouseFits = async (cityRef, warehouseRef) => {
     try {
       const r = await withBudget(npRequest('Address', 'getWarehouses', { CityRef: cityRef, FindByString: '', Limit: 5000 }), addressBudgetMs)
       if (r?.success !== true || !Array.isArray(r.data)) throw new Error('відповідь НП не успішна')
-      return r.data.some((wh) => String(wh?.Ref || '').toLowerCase() === warehouseRef && !isPostomat(wh))
+      return r.data.find((wh) => String(wh?.Ref || '').toLowerCase() === warehouseRef && !isPostomat(wh)) || false
     } catch (e) {
       console.warn('shop admin: відділення не перевірено:', e.message)
       return null
@@ -419,7 +429,9 @@ export function registerShopAdmin(app, deps) {
     if (v.cityRef) {
       const fits = await warehouseFits(v.cityRef, v.warehouseRef)
       if (fits === false) return fail(res, 422, 'BAD_WAREHOUSE', 'Це відділення не належить місту або це поштомат')
-      addressVerified = fits === true
+      addressVerified = !!fits
+      // Названия из ответа НП, как у нового заказа: накладная уйдёт по рефу. НП не ответила: текст со страницы.
+      if (fits) Object.assign(v, { warehouseName: str(fits.Description) || v.warehouseName, cityName: str(fits.CityDescription) || v.cityName })
     }
     const out = await adminDb.runTransaction(async (tx) => {
       const cur = (await tx.get(ref)).data()
@@ -475,6 +487,13 @@ export function registerShopAdmin(app, deps) {
     if (!bankHoldsMoney(st)) {
       payments.settleMonoAcquire(p, st, 'owner').catch((e) => console.error(`shop admin: оплата ${p.orderId}:`, failText(e)))
       return fail(res, 409, 'PAYMENT_NOT_CONFIRMED', `Банк показує статус ${bankStatusText(st)}: підтвердити оплату не можна`)
+    }
+    // Чек выйдет на сумму заказа: банк списал другую сумму или не гривнями, значит, такой чек был бы неправдой.
+    // Возврат части денег после оплаты сюда не относится: чек на всю сумму и чек возврата на разницу.
+    const charged = st.amount != null && st.amount !== '' ? Number(st.amount) : null
+    if (st.ccy != null && Number(st.ccy) !== 980) return fail(res, 409, 'AMOUNT_DIFFERS', `Банк показує валюту ${clip(st.ccy, 8)}, а не гривню: автоматичний чек не вийде. Поверніть гроші в кабінеті monobank або видайте чек вручну в Checkbox`)
+    if (charged !== null && charged !== cbx.toKop(p.amount)) {
+      return fail(res, 409, 'AMOUNT_DIFFERS', `Банк списав ${charged / 100} грн замість ${p.amount} грн: автоматичний чек на суму замовлення був би неправдою. Поверніть гроші в кабінеті monobank або видайте чек на ${charged / 100} грн вручну в Checkbox`)
     }
     const finalKop = finalKopOf(st)
     const amount = finalKop > 0 ? finalKop / 100 : st.amount != null ? Number(st.amount) / 100 : p.amount
@@ -568,7 +587,18 @@ export function registerShopAdmin(app, deps) {
 
     const at = nowIso()
     const cleared = { receiptAttempt: (p.receiptAttempt || 0) + 1, receiptId: null, fiscalCode: null, taxUrl: null, receiptStatus: null, receiptError: null, receiptAt: null, fiscalizeClaimedAt: null }
-    await payments.saveOrder({ orderId: p.orderId, ...cleared })
+    // Пока шли касса и банк, чек мог начать выбивать другой поток: сверка повторяет чеки error, вторая вкладка жмёт ту же кнопку.
+    // Его захват и номер не затираем, иначе выйдут два чека на одну оплату.
+    const payRef = adminDb.collection('payments').doc(p.orderId)
+    const same = (a, b) => (a ?? null) === (b ?? null)
+    const reset = await adminDb.runTransaction(async (tx) => {
+      const cur = (await tx.get(payRef)).data()
+      if (!cur || cur.status !== 'paid' || (cur.receiptAttempt || 0) !== (p.receiptAttempt || 0)) return false
+      if (!['receiptId', 'receiptStatus', 'taxUrl', 'fiscalizeClaimedAt'].every((k) => same(cur[k], p[k]))) return false
+      tx.set(payRef, { ...cleared, updatedAt: at }, { merge: true })
+      return true
+    })
+    if (!reset) return fail(res, 409, 'RECEIPT_IN_PROGRESS', 'Чек щойно змінився або виписується: оновіть сторінку і перевірте його')
     await ref.set({ receipt: { status: 'none', taxUrl: null, checkedAt: at }, alerts: { 'receipt-failed': null, 'receipt-late': null, 'receipt-claim': null }, updatedAt: at }, { merge: true })
     await payments.settleMonoAcquire({ ...p, ...cleared }, st, 'owner')
     const after = await payments.loadOrder(p.orderId)

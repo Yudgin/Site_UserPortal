@@ -285,6 +285,19 @@ export function createShopReconcile(deps) {
     await watchReceipt(ref, order, (await payments.loadOrder(order.paidPaymentId)) || paid)
   }
 
+  // Лишний платёж тоже получает чек, и его захват кассы так же может зависнуть. Читаем только платежи с алертом о лишней оплате:
+  // по остальным счетам денег нет, и в обычном проходе лишних чтений не будет.
+  const recoverExtraClaims = async (ref, order, pass) => {
+    const alerts = order.alerts || {}
+    for (const id of order.paymentIds || []) {
+      if (id === order.paidPaymentId || !alerts[`extra-payment-${id}`]) continue
+      const p = await payments.loadOrder(id)
+      if (p && p.status === 'paid' && !p.receiptId && p.fiscalizeClaimedAt && ageMs(p.fiscalizeClaimedAt) >= RECEIPT_CLAIM_STALE_MS) {
+        await safely(`чек ${order.orderNo} ${id}`, () => recoverReceiptClaim(ref, order, p, pass))
+      }
+    }
+  }
+
   // ---------- напоминания (пп. 5, 7) ----------
 
   // В shipped тоже: накладную могли создать раньше, чем дошло сообщение, а ссылка на статус есть только в нём. Наложка денег ещё не платила.
@@ -473,6 +486,7 @@ export function createShopReconcile(deps) {
     const part = (what, fn) => safely(`${what} ${order.orderNo}`, fn)
     if (order.state === 'awaiting_payment') await part('рахунки', () => pollInvoices(ref, order, pass))
     if (order.paidPaymentId && order.state !== 'reversed') await part('оплата', () => reconcilePaid(ref, order, pass))
+    await part('лишні платежі', () => recoverExtraClaims(ref, order, pass))
     await part('сповіщення про оплату', () => announcePaid(ref, order))
     await part('сповіщення про накладну', () => announceTtn(ref, order))
     await part('накладна', () => watchNoTtn(ref, order))

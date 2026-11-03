@@ -111,13 +111,23 @@ export function createShopPaymentHooks({ adminDb, payments, mono = monoAcquire, 
     }
   }
 
-  // Смотрим только назад по времени: иначе пара заказов алертила бы дважды.
+  // Смотрим только назад по времени: иначе пара заказов алертила бы дважды. Тот же покупатель: тот же телефон или то же имя
+  // с тем же отделением или почтой (телефон с опечаткой исправили новым заказом). Однофамильцы с разными адресами дублем не считаются.
   const alertPossibleDuplicate = async (ref, shop) => {
-    if (!shop.phoneKey || (shop.alerts && shop.alerts['possible-duplicate'])) return
+    if ((!shop.phoneKey && !shop.clientName) || (shop.alerts && shop.alerts['possible-duplicate'])) return
     try {
       const paidAt = Date.parse(shop.paidAt)
-      const same = await adminDb.collection('shopOrders').where('phoneKey', '==', shop.phoneKey).get()
-      const earlier = same.docs.map((d) => ({ ...d.data(), id: d.id })).find((o) => {
+      const col = adminDb.collection('shopOrders')
+      const [byPhone, byName] = await Promise.all([
+        shop.phoneKey ? col.where('phoneKey', '==', shop.phoneKey).get() : null,
+        shop.clientName ? col.where('clientName', '==', shop.clientName).get() : null,
+      ])
+      const sameAddress = (o) => (!!shop.clientWarehouseRef && o.clientWarehouseRef === shop.clientWarehouseRef) || (!!shop.email && o.email === shop.email)
+      const same = [
+        ...(byPhone ? byPhone.docs.map((d) => ({ ...d.data(), id: d.id })) : []),
+        ...(byName ? byName.docs.map((d) => ({ ...d.data(), id: d.id })).filter(sameAddress) : []),
+      ]
+      const earlier = same.find((o) => {
         const at = Date.parse(o.paidAt)
         return o.id !== ref.id && o.state !== 'reversed' && at <= paidAt && paidAt - at <= DAY_MS
       })
