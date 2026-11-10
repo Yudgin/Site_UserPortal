@@ -168,7 +168,7 @@ test('тестовий чек: повернення не вдалося — пр
   const { status, body } = await post(a)
   assert.equal(status, 200)
   assert.equal(body.data.fiscalCode, 'FC-sale')
-  assert.match(body.data.refund.error, /^Checkbox: .*Чек не знайдено/)
+  assert.equal(body.data.refund.error, 'Checkbox: Чек не знайдено')
 })
 
 test('тестовий чек: невірний ключ каси — 502 з текстом Checkbox, повернення не пробуємо', async (t) => {
@@ -177,7 +177,8 @@ test('тестовий чек: невірний ключ каси — 502 з т�
   t.after(a.close)
   const { status, body } = await post(a)
   assert.equal(status, 502)
-  assert.match(body.error.message, /Невірний ключ ліцензії каси/)
+  // людині — текст Checkbox, у дужках — код, а не сирий JSON
+  assert.equal(body.error.message, 'Checkbox: Невірний ключ ліцензії каси (cash_register.invalid_license_key)')
   assert.ok(!s.log.some((l) => l.startsWith('return')))
 })
 

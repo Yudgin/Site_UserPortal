@@ -2,15 +2,15 @@
 //  • LiqPay — статус несуществующего заказа: подпись проверяется, платёж не создаётся;
 //  • monobank эквайринг — данные мерчанта: название кабинета и код показывают, чей это токен;
 //  • monobank Частини — отчёт магазина за сегодня: при чужом store-id или подписи банк отвечает 401;
-//  • Checkbox — касса по ключу лицензии, вход кассира по PIN, его профиль, готовность подписи и смена;
-//    смену не открываем, чеков не создаём;
+//  • Checkbox — касса по ключу лицензии, вход кассира по PIN, его профиль, готовность подписи, смена и оплата
+//    услуг Checkbox (подписка, блокировка за неоплату); смену не открываем, чеков не создаём;
 //  • Нова Пошта — отправители кабинета и опции выбранного отправителя («контроль оплаты»).
 // Значения ключей наружу и в журнал не попадают: отдаём только вердикты. Зелёный вердикт — лишь
 // по подтверждённому ответу; всё непонятное — 'unknown' с кодом ответа, а не «всё хорошо».
 import { queryStatus } from './liqpay.js'
 import { merchantDetails } from './monoAcquire.js'
 import { storeReport } from './monoChast.js'
-import { cashRegisterInfo, signin, cashierMe, checkSignature, cashierShift } from './checkbox.js'
+import { cashRegisterInfo, signin, cashierMe, checkSignature, cashierShift, billingStatus } from './checkbox.js'
 import { npCall, npErr } from './novaPoshtaTtn.js'
 import { methodOn } from './fops.js'
 
@@ -104,10 +104,17 @@ const cbMessage = (e, fop) => {
   }
   return clip(msg, 160)
 }
-// 401/403/422 — Checkbox отказал в том, что мы проверяем (ключ или PIN); остальное — сбой, а не плохой ключ.
+const cbCode = (e) => {
+  const d = e?.response?.data
+  return isObject(d) && typeof d.code === 'string' ? d.code : ''
+}
+// Касса заблокирована за неоплату услуг Checkbox (на продаже — organization.billing_disabled, снято в бою 2026-11-10).
+const BILLING_BLOCK = /^organization\.billing/
+// 401/403/422 — Checkbox отказал в том, что мы проверяем (ключ или PIN), как и блок за неоплату; остальное — сбой,
+// а не плохой ключ.
 const cbFail = (e, fop, what) => {
   const http = e?.response?.status
-  if (http === 401 || http === 403 || http === 422) {
+  if (http === 401 || http === 403 || http === 422 || BILLING_BLOCK.test(cbCode(e))) {
     const msg = cbMessage(e, fop)
     return verdict('bad', msg ? `Checkbox: ${msg}` : `Checkbox не приймає ${what}`)
   }
@@ -115,11 +122,18 @@ const cbFail = (e, fop, what) => {
   return verdict('unknown', http ? `Checkbox відповів кодом ${http}, спробуйте пізніше` : 'Checkbox не відповів, спробуйте пізніше')
 }
 
-const CHECKBOX_IO = { register: cashRegisterInfo, signIn: signin, me: cashierMe, signature: checkSignature, shift: cashierShift }
+const CHECKBOX_IO = { register: cashRegisterInfo, signIn: signin, me: cashierMe, signature: checkSignature, shift: cashierShift, billing: billingStatus }
+// Статусы оплаты Checkbox не документированы: красным считаем только явно «плохие» слова, остальное показываем как есть.
+const BAD_BILLING_STATUS = /block|disabl|suspend|debt|unpaid|inactive|expired/i
+const DAY_MS = 24 * 3600 * 1000
+const uaDate = (v) => {
+  const d = new Date(v)
+  return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleDateString('uk-UA', { timeZone: 'Europe/Kyiv' })
+}
 
 // Checkbox: касса по ключу лицензии → вход кассира по PIN → профиль, подпись (КЕП), смена. Только чтение.
 export const checkCheckbox = async (fop, io = {}, now = () => new Date()) => {
-  const { register, signIn, me, signature, shift } = { ...CHECKBOX_IO, ...io }
+  const { register, signIn, me, signature, shift, billing } = { ...CHECKBOX_IO, ...io }
   const cb = fop.checkbox || {}
   if (!cb.licenseKey && !cb.pinCode) return verdict('none', 'Ключі не задані')
   if (!cb.licenseKey) return verdict('bad', 'Немає ключа ліцензії каси')
@@ -145,13 +159,20 @@ export const checkCheckbox = async (fop, io = {}, now = () => new Date()) => {
     return { ...cbFail(e, fop, 'PIN касира'), cashRegister }
   }
 
-  const [meR, sigR, shiftR] = await Promise.allSettled([me(fop), signature(fop), shift(fop)])
+  const [meR, sigR, shiftR, billR] = await Promise.allSettled([me(fop), signature(fop), shift(fop), billing(fop)])
   const m = meR.status === 'fulfilled' && isObject(meR.value) ? meR.value : null
   const s = sigR.status === 'fulfilled' && isObject(sigR.value) ? sigR.value : null
+  const b = billR.status === 'fulfilled' && isObject(billR.value) ? billR.value : null
   // Смены нет: тело пустое, это не сбой.
   const shiftState = shiftR.status !== 'fulfilled' ? null : (isObject(shiftR.value) && clip(shiftR.value.status, 40)) || 'NONE'
   if (meR.status === 'rejected') console.error('key-check checkbox (касир):', meR.reason?.response?.status || meR.reason?.message)
   if (sigR.status === 'rejected') console.error('key-check checkbox (підпис):', sigR.reason?.response?.status || sigR.reason?.message)
+  if (billR.status === 'rejected') console.error('key-check checkbox (оплата):', billR.reason?.response?.status || billR.reason?.message, cbCode(billR.reason))
+  const subscriptionExp = clip(m?.organization?.subscription_exp, 40)
+  const dateToBlock = clip(b?.date_to_block, 40)
+  const billingState = clip(b?.status, 40)
+  // Значения статуса оплаты ещё не сверены с документацией: пишем их в журнал, чтобы уточнить правила.
+  if (b || subscriptionExp) console.log('key-check checkbox billing:', JSON.stringify({ fop: fop.id, status: billingState, dateToBlock, subscriptionExp, units: b?.units ?? null }))
   const extra = {
     cashRegister,
     shift: shiftState,
@@ -161,6 +182,27 @@ export const checkCheckbox = async (fop, io = {}, now = () => new Date()) => {
       edrpou: clip(m.organization?.edrpou, 32),
       certificateEnd: clip(m.certificate_end, 40),
     } : {}),
+    ...(subscriptionExp ? { subscriptionExp } : {}),
+    ...(billingState ? { billingStatus: billingState } : {}),
+    ...(dateToBlock ? { dateToBlock } : {}),
+  }
+  // Касса заблокирована за неоплату: любой из запросов мог получить этот отказ.
+  const blocked = [meR, sigR, shiftR, billR].find((r) => r.status === 'rejected' && BILLING_BLOCK.test(cbCode(r.reason)))
+  if (blocked) {
+    const msg = cbMessage(blocked.reason, fop)
+    return verdict('bad', `Checkbox: ${msg || 'касу заблоковано через несплату послуг'}. Чеки не підуть, поки не оплатите послуги в кабінеті Checkbox (my.checkbox.ua).`, extra)
+  }
+  const today = KYIV_DATE.format(now())
+  if (subscriptionExp && subscriptionExp < today) {
+    return verdict('bad', `Підписка Checkbox закінчилась ${uaDate(subscriptionExp)}: каса не видасть чек. Оплатіть послуги в кабінеті Checkbox (my.checkbox.ua).`, extra)
+  }
+  const blockAt = dateToBlock ? new Date(dateToBlock) : null
+  const msToBlock = blockAt && !Number.isNaN(blockAt.getTime()) ? blockAt.getTime() - now().getTime() : null
+  if (msToBlock !== null && msToBlock <= 0) {
+    return verdict('bad', `Checkbox заблокував касу ${uaDate(dateToBlock)} через несплату: чеки не підуть. Оплатіть послуги в кабінеті Checkbox (my.checkbox.ua).`, extra)
+  }
+  if (billingState && BAD_BILLING_STATUS.test(billingState)) {
+    return verdict('bad', `Стан оплати Checkbox «${billingState}»: чеки, найімовірніше, не підуть. Перевірте оплату в кабінеті Checkbox (my.checkbox.ua).`, extra)
   }
   if (!m) return verdict('unknown', 'Ключ і PIN дійсні, але Checkbox не показав профіль касира: спробуйте пізніше', extra)
   if (m.blocked === true || (typeof m.blocked === 'string' && m.blocked.trim() && m.blocked !== 'false')) {
@@ -182,9 +224,15 @@ export const checkCheckbox = async (fop, io = {}, now = () => new Date()) => {
   if (s.online === false && s.shift_open_possibility !== true) {
     return verdict('bad', 'Підпис касира зараз недоступний: чеки не підпишуться. Перевірте ключ підпису (КЕП) касира в кабінеті Checkbox.', extra)
   }
-  const soon = msLeft !== null && msLeft < 14 * 24 * 3600 * 1000
+  const notes = []
+  if (msLeft !== null && msLeft < 14 * DAY_MS) notes.push('Ключ підпису касира закінчується менш ніж за 14 днів: оновіть його в кабінеті Checkbox заздалегідь.')
+  if (subscriptionExp && subscriptionExp <= KYIV_DATE.format(new Date(now().getTime() + 7 * DAY_MS))) {
+    notes.push(`Підписка Checkbox закінчується ${uaDate(subscriptionExp)}: оплатіть заздалегідь, інакше каса не видасть чек.`)
+  }
+  if (msToBlock !== null && msToBlock < 7 * DAY_MS) notes.push(`Checkbox заблокує касу ${uaDate(dateToBlock)}, якщо не оплатити послуги.`)
+  if (!b && !subscriptionExp) notes.push('Checkbox не показав стан оплати: чи оплачені послуги каси, перевірте в кабінеті Checkbox.')
   return verdict('ok', 'Каса, касир і підпис у порядку. Звірте, що каса належить саме цьому ФОП: чек має бути від тієї ж особи, що й оплата.', {
-    ...extra, ...(soon ? { note: 'Ключ підпису касира закінчується менш ніж за 14 днів: оновіть його в кабінеті Checkbox заздалегідь.' } : {}),
+    ...extra, ...(notes.length ? { note: notes.join(' ') } : {}),
   })
 }
 
