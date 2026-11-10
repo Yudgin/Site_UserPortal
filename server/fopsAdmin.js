@@ -12,7 +12,7 @@ const nowIso = () => new Date().toISOString()
 const clip = (v, n = 200) => (v == null ? '' : String(v).slice(0, n))
 
 // Оставить только непустые строковые ключи по группам секретов (write-only).
-const SECRET_GROUPS = ['liqpay', 'monoChast', 'monoAcquire', 'privatPaypart', 'checkbox', 'novaPoshta']
+const SECRET_GROUPS = ['liqpay', 'monoChast', 'monoAcquire', 'privatPaypart', 'checkbox', 'novaPoshta', 'monoPersonal', 'privatAutoclient', 'novaPay']
 const pickSecrets = (secrets = {}) => {
   const out = {}
   for (const g of SECRET_GROUPS) {
@@ -72,6 +72,9 @@ export function registerFopsAdmin(app, deps) {
             privatPaypart: !!(s.privatPaypart && s.privatPaypart.storeId),
             checkbox: !!(s.checkbox && s.checkbox.licenseKey),
             novaPoshtaApiKey: !!(s.novaPoshta && s.novaPoshta.apiKey),
+            monoPersonal: !!(s.monoPersonal && s.monoPersonal.token),
+            privatAutoclient: !!(s.privatAutoclient && s.privatAutoclient.token),
+            novaPay: !!(s.novaPay && s.novaPay.refreshToken),
           },
           // Последняя проверка ключей (вручную или ежедневно): от неё цвет меток в списке.
           lastCheck: checks[d.id] || null,

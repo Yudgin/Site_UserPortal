@@ -32,6 +32,10 @@ const mergeFop = (id, m, s) => ({
   monoAcquire: s.monoAcquire,
   privatPaypart: s.privatPaypart, // ПриватБанк оплата частями
   checkbox: s.checkbox,
+  // Банки ФОП, только чтение остатков и выписок (не приём оплат)
+  monoPersonal: s.monoPersonal, // личный токен monobank владельца ФОП
+  privatAutoclient: s.privatAutoclient, // «Автоклієнт» Приват24 для бізнесу
+  novaPay: s.novaPay, // API бизнес-кабинета NovaPay
 })
 
 // Перезагрузить ФОПы из Firestore (мета + секреты), смёржить в полный конфиг. Если в Firestore

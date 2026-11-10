@@ -12,6 +12,10 @@ const CHIPS: { key: keyof FopSecretsSet; label: string; check?: keyof FopKeyChec
   { key: 'privatPaypart', label: 'ПриватБанк Частини' },
   { key: 'checkbox', label: 'Checkbox (чеки)', check: 'checkbox' },
   { key: 'novaPoshtaApiKey', label: 'Нова Пошта', check: 'novaPoshta' },
+  // Банки ФОП: остатки и выписки, не приём оплат
+  { key: 'monoPersonal', label: 'рахунок monobank', check: 'bankMono' },
+  { key: 'privatAutoclient', label: 'рахунок ПриватБанку', check: 'bankPrivat' },
+  { key: 'novaPay', label: 'рахунок NovaPay', check: 'bankNovaPay' },
 ]
 
 const COLOR: Record<KeyCheckStatus, 'success' | 'error' | 'warning' | 'default'> = {

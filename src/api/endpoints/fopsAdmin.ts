@@ -36,6 +36,10 @@ export interface FopSecretsSet {
   privatPaypart: boolean
   checkbox: boolean
   novaPoshtaApiKey: boolean
+  // Банки ФОП (остатки и выписки). Нет в ответе прежней версии сервера.
+  monoPersonal?: boolean
+  privatAutoclient?: boolean
+  novaPay?: boolean
 }
 export interface FopAdmin {
   id: string
@@ -69,6 +73,10 @@ export interface FopSecretsPayload {
   privatPaypart?: { storeId?: string; password?: string }
   checkbox?: { licenseKey?: string; pinCode?: string; cashierName?: string }
   novaPoshta?: { apiKey?: string }
+  // Банки ФОП: только чтение остатков и выписок
+  monoPersonal?: { token?: string }
+  privatAutoclient?: { token?: string; id?: string }
+  novaPay?: { login?: string; refreshToken?: string; certificate?: string }
 }
 export interface FopSavePayload {
   name: string
@@ -80,9 +88,15 @@ export interface FopSavePayload {
 
 // Проверка ключей без денег: только вердикты, значения ключей сервер не отдаёт.
 export type KeyCheckStatus = 'ok' | 'bad' | 'unknown' | 'none'
+// Счёт ФОП в банке, как его показал банк при проверке подключения.
+export interface BankAccountInfo { iban?: string; currency?: string; balance?: number | null; owner?: string }
 export interface KeyCheckItem {
   status: KeyCheckStatus
   message: string
+  holderName?: string // monobank, личный токен: на кого выдан
+  accounts?: BankAccountInfo[] // банки ФОП: счета и остатки
+  personalCards?: number // monobank: сколько личных карт человека портал не читает
+  moreAccounts?: boolean // ПриватБанк: показаны не все счета
   note?: string // ключ годен, но способ оплаты выключен
   merchantName?: string // monobank: чей кабинет
   edrpou?: string
@@ -101,6 +115,9 @@ export interface FopKeyCheck {
   monoChast?: KeyCheckItem // нет в ответе прежней версии сервера
   checkbox?: KeyCheckItem
   novaPoshta: KeyCheckItem
+  bankMono?: KeyCheckItem // счёт ФОП в monobank (остатки и выписки)
+  bankPrivat?: KeyCheckItem // счёт ФОП в ПриватБанке
+  bankNovaPay?: KeyCheckItem // счёт ФОП в NovaPay
 }
 export interface TestReceiptInfo { receiptId?: string; fiscalCode?: string | null; taxUrl?: string | null; status?: string | null }
 // Чек возврата к тестовому чеку: создан (поля чека), не удался (error) или не создан (skipped: 'not_registered' — продажа
