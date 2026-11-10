@@ -74,6 +74,9 @@ test('legacy orders without collectByUs follow payTo; retail is always the full 
 
 test('pay link gate: full → allowed; none → DROPSHIP_PAY; split → SPLIT_PAY; buyout → BUYOUT_PAY', () => {
   assert.equal(boatPayGate({ total: 5000, lines: [] }), null, 'retail')
+  assert.equal(boatPayGate({ total: 0, lines: [] }), null, 'retail with a zero total is not a dropship case')
+  assert.equal(boatPayGate({ kind: 'retail', payTo: 'dropshipper', total: 5000 }), null, 'explicit retail wins over a stale payTo')
+  assert.equal(boatPayGate({ payTo: 'dropshipper', total: 5000 }).code, 'DROPSHIP_PAY', 'old order without a shop but with payTo — blocked as before')
   assert.equal(boatPayGate(order({ collectByUs: 10000 })), null)
   assert.equal(boatPayGate(order({ collectByUs: 0 })).code, 'DROPSHIP_PAY')
   assert.equal(boatPayGate(order({ ttnBy: 'shop' })).code, 'DROPSHIP_PAY')

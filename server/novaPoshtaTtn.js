@@ -368,7 +368,7 @@ export function registerNpTtn(app, deps = {}) {
       } else {
         // Замовлення магазину (дропшипінг): фактична наложка в накладній — це те, що клієнт платить нам.
         // Якщо в діалозі суму змінили, записуємо її в замовлення: від неї рахується борг магазину (§26.1).
-        const shopCodChanged = orderKind(sr) === 'dropship' && codAmount > 0 && codAmount !== boatCodAmount(sr)
+        const shopCodChanged = orderKind(sr) === 'dropship' && !sr.paidAt && codAmount > 0 && codAmount !== boatCodAmount(sr)
         await subjRef.set({
           ttn, npDocRef: doc.Ref || null, npScenario: scenario,
           npCostOnSite: doc.CostOnSite || null, npEstimatedDelivery: doc.EstimatedDeliveryDate || null,

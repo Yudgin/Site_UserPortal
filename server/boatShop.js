@@ -71,6 +71,12 @@ export const shopDue = (o) => (isShopOrder(o) ? r2(orderShopNet(o) - clientDueTo
 // Чи можна створити НАШЕ посилання на оплату (і наш чек). null — можна.
 export function boatPayGate(o) {
   const kind = orderKind(o)
+  // Роздріб — як було до магазинів: блокує лише старе payTo='dropshipper' (сума замовлення тут ні до чого).
+  if (kind === 'retail') {
+    return o?.kind !== 'retail' && o?.payTo === 'dropshipper'
+      ? { status: 409, code: 'DROPSHIP_PAY', message: 'Гроші отримує дропшипер — посилання на оплату і чек на його стороні' }
+      : null
+  }
   if (kind === 'buyout') return { status: 409, code: 'BUYOUT_PAY', message: 'Викуп: магазин платить на рахунок ФОП — посилання на оплату не створюємо' }
   const mode = payMode(o)
   if (mode === 'none') return { status: 409, code: 'DROPSHIP_PAY', message: 'Гроші отримує дропшипер — посилання на оплату і чек на його стороні' }
