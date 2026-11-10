@@ -76,8 +76,9 @@ export default function TestReceiptDialog({ result, onClose }: { result: TestRec
             <SaleBlock sale={result.sale || {}} />
             <RefundBlock refund={result.refund} />
             <Typography variant="caption" color="text.secondary">
-              Гроші не списувались: обидва чеки — лише записи в касі. Зміна на касі лишається відкритою: вона закриється
-              сама, якщо в кабінеті Checkbox увімкнене автоматичне закриття змін, інакше закрийте її там.
+              Гроші не списувались: {result.refund?.receiptId ? 'обидва чеки — лише записи' : 'чек — лише запис'} у касі. Зміна
+              на касі лишається відкритою: вона закриється сама, якщо в кабінеті Checkbox увімкнене автоматичне закриття змін,
+              інакше закрийте її там.
             </Typography>
           </Stack>
         ) : (
