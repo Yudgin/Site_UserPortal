@@ -11,14 +11,15 @@ import {
 } from '@mui/material'
 import {
   Home as HomeIcon, Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Payments as FopIcon,
-  Receipt as ReceiptIcon, VpnKey as KeyIcon,
+  Receipt as ReceiptIcon, VpnKey as KeyIcon, FactCheck as CheckAllIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
-import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs, type FopSeller, type FopKeyCheck } from '@/api/endpoints/fopsAdmin'
+import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs, type FopSeller, type FopKeyCheck, type FopChecksStatus } from '@/api/endpoints/fopsAdmin'
 import NpFopDirectory from '@/components/NpFopDirectory'
 import KeyCheckDialog from '@/components/KeyCheckDialog'
 import TestReceiptDialog, { type TestReceiptResult } from '@/components/TestReceiptDialog'
+import FopKeyChips from '@/components/FopKeyChips'
 
 const emptyEdit = () => ({
   id: '', name: '', active: true, isNew: true,
@@ -48,8 +49,30 @@ export default function FopsAdminPage() {
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
+  const [checks, setChecks] = useState<FopChecksStatus | null>(null) // ежедневная проверка и Telegram
+  const [allBusy, setAllBusy] = useState(false)
   const load = useCallback(async () => { setLoading(true); setFops(await fopsAdminApi.list()); setLoading(false) }, [])
-  useEffect(() => { load() }, [load])
+  // Без спиннера: после проверки обновить цвет меток, не пряча список.
+  const refresh = useCallback(async () => {
+    const [list, status] = await Promise.all([fopsAdminApi.list(), fopsAdminApi.checksStatus()])
+    setFops(list)
+    setChecks(status)
+  }, [])
+  useEffect(() => { load(); fopsAdminApi.checksStatus().then(setChecks) }, [load])
+
+  const checkAll = async () => {
+    setAllBusy(true)
+    const r = await fopsAdminApi.runAllChecks()
+    setAllBusy(false)
+    if (!r.ok || !r.data) { notify(r.error || 'Не вдалося перевірити', 'error'); return }
+    const d = r.data
+    const tg = d.sent === true
+      ? ', повідомлення надіслано в Telegram'
+      : d.sent === false ? (d.telegram ? ', Telegram не доставив повідомлення' : ', Telegram не підключено') : ''
+    const failed = d.failed ? `, не вдалося перевірити: ${d.failed}` : ''
+    notify(`Перевірено ФОП: ${d.checked}${failed}, проблем: ${d.issues}${tg}`, d.issues || d.failed ? 'error' : 'success')
+    refresh()
+  }
 
   const openNew = () => setEdit(emptyEdit())
   const openEdit = (f: FopAdmin) => setEdit({
@@ -99,6 +122,7 @@ export default function FopsAdminPage() {
     const r = await fopsAdminApi.checkKeys(f.id)
     setKeyBusy('')
     setKeyCheck({ fopName: f.name, data: r.data, error: r.ok ? undefined : r.error })
+    if (r.ok) refresh() // результат сохранён на сервере: метки перекрасятся
   }
 
   const remove = async (f: FopAdmin) => {
@@ -127,7 +151,11 @@ export default function FopsAdminPage() {
     <Container maxWidth="md" sx={{ py: 4 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h4">ФОПи та ключі</Typography>
-        <Stack direction="row" spacing={1}>
+        <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
+          <Button variant="outlined" disabled={allBusy || fops.length === 0} onClick={checkAll}
+            startIcon={allBusy ? <CircularProgress size={16} /> : <CheckAllIcon />}>
+            Перевірити всі
+          </Button>
           <Button variant="contained" startIcon={<AddIcon />} onClick={openNew}>Додати ФОП</Button>
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
         </Stack>
@@ -136,6 +164,18 @@ export default function FopsAdminPage() {
         Секретні ключі зберігаються лише на сервері (у браузер не потрапляють). Показуємо «задано / не
         задано»; щоб змінити ключ — введіть нове значення, порожнє поле не перезаписує наявне.
       </Typography>
+      {checks && (
+        <Alert severity={checks.telegram ? 'info' : 'warning'} sx={{ mb: 3 }}>
+          Колір міток — за останньою перевіркою: зелена — гаразд, червона — проблема, помаранчева — не вдалося перевірити,
+          сіра — ще не перевірено. Ключі всіх активних ФОП перевіряються щодня о 9:05
+          {checks.lastRun
+            ? ` (останній раз ${new Date(checks.lastRun.at).toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}, проблем: ${checks.lastRun.issues}${checks.lastRun.failed ? `, не вдалося перевірити ФОП: ${checks.lastRun.failed}` : ''}).`
+            : '.'}
+          {checks.telegram
+            ? ' Про проблеми й кінець підписки Checkbox приходить повідомлення в Telegram.'
+            : ' Повідомлення в Telegram ще не підключені: проблеми видно лише тут.'}
+        </Alert>
+      )}
 
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress /></Box>
@@ -167,17 +207,7 @@ export default function FopsAdminPage() {
                   <IconButton size="small" color="error" onClick={() => remove(f)}><DeleteIcon fontSize="small" /></IconButton>
                 </Stack>
               </Stack>
-              <Stack direction="row" spacing={0.5} sx={{ flexWrap: 'wrap', gap: 0.5 }}>
-                {f.secretsSet.liqpay && <Chip size="small" color="success" label="LiqPay" />}
-                {f.secretsSet.monoChast && <Chip size="small" color="success" label="mono Частини" />}
-                {f.secretsSet.monoAcquire && <Chip size="small" color="success" label="mono еквайринг" />}
-                {f.secretsSet.privatPaypart && <Chip size="small" color="success" label="ПриватБанк Частини" />}
-                {f.secretsSet.checkbox && <Chip size="small" color="info" label="Checkbox (чеки)" />}
-                {f.secretsSet.novaPoshtaApiKey && <Chip size="small" color="warning" label="Нова Пошта" />}
-                {!f.secretsSet.liqpay && !f.secretsSet.monoChast && !f.secretsSet.monoAcquire && !f.secretsSet.privatPaypart && !f.secretsSet.checkbox && !f.secretsSet.novaPoshtaApiKey && (
-                  <Typography variant="caption" color="text.secondary">ключі не задані</Typography>
-                )}
-              </Stack>
+              <FopKeyChips fop={f} />
             </Paper>
           ))}
         </Stack>
