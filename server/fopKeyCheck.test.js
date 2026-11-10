@@ -2,7 +2,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import express from 'express'
-import { checkFopKeys, checkLiqpay, checkMonoAcquire, checkMonoChast, checkCheckbox, checkNovaPoshta } from './fopKeyCheck.js'
+import { checkFopKeys, checkLiqpay, checkMonoAcquire, checkMonoChast, checkCheckbox, checkNovaPoshta, checkMonoPersonal, checkPrivatAutoclient, checkNovaPay } from './fopKeyCheck.js'
+import { fopAccounts } from './bankMono.js'
+import { latestBalances } from './bankPrivat.js'
 import { registerFopsAdmin } from './fopsAdmin.js'
 import { loadFopFresh } from './fops.js'
 
@@ -137,7 +139,7 @@ test('значення ключів не потрапляють у відпов�
   })
   const json = JSON.stringify(r)
   for (const v of Object.values(ALL_SECRETS)) assert.ok(!json.includes(v), `витік ${v}`)
-  assert.deepEqual(Object.keys(r).sort(), ['checkbox', 'liqpay', 'monoAcquire', 'monoChast', 'novaPoshta'])
+  assert.deepEqual(Object.keys(r).sort(), ['bankMono', 'bankNovaPay', 'bankPrivat', 'checkbox', 'liqpay', 'monoAcquire', 'monoChast', 'novaPoshta'])
 })
 
 // ---------- monobank Частини ----------
@@ -434,4 +436,213 @@ test('loadFopFresh: збирає мету і ключі, не ковтає по�
   // документа немає: кеш (тут порожній)
   assert.equal(await loadFopFresh(dbOf({}), 'nope'), null)
   await assert.rejects(() => loadFopFresh(dbOf('fail'), 'f1'), /firestore down/)
+})
+
+// ---------- Банки ФОП: залишки та виписки ----------
+const BANK = { mono: 'MONO-PERSONAL-SECRET', privat: 'PRIVAT-TOKEN-SECRET', privatId: 'PRIVAT-ID-SECRET', npRefresh: 'NOVAPAY-REFRESH-SECRET' }
+const monoInfo = (over = {}) => ({
+  clientId: 'c1', name: 'Тестовий Власник', webHookUrl: '',
+  accounts: [
+    { id: 'p1', type: 'black', currencyCode: 980, balance: 999999, iban: 'UA-PERSONAL-1' },
+    { id: 'f1', type: 'fop', currencyCode: 980, balance: 1234567, iban: 'UA-FOP-1' },
+    { id: 'f2', type: 'fop', currencyCode: 978, balance: 5000, iban: 'UA-FOP-EUR' },
+  ],
+  ...over,
+})
+
+test('monobank особистий токен: показує лише рахунки ФОП, особисті картки не віддає', async () => {
+  const fop = fullFop({ monoPersonal: { token: BANK.mono } })
+  let seen
+  const ok = await checkMonoPersonal(fop, async (token) => { seen = token; return monoInfo() })
+  assert.equal(seen, BANK.mono)
+  assert.equal(ok.status, 'ok')
+  assert.equal(ok.holderName, 'Тестовий Власник')
+  assert.deepEqual(ok.accounts, [
+    { iban: 'UA-FOP-1', currency: 'UAH', balance: 12345.67 },
+    { iban: 'UA-FOP-EUR', currency: 'EUR', balance: 50 },
+  ])
+  assert.match(ok.note, /Особисті картки цієї людини \(1\) портал не читає/)
+  const json = JSON.stringify(ok)
+  assert.ok(!json.includes('UA-PERSONAL-1'), 'особистий рахунок не має потрапити у відповідь')
+  assert.ok(!json.includes('9999.99'), 'залишок особистої картки не має потрапити у відповідь')
+  assert.ok(!json.includes(BANK.mono), 'токен не має потрапити у відповідь')
+})
+
+test('monobank особистий токен: рахунки ФОП у managedClients, без рахунків ФОП — червоний', async () => {
+  const fop = fullFop({ monoPersonal: { token: BANK.mono } })
+  const managed = await checkMonoPersonal(fop, async () => monoInfo({
+    accounts: [{ id: 'p1', type: 'white', currencyCode: 980, balance: 1, iban: 'UA-PERSONAL-1' }],
+    managedClients: [{ clientId: 'm1', tin: '1234567890', name: 'ФОП Тест', accounts: [{ id: 'a', currencyCode: 980, balance: 250000, iban: 'UA-MANAGED-1' }] }],
+  }))
+  assert.equal(managed.status, 'ok')
+  assert.deepEqual(managed.accounts, [{ iban: 'UA-MANAGED-1', currency: 'UAH', balance: 2500, owner: 'ФОП Тест, код 1234567890' }])
+
+  const none = await checkMonoPersonal(fop, async () => monoInfo({ accounts: [{ id: 'p1', type: 'black', currencyCode: 980, balance: 1, iban: 'UA-PERSONAL-1' }] }))
+  assert.equal(none.status, 'bad')
+  assert.match(none.message, /рахунків ФОП за ним не видно/)
+  assert.equal(none.accounts, undefined)
+  assert.ok(!JSON.stringify(none).includes('UA-PERSONAL-1'))
+})
+
+test('monobank особистий токен: без токена не викликаємо, 403 — поганий, 429 — зачекати, інше — невідомо', async () => {
+  const boom = async () => { throw new Error('не мав викликатись') }
+  assert.equal((await checkMonoPersonal(fullFop(), boom)).status, 'none')
+  assert.equal((await checkMonoPersonal(fullFop({ monoPersonal: { token: 'токен з кирилицею' } }), boom)).status, 'bad')
+  const fop = fullFop({ monoPersonal: { token: BANK.mono } })
+  assert.equal((await checkMonoPersonal(fop, async () => { throw httpErr(403) })).status, 'bad')
+  const limited = await checkMonoPersonal(fop, async () => { throw httpErr(429) })
+  assert.equal(limited.status, 'unknown')
+  assert.match(limited.message, /один запит на хвилину/)
+  assert.equal((await checkMonoPersonal(fop, async () => { throw httpErr(500) })).status, 'unknown')
+  assert.equal((await checkMonoPersonal(fop, async () => { throw new Error('timeout') })).status, 'unknown')
+  assert.equal((await checkMonoPersonal(fop, async () => '<html>')).status, 'unknown')
+})
+
+test('fopAccounts: сміття у відповіді monobank не ламає розбір', () => {
+  assert.deepEqual(fopAccounts(null), { accounts: [], personal: 0 })
+  assert.deepEqual(fopAccounts({ accounts: 'x', managedClients: [null, { accounts: 'y' }] }), { accounts: [], personal: 0 })
+  const odd = fopAccounts({ accounts: [null, { type: 'fop', currencyCode: 826, balance: 'x', iban: 'UA-1' }] })
+  assert.deepEqual(odd.accounts, [{ id: '', iban: 'UA-1', currency: '826', balance: null }])
+})
+
+const privatIo = (over = {}) => {
+  const calls = []
+  return {
+    calls,
+    settings: async (creds) => { calls.push(['settings', creds]); return { status: 'SUCCESS', settings: { phase: 'WRK', work_balance: 'N' } } },
+    balances: async (creds) => {
+      calls.push(['balances', creds])
+      return { status: 'SUCCESS', exist_next_page: false, balances: [
+        { acc: 'UA-PRIVAT-1', currency: 'UAH', balanceOut: '100.00', dpd: '09.11.2026 00:00:00', nameACC: 'ФОП Тест' },
+        { acc: 'UA-PRIVAT-1', currency: 'UAH', balanceOut: '250.50', dpd: '10.11.2026 00:00:00', nameACC: 'ФОП Тест' },
+        { acc: 'UA-PRIVAT-2', currency: 'USD', balanceOut: '7', dpd: '10.11.2026 00:00:00' },
+      ] }
+    },
+    wait: async (ms) => { calls.push(['wait', ms]) },
+    ...over,
+  }
+}
+
+test('ПриватБанк Автоклієнт: залишки останнього дня по кожному рахунку, пауза між запитами', async () => {
+  const fop = fullFop({ privatAutoclient: { token: BANK.privat, id: BANK.privatId } })
+  const io = privatIo()
+  const ok = await checkPrivatAutoclient(fop, io)
+  assert.equal(ok.status, 'ok')
+  assert.deepEqual(ok.accounts, [
+    { iban: 'UA-PRIVAT-1', currency: 'UAH', balance: 250.5, owner: 'ФОП Тест' },
+    { iban: 'UA-PRIVAT-2', currency: 'USD', balance: 7 },
+  ])
+  assert.deepEqual(io.calls.map((c) => c[0]), ['settings', 'wait', 'balances'])
+  assert.ok(io.calls[1][1] >= 1000, 'банк просить не частіше запиту на секунду')
+  assert.deepEqual(io.calls[0][1], { token: BANK.privat, id: BANK.privatId })
+  const json = JSON.stringify(ok)
+  assert.ok(!json.includes(BANK.privat) && !json.includes(BANK.privatId), 'ключі не мають потрапити у відповідь')
+
+  const more = await checkPrivatAutoclient(fop, privatIo({ balances: async () => ({ status: 'SUCCESS', exist_next_page: true, balances: [{ acc: 'UA-1', currency: 'UAH', balanceOut: '1' }] }) }))
+  assert.match(more.note, /не всі рахунки/)
+})
+
+test('ПриватБанк Автоклієнт: відмови і стани банку', async () => {
+  const boom = { settings: async () => { throw new Error('не мав викликатись') } }
+  assert.equal((await checkPrivatAutoclient(fullFop(), boom)).status, 'none')
+  assert.equal((await checkPrivatAutoclient(fullFop({ privatAutoclient: { id: 'x' } }), boom)).status, 'bad')
+  assert.equal((await checkPrivatAutoclient(fullFop({ privatAutoclient: { token: 'токен' } }), boom)).status, 'bad')
+
+  const fop = fullFop({ privatAutoclient: { token: BANK.privat } })
+  const bad = await checkPrivatAutoclient(fop, privatIo({ settings: async () => { throw httpErr(401) } }))
+  assert.equal(bad.status, 'bad')
+  assert.match(bad.message, /пару id і token/)
+  const badPair = await checkPrivatAutoclient(fullFop({ privatAutoclient: { token: BANK.privat, id: 'i' } }), privatIo({ settings: async () => { throw httpErr(401) } }))
+  assert.doesNotMatch(badPair.message, /пару id і token/)
+  assert.equal((await checkPrivatAutoclient(fop, privatIo({ balances: async () => { throw httpErr(403) } }))).status, 'bad')
+  assert.equal((await checkPrivatAutoclient(fop, privatIo({ settings: async () => { throw httpErr(503) } }))).status, 'unknown')
+  assert.equal((await checkPrivatAutoclient(fop, privatIo({ settings: async () => { throw new Error('timeout') } }))).status, 'unknown')
+
+  // банк закриває день: залишків не питаємо
+  const closing = privatIo({ settings: async () => ({ status: 'SUCCESS', settings: { phase: 'CLS', work_balance: 'N' } }) })
+  const closed = await checkPrivatAutoclient(fop, closing)
+  assert.equal(closed.status, 'unknown')
+  assert.match(closed.message, /закриває день/)
+  assert.deepEqual(closing.calls, [])
+  assert.equal((await checkPrivatAutoclient(fop, privatIo({ settings: async () => ({ status: 'SUCCESS', settings: { phase: 'WRK', work_balance: 'Y' } }) }))).status, 'unknown')
+
+  // відповідь ERROR з кодом 200: текст банку показуємо, зеленим не вважаємо
+  const refused = await checkPrivatAutoclient(fop, privatIo({ balances: async () => ({ status: 'ERROR', code: '400', message: 'acc is not valid' }) }))
+  assert.equal(refused.status, 'unknown')
+  assert.match(refused.message, /acc is not valid/)
+  assert.equal((await checkPrivatAutoclient(fop, privatIo({ balances: async () => ({ status: 'SUCCESS' }) }))).status, 'unknown')
+  const empty = await checkPrivatAutoclient(fop, privatIo({ balances: async () => ({ status: 'SUCCESS', balances: [] }) }))
+  assert.equal(empty.status, 'unknown')
+  assert.match(empty.message, /активних рахунків банк не показав/)
+})
+
+test('latestBalances: сміття і порожній залишок', () => {
+  assert.deepEqual(latestBalances(null), [])
+  assert.deepEqual(latestBalances([null, {}, { acc: 'UA-1', currency: 'UAH', balanceOut: '' }, { acc: 'UA-2', balanceOut: 'x' }]), [
+    { iban: 'UA-1', currency: 'UAH', balance: null },
+    { iban: 'UA-2', currency: '', balance: null },
+  ])
+})
+
+test('NovaPay: лише повнота даних, зеленого вердикту ще немає', () => {
+  assert.equal(checkNovaPay(fullFop()).status, 'none')
+  const part = checkNovaPay(fullFop({ novaPay: { login: 'l', refreshToken: BANK.npRefresh } }))
+  assert.equal(part.status, 'bad')
+  assert.match(part.message, /сертифікат/)
+  const full = checkNovaPay(fullFop({ novaPay: { login: 'l', refreshToken: BANK.npRefresh, certificate: '-----BEGIN CERTIFICATE-----' } }))
+  assert.equal(full.status, 'unknown')
+  assert.ok(!JSON.stringify(full).includes(BANK.npRefresh))
+})
+
+test('перевірка всіх ключів: банки входять у відповідь, ключі банків назовні не йдуть', async () => {
+  const fop = { ...withAllKeys(), monoPersonal: { token: BANK.mono }, privatAutoclient: { token: BANK.privat, id: BANK.privatId }, novaPay: { login: 'l', refreshToken: BANK.npRefresh, certificate: 'c' } }
+  const r = await checkFopKeys(fop, {
+    liqpayStatus: async () => ({ err_code: 'payment_not_found' }),
+    monoDetails: async () => ({ merchantName: 'ФОП', edrpou: '1' }),
+    monoReport: async () => ({ orders: [] }),
+    checkbox: cbIo(),
+    np: npOk(),
+    monoInfo: async () => monoInfo(),
+    privat: privatIo(),
+  })
+  assert.equal(r.bankMono.status, 'ok')
+  assert.equal(r.bankPrivat.status, 'ok')
+  assert.equal(r.bankNovaPay.status, 'unknown')
+  const json = JSON.stringify(r)
+  for (const v of Object.values(BANK)) assert.ok(!json.includes(v), `витік ${v}`)
+})
+
+test('ФОП: ключі банків зберігаються і в списку видно лише прапорці', async (t) => {
+  const store = { fops: { f1: { name: 'ФОП' } }, fopSecrets: {} }
+  const col = (name) => ({
+    get: async () => ({ docs: Object.entries(store[name]).map(([id, d]) => ({ id, data: () => d })), forEach(fn) { this.docs.forEach(fn) } }),
+    doc: (id) => ({
+      set: async (data, opts) => { store[name][id] = opts?.merge ? { ...(store[name][id] || {}), ...data } : data },
+      get: async () => ({ exists: !!store[name][id], data: () => store[name][id] }),
+    }),
+  })
+  const a = await startApp({ adminDb: { collection: col }, verifyAdmin: async () => true, refreshFops: async () => {} })
+  t.after(a.close)
+  const put = await fetch(`${a.url}/api/fops/admin/f1`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'ФОП', secrets: {
+      monoPersonal: { token: ` ${BANK.mono} ` },
+      privatAutoclient: { token: BANK.privat, id: '' },
+      novaPay: { login: 'user', refreshToken: BANK.npRefresh, certificate: '-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----' },
+      чужаГрупа: { x: 'y' },
+    } }),
+  })
+  assert.equal(put.status, 200)
+  assert.deepEqual(store.fopSecrets.f1, {
+    monoPersonal: { token: BANK.mono },
+    privatAutoclient: { token: BANK.privat },
+    novaPay: { login: 'user', refreshToken: BANK.npRefresh, certificate: '-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----' },
+  })
+  const list = await (await fetch(`${a.url}/api/fops/admin`)).json()
+  const item = list.data.find((f) => f.id === 'f1')
+  assert.equal(item.secretsSet.monoPersonal, true)
+  assert.equal(item.secretsSet.privatAutoclient, true)
+  assert.equal(item.secretsSet.novaPay, true)
+  const json = JSON.stringify(list)
+  for (const v of Object.values(BANK)) assert.ok(!json.includes(v), `витік ${v}`)
 })

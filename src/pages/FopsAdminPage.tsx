@@ -18,17 +18,23 @@ import { isAdminEmail } from '@/config/access'
 import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs, type FopKeyCheck } from '@/api/endpoints/fopsAdmin'
 import NpFopDirectory from '@/components/NpFopDirectory'
 import KeyCheckDialog from '@/components/KeyCheckDialog'
+import BankHowTo from '@/components/BankHowTo'
 import TestReceiptDialog, { type TestReceiptResult } from '@/components/TestReceiptDialog'
 
 const emptyEdit = () => ({
   id: '', name: '', active: true, isNew: true,
   methods: { liqpayCard: false, liqpayPaypart: false, monoChast: false, monoAcquire: false, privatPaypart: false, cod: false },
   np: { senderRef: '', senderName: '', contactRef: '', contactName: '', senderPhone: '', cityRef: '', cityName: '', settlementRef: '', warehouseRef: '', warehouseName: '' } as FopNovaPoshtaRefs,
-  secretsSet: { liqpay: false, monoChast: false, monoAcquire: false, privatPaypart: false, checkbox: false, novaPoshtaApiKey: false },
+  secretsSet: {
+    liqpay: false, monoChast: false, monoAcquire: false, privatPaypart: false, checkbox: false, novaPoshtaApiKey: false,
+    monoPersonal: false, privatAutoclient: false, novaPay: false,
+  },
   // секретные поля (write-only, пустые = не менять)
   s: {
     liqpayPublic: '', liqpayPrivate: '', monoStoreId: '', monoStoreSecret: '', monoAcquireToken: '',
     privatStoreId: '', privatPassword: '', cbLicense: '', cbPin: '', cbCashier: '', npApiKey: '',
+    // банки ФОП: остатки и выписки
+    monoPersonalToken: '', privatAcToken: '', privatAcId: '', novaPayLogin: '', novaPayRefresh: '', novaPayCert: '',
   },
 })
 type EditState = ReturnType<typeof emptyEdit>
@@ -55,7 +61,7 @@ export default function FopsAdminPage() {
     id: f.id, name: f.name, active: f.active, isNew: false,
     methods: { ...emptyEdit().methods, ...f.methods },
     np: { ...emptyEdit().np, ...f.novaPoshta },
-    secretsSet: f.secretsSet,
+    secretsSet: { ...emptyEdit().secretsSet, ...f.secretsSet },
     s: emptyEdit().s,
   })
 
@@ -74,6 +80,11 @@ export default function FopsAdminPage() {
     if (s.privatStoreId || s.privatPassword) secrets.privatPaypart = { storeId: s.privatStoreId || undefined, password: s.privatPassword || undefined }
     if (s.cbLicense || s.cbPin || s.cbCashier) secrets.checkbox = { licenseKey: s.cbLicense || undefined, pinCode: s.cbPin || undefined, cashierName: s.cbCashier || undefined }
     if (s.npApiKey) secrets.novaPoshta = { apiKey: s.npApiKey }
+    if (s.monoPersonalToken) secrets.monoPersonal = { token: s.monoPersonalToken }
+    if (s.privatAcToken || s.privatAcId) secrets.privatAutoclient = { token: s.privatAcToken || undefined, id: s.privatAcId || undefined }
+    if (s.novaPayLogin || s.novaPayRefresh || s.novaPayCert) {
+      secrets.novaPay = { login: s.novaPayLogin || undefined, refreshToken: s.novaPayRefresh || undefined, certificate: s.novaPayCert || undefined }
+    }
 
     const payload: FopSavePayload = {
       name: edit.name.trim(), active: edit.active, methods: edit.methods, novaPoshta: edit.np,
@@ -172,7 +183,10 @@ export default function FopsAdminPage() {
                 {f.secretsSet.privatPaypart && <Chip size="small" color="success" label="ПриватБанк Частини" />}
                 {f.secretsSet.checkbox && <Chip size="small" color="info" label="Checkbox (чеки)" />}
                 {f.secretsSet.novaPoshtaApiKey && <Chip size="small" color="warning" label="Нова Пошта" />}
-                {!f.secretsSet.liqpay && !f.secretsSet.monoChast && !f.secretsSet.monoAcquire && !f.secretsSet.privatPaypart && !f.secretsSet.checkbox && !f.secretsSet.novaPoshtaApiKey && (
+                {f.secretsSet.monoPersonal && <Chip size="small" variant="outlined" color="primary" label="рахунок monobank" />}
+                {f.secretsSet.privatAutoclient && <Chip size="small" variant="outlined" color="primary" label="рахунок ПриватБанку" />}
+                {f.secretsSet.novaPay && <Chip size="small" variant="outlined" color="primary" label="рахунок NovaPay" />}
+                {!Object.values(f.secretsSet).some(Boolean) && (
                   <Typography variant="caption" color="text.secondary">ключі не задані</Typography>
                 )}
               </Stack>
@@ -235,6 +249,30 @@ export default function FopsAdminPage() {
               {secretField('Checkbox PIN касира', edit.s.cbPin, (v) => setEdit({ ...edit, s: { ...edit.s, cbPin: v } }), edit.secretsSet.checkbox)}
               <TextField label="Назва касира (для чека)" value={edit.s.cbCashier} onChange={(e) => setEdit({ ...edit, s: { ...edit.s, cbCashier: e.target.value } })} size="small" fullWidth
                 placeholder={edit.secretsSet.checkbox ? 'задано (залиште порожнім)' : ''} />
+
+              <Divider textAlign="left"><Typography variant="caption">Банки ФОП: залишки та виписки</Typography></Divider>
+              <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+                Ці ключі потрібні, щоб портал бачив залишки на рахунках ФОП і надходження. Портал лише читає: платежів
+                не створює. Після збереження натисніть «Перевірити ключі»: буде видно рахунки і залишки.
+              </Typography>
+
+              <Typography variant="caption" color="text.secondary">monobank: рахунок ФОП</Typography>
+              {secretField('Особистий токен monobank власника ФОП', edit.s.monoPersonalToken, (v) => setEdit({ ...edit, s: { ...edit.s, monoPersonalToken: v } }), edit.secretsSet.monoPersonal)}
+              <BankHowTo bank="mono" />
+
+              <Typography variant="caption" color="text.secondary">ПриватБанк: Автоклієнт</Typography>
+              {secretField('Автоклієнт token', edit.s.privatAcToken, (v) => setEdit({ ...edit, s: { ...edit.s, privatAcToken: v } }), edit.secretsSet.privatAutoclient)}
+              <TextField label="Автоклієнт id (лише якщо банк видав пару id і token)" type="password" value={edit.s.privatAcId} size="small" fullWidth
+                onChange={(e) => setEdit({ ...edit, s: { ...edit.s, privatAcId: e.target.value } })} autoComplete="new-password" placeholder="необовʼязково" />
+              <BankHowTo bank="privat" />
+
+              <Typography variant="caption" color="text.secondary">NovaPay: бізнес-кабінет</Typography>
+              <TextField label="Логін бізнес-кабінету NovaPay" value={edit.s.novaPayLogin} onChange={(e) => setEdit({ ...edit, s: { ...edit.s, novaPayLogin: e.target.value } })} size="small" fullWidth
+                autoComplete="off" placeholder={edit.secretsSet.novaPay ? 'задано (залиште порожнім)' : 'не задано'} />
+              {secretField('NovaPay Refresh Token', edit.s.novaPayRefresh, (v) => setEdit({ ...edit, s: { ...edit.s, novaPayRefresh: v } }), !!edit.secretsSet.novaPay)}
+              <TextField label="NovaPay сертифікат" value={edit.s.novaPayCert} onChange={(e) => setEdit({ ...edit, s: { ...edit.s, novaPayCert: e.target.value } })} size="small" fullWidth
+                multiline minRows={2} maxRows={4} autoComplete="off" placeholder={edit.secretsSet.novaPay ? 'задано (залиште порожнім)' : 'не задано'} />
+              <BankHowTo bank="novapay" />
 
               <Divider textAlign="left"><Typography variant="caption">Нова Пошта (відправник для ТТН)</Typography></Divider>
               {secretField('API-ключ Нової Пошти', edit.s.npApiKey, (v) => setEdit({ ...edit, s: { ...edit.s, npApiKey: v } }), edit.secretsSet.novaPoshtaApiKey)}
