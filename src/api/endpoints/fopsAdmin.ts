@@ -76,6 +76,9 @@ export interface KeyCheckItem {
   cashierName?: string // Checkbox: кассир
   certificateEnd?: string // Checkbox: до какого числа действует ключ подписи (КЕП) кассира
   shift?: string | null // Checkbox: OPENED / CLOSED / NONE…; null — не прочитали
+  subscriptionExp?: string // Checkbox: подписка организации действует до (YYYY-MM-DD)
+  billingStatus?: string // Checkbox: статус оплаты услуг как его отдал Checkbox
+  dateToBlock?: string // Checkbox: с какого момента касса будет заблокирована за неоплату
 }
 export interface FopKeyCheck {
   liqpay: KeyCheckItem

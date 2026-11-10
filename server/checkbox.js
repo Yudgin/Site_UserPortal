@@ -150,6 +150,9 @@ export const returnReceipt = async (fop, { goods, paymentLabel, relatedReceiptId
 
 // Готова ли подпись (КЕП) кассира: {online, type, shift_open_possibility}. Только чтение (readAsCashier ниже).
 export const checkSignature = (fop) => readAsCashier(fop, '/api/v1/cashier/check-signature')
+// Состояние оплаты Checkbox: {status, date_to_block, units, status_changed_at}. Только чтение. Заблокированную за
+// неоплату кассу Checkbox при продаже отклоняет с кодом organization.billing_disabled.
+export const billingStatus = (fop) => readAsCashier(fop, '/api/v1/organization/billing-status')
 
 export const closeShift = async (fop) => {
   await ensureToken(fop)
@@ -196,4 +199,4 @@ export const cashierShift = (fop) => readAsCashier(fop, '/api/v1/cashier/shift')
 // Касса по ключу лицензии: вход кассира не нужен.
 export const cashRegisterInfo = async (fop) => (await axios.get(`${BASE}/api/v1/cash-registers/info`, { headers: headers(fop, false), timeout: 15000 })).data
 
-export default { signin, ensureShift, sellReceipt, returnReceipt, closeShift, getReceipt, cashierMe, cashierShift, cashRegisterInfo, checkSignature, buildSellPayload, toKop, goodsTotalKop }
+export default { signin, ensureShift, sellReceipt, returnReceipt, closeShift, getReceipt, cashierMe, cashierShift, cashRegisterInfo, checkSignature, billingStatus, buildSellPayload, toKop, goodsTotalKop }

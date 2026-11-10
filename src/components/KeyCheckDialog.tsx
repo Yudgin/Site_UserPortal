@@ -31,10 +31,20 @@ const shiftLine = (v: KeyCheckItem['shift']) => {
   return v === 'OPENED' ? 'Зміна зараз відкрита.' : 'Зміна зараз не відкрита: відкриється сама з першим чеком.'
 }
 
-const dateLine = (iso?: string) => {
+const uaDate = (iso?: string) => {
   if (!iso) return ''
   const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '' : `Ключ підпису (КЕП) касира діє до ${d.toLocaleDateString('uk-UA')}.`
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('uk-UA', { timeZone: 'Europe/Kyiv' })
+}
+const dateLine = (iso?: string) => (uaDate(iso) ? `Ключ підпису (КЕП) касира діє до ${uaDate(iso)}.` : '')
+// Оплата услуг Checkbox: подписка и состояние оплаты (значение статуса — как его отдал Checkbox).
+const billingLine = (r: KeyCheckItem) => {
+  const parts = [
+    uaDate(r.subscriptionExp) && `підписка до ${uaDate(r.subscriptionExp)}`,
+    r.billingStatus && `статус «${r.billingStatus}»`,
+    uaDate(r.dateToBlock) && `блокування з ${uaDate(r.dateToBlock)}`,
+  ].filter(Boolean)
+  return parts.length ? `Оплата Checkbox: ${parts.join(', ')}.` : ''
 }
 
 interface Props {
@@ -59,6 +69,7 @@ export default function KeyCheckDialog({ open, fopName, data, error, onClose }: 
                 cashRegisterLine(r.cashRegister),
                 r.cashierName ? `Касир: ${r.cashierName}` : '',
                 dateLine(r.certificateEnd),
+                billingLine(r),
                 shiftLine(r.shift),
                 paymentControlLine(r.paymentControl),
               ].filter(Boolean)

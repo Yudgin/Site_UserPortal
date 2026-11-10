@@ -181,13 +181,14 @@ test('monobank Частини: без ключів або з поганим stor
 const CB = { licenseKey: 'CB-LICENSE-VALUE', pinCode: '98765', cashierName: 'Касир' }
 const cbFop = (over = {}) => fullFop({ checkbox: { ...CB }, ...over })
 const REGISTER = { title: 'Каса 1', fiscal_number: '4000123456', address: 'Київ', is_test: false }
-const CASHIER = { full_name: 'Іваненко Іван', blocked: null, is_test: false, signature_type: 'CLOUD_SIGNATURE', certificate_end: '2027-06-01T00:00:00Z', organization: { title: 'ФОП Іваненко', edrpou: '1234567890' } }
+const CASHIER = { full_name: 'Іваненко Іван', blocked: null, is_test: false, signature_type: 'CLOUD_SIGNATURE', certificate_end: '2027-06-01T00:00:00Z', organization: { title: 'ФОП Іваненко', edrpou: '1234567890', subscription_exp: '2027-01-01' } }
 const cbIo = (over = {}) => ({
   register: async () => REGISTER,
   signIn: async () => 'token',
   me: async () => CASHIER,
   signature: async () => ({ online: true, type: 'CLOUD_SIGNATURE', shift_open_possibility: true }),
   shift: async () => ({ status: 'OPENED' }),
+  billing: async () => ({ status: 'ACTIVE', date_to_block: null, units: 3 }),
   ...over,
 })
 const NOW = () => new Date('2026-11-10T12:00:00Z')
@@ -291,6 +292,67 @@ test('Checkbox: без ключа, PIN або з символами в ключ�
   const echoed = await checkCheckbox(cbFop(), cbIo({ signIn: async () => { throw httpErrBody(403, { message: `ключ ${CB.licenseKey}, pin ${CB.pinCode}` }) } }), NOW)
   assert.ok(!JSON.stringify(echoed).includes(CB.licenseKey))
   assert.ok(!JSON.stringify(echoed).includes(CB.pinCode))
+})
+
+// Відповідь Checkbox на продаж у заблоковану касу (знято в бою 2026-11-10, текст скорочено).
+const BLOCKED = { code: 'organization.billing_disabled', message: 'Касу заблоковано, необхідно виконати оплату послуг на веб-порталі https://my.checkbox.ua' }
+
+test('Checkbox: каса заблокована за несплату — червоний з текстом Checkbox, звідки б не прийшла відмова', async () => {
+  const fromBilling = await checkCheckbox(cbFop(), cbIo({ billing: async () => { throw httpErrBody(403, BLOCKED) } }), NOW)
+  assert.equal(fromBilling.status, 'bad')
+  assert.match(fromBilling.message, /^Checkbox: Касу заблоковано/)
+  assert.match(fromBilling.message, /my\.checkbox\.ua/)
+  assert.equal(fromBilling.cashierName, 'Іваненко Іван') // решта даних для звірки лишається
+  // той самий код на будь-якому читанні — теж блок, навіть із незвичним HTTP-кодом
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ shift: async () => { throw httpErrBody(400, BLOCKED) } }), NOW)).status, 'bad')
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ register: async () => { throw httpErrBody(400, BLOCKED) } }), NOW)).status, 'bad')
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ signIn: async () => { throw httpErrBody(400, BLOCKED) } }), NOW)).status, 'bad')
+})
+
+test('Checkbox: підписка — закінчилась червоний, скоро — попередження, з датою', async () => {
+  const meWith = (subscription_exp) => cbIo({ me: async () => ({ ...CASHIER, organization: { ...CASHIER.organization, subscription_exp } }) })
+  const expired = await checkCheckbox(cbFop(), meWith('2026-11-09'), NOW)
+  assert.equal(expired.status, 'bad')
+  assert.match(expired.message, /Підписка Checkbox закінчилась 09\.11\.2026/)
+  assert.equal(expired.subscriptionExp, '2026-11-09')
+  // останній день підписки — ще можна
+  assert.equal((await checkCheckbox(cbFop(), meWith('2026-11-10'), NOW)).status, 'ok')
+  const soon = await checkCheckbox(cbFop(), meWith('2026-11-15'), NOW)
+  assert.equal(soon.status, 'ok')
+  assert.match(soon.note, /Підписка Checkbox закінчується 15\.11\.2026/)
+  assert.equal((await checkCheckbox(cbFop(), meWith('2026-12-31'), NOW)).note, undefined)
+})
+
+test('Checkbox: дата блокування і статус оплати', async () => {
+  const bill = (v) => cbIo({ billing: async () => v })
+  const past = await checkCheckbox(cbFop(), bill({ status: 'ACTIVE', date_to_block: '2026-11-01T00:00:00Z' }), NOW)
+  assert.equal(past.status, 'bad')
+  assert.match(past.message, /заблокував касу 01\.11\.2026/)
+  const soon = await checkCheckbox(cbFop(), bill({ status: 'ACTIVE', date_to_block: '2026-11-14T00:00:00Z' }), NOW)
+  assert.equal(soon.status, 'ok')
+  assert.match(soon.note, /заблокує касу 14\.11\.2026/)
+  assert.equal(soon.dateToBlock, '2026-11-14T00:00:00Z')
+  for (const status of ['BLOCKED', 'billing_disabled', 'DEBT']) {
+    const r = await checkCheckbox(cbFop(), bill({ status }), NOW)
+    assert.equal(r.status, 'bad', status)
+    assert.equal(r.billingStatus, status)
+  }
+  // незнайомий статус — показуємо як є, вердикт не псуємо
+  const odd = await checkCheckbox(cbFop(), bill({ status: 'TRIAL' }), NOW)
+  assert.equal(odd.status, 'ok')
+  assert.equal(odd.billingStatus, 'TRIAL')
+})
+
+test('Checkbox: стан оплати не прочитали — ключі зелені, але з підказкою перевірити оплату', async () => {
+  const noBill = await checkCheckbox(cbFop(), cbIo({ billing: async () => { throw httpErr(500) } }), NOW)
+  assert.equal(noBill.status, 'ok') // підписку видно з профілю касира
+  assert.equal(noBill.note, undefined)
+  const nothing = await checkCheckbox(cbFop(), cbIo({
+    billing: async () => { throw httpErr(500) },
+    me: async () => ({ ...CASHIER, organization: { title: 'ФОП Іваненко', edrpou: '1234567890' } }),
+  }), NOW)
+  assert.equal(nothing.status, 'ok')
+  assert.match(nothing.note, /не показав стан оплати/)
 })
 
 test('звірка: каса Checkbox і кабінет monobank різних осіб — червоний', async () => {
