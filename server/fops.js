@@ -102,6 +102,18 @@ export const listFopsPublic = () =>
     receipts: fopHas(f, 'checkbox.licenseKey'), // может ли выдавать фискальные чеки
   }))
 
+// ФОПы с ключом Новой Почты — С КЛЮЧОМ, только для серверной синхронизации журнала посылок (parcels.js).
+// Неактивные тоже: их посылки ещё могут быть в дороге. Наружу этот список не отдавать.
+export const listNpFops = () =>
+  FOPS.filter((f) => f && f.novaPoshta && f.novaPoshta.apiKey).map((f) => ({
+    id: f.id,
+    name: f.name || f.id,
+    active: f.active !== false,
+    apiKey: f.novaPoshta.apiKey,
+    senderRef: f.novaPoshta.senderRef || '',
+    senderPhone: f.novaPoshta.senderPhone || '',
+  }))
+
 export const hasAnyFop = () => FOPS.length > 0
 
 export default { getFop, fopHas, listFopsPublic, hasAnyFop, refreshFops }
