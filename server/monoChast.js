@@ -42,6 +42,10 @@ export const rejectOrder = (fop, orderId) => request(fop, '/api/order/reject', {
 // Опрос статуса (надёжнее вебхука для ACTIVE/DONE)
 export const orderState = (fop, orderId) => request(fop, '/api/order/state', { order_id: orderId })
 
+// Отчёт магазина за день (date: 'YYYY-MM-DD'). Только чтение: заявок и денег не трогает. Банк отвечает 401,
+// если store-id или подпись не годятся (документация API «Покупка частинами»), поэтому по нему проверяем ключи.
+export const storeReport = (fop, date) => request(fop, '/api/store/report', { date })
+
 // Проверить подпись входящего result_callback (HMAC от сырого тела)
 export const verifyCallbackSig = (fop, rawBody, sigHeader) => {
   const secret = fop && fop.monoChast && fop.monoChast.storeSecret
@@ -54,4 +58,4 @@ export const verifyCallbackSig = (fop, rawBody, sigHeader) => {
   }
 }
 
-export default { createOrder, confirmOrder, rejectOrder, orderState, verifyCallbackSig, chastSignature }
+export default { createOrder, confirmOrder, rejectOrder, orderState, storeReport, verifyCallbackSig, chastSignature }

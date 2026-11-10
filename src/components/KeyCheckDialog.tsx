@@ -9,6 +9,8 @@ const SEVERITY: Record<KeyCheckStatus, 'success' | 'error' | 'warning' | 'info'>
 const ROWS: { key: keyof FopKeyCheck; title: string }[] = [
   { key: 'liqpay', title: 'LiqPay' },
   { key: 'monoAcquire', title: 'monobank еквайринг' },
+  { key: 'monoChast', title: 'monobank Частини' },
+  { key: 'checkbox', title: 'Checkbox (чеки)' },
   { key: 'novaPoshta', title: 'Нова Пошта' },
 ]
 
@@ -16,6 +18,23 @@ const paymentControlLine = (v: KeyCheckItem['paymentControl']) => {
   if (v === true) return 'Контроль оплати (гроші на рахунок ФОП): доступний у цього відправника.'
   if (v === false) return 'Контроль оплати (гроші на рахунок ФОП): не підключений у цього відправника.'
   return v === null ? 'Контроль оплати: Нова Пошта не повідомила, чи він доступний.' : ''
+}
+
+const cashRegisterLine = (c: KeyCheckItem['cashRegister']) => {
+  if (!c) return ''
+  const parts = [c.title, c.fiscalNumber && `ФН ${c.fiscalNumber}`, c.address].filter(Boolean)
+  return parts.length ? `Каса: ${parts.join(', ')}` : ''
+}
+
+const shiftLine = (v: KeyCheckItem['shift']) => {
+  if (!v) return ''
+  return v === 'OPENED' ? 'Зміна зараз відкрита.' : 'Зміна зараз не відкрита: відкриється сама з першим чеком.'
+}
+
+const dateLine = (iso?: string) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '' : `Ключ підпису (КЕП) касира діє до ${d.toLocaleDateString('uk-UA')}.`
 }
 
 interface Props {
@@ -35,19 +54,27 @@ export default function KeyCheckDialog({ open, fopName, data, error, onClose }: 
           <Stack spacing={1}>
             {ROWS.map(({ key, title }) => {
               const r = data[key]
-              const pc = paymentControlLine(r.paymentControl)
+              if (!r) return null
+              const lines = [
+                cashRegisterLine(r.cashRegister),
+                r.cashierName ? `Касир: ${r.cashierName}` : '',
+                dateLine(r.certificateEnd),
+                shiftLine(r.shift),
+                paymentControlLine(r.paymentControl),
+              ].filter(Boolean)
               return (
                 <Alert key={key} severity={SEVERITY[r.status]}>
                   <Box sx={{ fontWeight: 600 }}>{title}</Box>
                   {r.message}
-                  {(r.merchantName || r.edrpou) && <Box sx={{ mt: 0.5 }}>Кабінет: {r.merchantName ? <b>{r.merchantName}</b> : 'без назви'}{r.edrpou ? `, код ${r.edrpou}` : ''}</Box>}
-                  {pc && <Box sx={{ mt: 0.5 }}>{pc}</Box>}
+                  {(r.merchantName || r.edrpou) && <Box sx={{ mt: 0.5 }}>{key === 'checkbox' ? 'Організація в Checkbox' : 'Кабінет'}: {r.merchantName ? <b>{r.merchantName}</b> : 'без назви'}{r.edrpou ? `, код ${r.edrpou}` : ''}</Box>}
+                  {lines.map((l) => <Box key={l} sx={{ mt: 0.5 }}>{l}</Box>)}
                   {r.note && <Box sx={{ mt: 0.5 }}>{r.note}</Box>}
                 </Alert>
               )
             })}
             <Typography variant="caption" color="text.secondary">
-              Гроші не списуються, чек і накладна не створюються. monobank Частини, ПриватБанк і Checkbox ця кнопка не перевіряє.
+              Гроші не списуються, чеки й накладні не створюються, зміна на касі не відкривається. ПриватБанк «Оплата
+              частинами» напряму ця кнопка не перевіряє: такий спосіб ще не підключений, частини ПриватБанку йдуть через LiqPay.
             </Typography>
           </Stack>
         )}

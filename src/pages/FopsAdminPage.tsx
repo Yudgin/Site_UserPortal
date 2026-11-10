@@ -18,6 +18,7 @@ import { isAdminEmail } from '@/config/access'
 import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs, type FopKeyCheck } from '@/api/endpoints/fopsAdmin'
 import NpFopDirectory from '@/components/NpFopDirectory'
 import KeyCheckDialog from '@/components/KeyCheckDialog'
+import TestReceiptDialog, { type TestReceiptResult } from '@/components/TestReceiptDialog'
 
 const emptyEdit = () => ({
   id: '', name: '', active: true, isNew: true,
@@ -40,7 +41,7 @@ export default function FopsAdminPage() {
   const [edit, setEdit] = useState<EditState | null>(null)
   const [saving, setSaving] = useState(false)
   const [receiptBusy, setReceiptBusy] = useState('') // id ФОПа, по которому выбивается тестовый чек
-  const [receipt, setReceipt] = useState<{ fopName: string; ok: boolean; fiscalCode?: string | null; taxUrl?: string | null; status?: string | null; error?: string } | null>(null)
+  const [receipt, setReceipt] = useState<TestReceiptResult | null>(null)
   const [keyBusy, setKeyBusy] = useState('') // id ФОПа, у которого проверяются ключи
   const [keyCheck, setKeyCheck] = useState<{ fopName: string; data?: FopKeyCheck; error?: string } | null>(null)
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
@@ -84,11 +85,11 @@ export default function FopsAdminPage() {
   }
 
   const testReceipt = async (f: FopAdmin) => {
-    if (!window.confirm(`Виписати РЕАЛЬНИЙ тестовий фіскальний чек на 10 грн для «${f.name}»?\n\nБуде відкрито реальну зміну на касі та створено справжній чек у ДПС (не пісочниця).`)) return
+    if (!window.confirm(`Виписати РЕАЛЬНИЙ тестовий фіскальний чек на 10 грн для «${f.name}» і одразу чек повернення на ту саму суму?\n\nБуде відкрито реальну зміну на касі, обидва чеки підуть у ДПС (не пісочниця). Гроші не списуються.`)) return
     setReceiptBusy(f.id)
     const r = await fopsAdminApi.testReceipt(f.id)
     setReceiptBusy('')
-    setReceipt({ fopName: f.name, ok: r.ok, fiscalCode: r.data?.fiscalCode, taxUrl: r.data?.taxUrl, status: r.data?.status, error: r.error })
+    setReceipt({ fopName: f.name, ok: r.ok, sale: r.data, refund: r.data?.refund, error: r.error })
   }
 
   const checkKeys = async (f: FopAdmin) => {
@@ -251,26 +252,8 @@ export default function FopsAdminPage() {
 
       <KeyCheckDialog open={!!keyCheck} fopName={keyCheck?.fopName} data={keyCheck?.data} error={keyCheck?.error} onClose={() => setKeyCheck(null)} />
 
-      {/* Результат тестового чека Checkbox */}
-      <Dialog open={!!receipt} onClose={() => setReceipt(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>Тестовий чек · {receipt?.fopName}</DialogTitle>
-        <DialogContent dividers>
-          {receipt?.ok ? (
-            <Stack spacing={1}>
-              <Alert severity="success">Фіскальний чек виписано (реальний, на 10 грн).</Alert>
-              {receipt.fiscalCode && <Typography variant="body2">Фіскальний код: <b>{receipt.fiscalCode}</b></Typography>}
-              {receipt.status && <Typography variant="body2" color="text.secondary">Статус: {receipt.status}</Typography>}
-              {receipt.taxUrl && <Typography variant="body2"><a href={receipt.taxUrl} target="_blank" rel="noreferrer">Переглянути чек</a></Typography>}
-              <Typography variant="caption" color="text.secondary">Це реальна продажа на касі. За потреби зробіть чек повернення у кабінеті Checkbox.</Typography>
-            </Stack>
-          ) : (
-            <Alert severity="error"><Box sx={{ whiteSpace: 'pre-wrap' }}>{receipt?.error}</Box></Alert>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setReceipt(null)}>Закрити</Button>
-        </DialogActions>
-      </Dialog>
+      {/* Результат тестового чека Checkbox и чека возврата к нему */}
+      <TestReceiptDialog result={receipt} onClose={() => setReceipt(null)} />
 
       <Snackbar open={snack.open} autoHideDuration={4000} onClose={() => setSnack({ ...snack, open: false })} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
         <Alert severity={snack.sev} onClose={() => setSnack({ ...snack, open: false })}>{snack.msg}</Alert>
