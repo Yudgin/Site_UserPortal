@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import express from 'express'
-import { checkFopKeys, checkLiqpay, checkMonoAcquire, checkNovaPoshta } from './fopKeyCheck.js'
+import { checkFopKeys, checkLiqpay, checkMonoAcquire, checkMonoChast, checkCheckbox, checkNovaPoshta } from './fopKeyCheck.js'
 import { registerFopsAdmin } from './fopsAdmin.js'
 import { loadFopFresh } from './fops.js'
 
@@ -128,14 +128,187 @@ test('Нова Пошта: ключ, поля відправника, сам в�
 })
 
 test('значення ключів не потрапляють у відповідь', async () => {
-  const r = await checkFopKeys(fullFop(), {
+  const r = await checkFopKeys(withAllKeys(), {
     liqpayStatus: async () => ({ err_code: 'payment_not_found' }),
     monoDetails: async () => ({ merchantName: 'ФОП', edrpou: '1' }),
+    monoReport: async () => ({ orders: [] }),
+    checkbox: cbIo(),
     np: npOk(),
   })
   const json = JSON.stringify(r)
-  for (const v of Object.values(SECRETS)) assert.ok(!json.includes(v), `витік ${v}`)
-  assert.deepEqual(Object.keys(r).sort(), ['liqpay', 'monoAcquire', 'novaPoshta'])
+  for (const v of Object.values(ALL_SECRETS)) assert.ok(!json.includes(v), `витік ${v}`)
+  assert.deepEqual(Object.keys(r).sort(), ['checkbox', 'liqpay', 'monoAcquire', 'monoChast', 'novaPoshta'])
+})
+
+// ---------- monobank Частини ----------
+const MC = { storeId: 'store-1', storeSecret: 'MC-SECRET-VALUE' }
+const chastFop = (over = {}) => fullFop({ methods: { ...fullFop().methods, monoChast: true }, monoChast: MC, ...over })
+const httpErrBody = (status, data) => Object.assign(httpErr(status), { response: { status, data } })
+
+test('monobank Частини: звіт магазину — зелений, 401 розрізняє чужий store id і невірний secret', async () => {
+  let asked
+  const ok = await checkMonoChast(chastFop(), async (_f, date) => { asked = date; return { orders: [] } }, () => new Date('2026-11-10T23:30:00Z'))
+  assert.equal(ok.status, 'ok')
+  assert.equal(asked, '2026-11-11') // дата за Києвом, не за UTC
+  assert.equal(ok.note, undefined)
+  const sig = await checkMonoChast(chastFop(), async () => { throw httpErrBody(401, { message: 'Signature is not valid' }) })
+  assert.equal(sig.status, 'bad')
+  assert.match(sig.message, /secret не підходить/)
+  const store = await checkMonoChast(chastFop(), async () => { throw httpErrBody(401, { message: 'Signature data for store [x] not found' }) })
+  assert.equal(store.status, 'bad')
+  assert.match(store.message, /не знає цей store id/)
+  // збій банку — не поганий ключ
+  assert.equal((await checkMonoChast(chastFop(), async () => { throw httpErr(500) })).status, 'unknown')
+  assert.match((await checkMonoChast(chastFop(), async () => { throw httpErr(400) })).message, /400/)
+  assert.equal((await checkMonoChast(chastFop(), async () => { throw new Error('timeout') })).status, 'unknown')
+  assert.equal((await checkMonoChast(chastFop(), async () => '<html>')).status, 'unknown')
+  assert.equal((await checkMonoChast(chastFop(), async () => [])).status, 'unknown')
+  // спосіб вимкнено у формі — ключ годиться, але кажемо про це
+  assert.match((await checkMonoChast(chastFop({ methods: { monoChast: false } }), async () => ({}))).note, /частинами monobank вимкнено/)
+})
+
+test('monobank Частини: без ключів або з поганим store id банк не питаємо', async () => {
+  const boom = async () => { throw new Error('не мав викликатись') }
+  assert.equal((await checkMonoChast(fullFop(), boom)).status, 'none')
+  assert.match((await checkMonoChast(fullFop({ monoChast: { storeSecret: 'x' } }), boom)).message, /store id/)
+  assert.match((await checkMonoChast(fullFop({ monoChast: { storeId: 'x' } }), boom)).message, /store secret/)
+  for (const storeId of ['магазин', 'a b', 'a\nb']) {
+    assert.match((await checkMonoChast(fullFop({ monoChast: { storeId, storeSecret: 's' } }), boom)).message, /зайві символи/, storeId)
+  }
+})
+
+// ---------- Checkbox ----------
+const CB = { licenseKey: 'CB-LICENSE-VALUE', pinCode: '98765', cashierName: 'Касир' }
+const cbFop = (over = {}) => fullFop({ checkbox: { ...CB }, ...over })
+const REGISTER = { title: 'Каса 1', fiscal_number: '4000123456', address: 'Київ', is_test: false }
+const CASHIER = { full_name: 'Іваненко Іван', blocked: null, is_test: false, signature_type: 'CLOUD_SIGNATURE', certificate_end: '2027-06-01T00:00:00Z', organization: { title: 'ФОП Іваненко', edrpou: '1234567890' } }
+const cbIo = (over = {}) => ({
+  register: async () => REGISTER,
+  signIn: async () => 'token',
+  me: async () => CASHIER,
+  signature: async () => ({ online: true, type: 'CLOUD_SIGNATURE', shift_open_possibility: true }),
+  shift: async () => ({ status: 'OPENED' }),
+  ...over,
+})
+const NOW = () => new Date('2026-11-10T12:00:00Z')
+const ALL_SECRETS = { ...SECRETS, mc: MC.storeSecret, cb: CB.licenseKey, pin: CB.pinCode }
+const withAllKeys = () => chastFop({ checkbox: { ...CB } })
+
+test('Checkbox: каса, касир, підпис і зміна — зелений, з даними для звірки', async () => {
+  const r = await checkCheckbox(cbFop(), cbIo(), NOW)
+  assert.equal(r.status, 'ok')
+  assert.deepEqual(r.cashRegister, { title: 'Каса 1', fiscalNumber: '4000123456', address: 'Київ' })
+  assert.equal(r.cashierName, 'Іваненко Іван')
+  assert.equal(r.merchantName, 'ФОП Іваненко')
+  assert.equal(r.edrpou, '1234567890')
+  assert.equal(r.shift, 'OPENED')
+  assert.equal(r.note, undefined)
+  // зміни немає: порожнє тіло — не збій
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ shift: async () => '' }), NOW)).shift, 'NONE')
+  // стан зміни не прочитали — вердикт той самий, зміна невідома
+  const noShift = await checkCheckbox(cbFop(), cbIo({ shift: async () => { throw httpErr(500) } }), NOW)
+  assert.equal(noShift.status, 'ok')
+  assert.equal(noShift.shift, null)
+  // ключ підпису скоро закінчиться
+  const soon = await checkCheckbox(cbFop(), cbIo({ me: async () => ({ ...CASHIER, certificate_end: '2026-11-20T00:00:00Z' }) }), NOW)
+  assert.equal(soon.status, 'ok')
+  assert.match(soon.note, /менш ніж за 14 днів/)
+})
+
+test('Checkbox: невірний ключ ліцензії — червоний з текстом Checkbox, далі не йдемо', async () => {
+  let signed = 0
+  const r = await checkCheckbox(cbFop(), cbIo({
+    register: async () => { throw httpErrBody(403, { code: 'cash_register.invalid_license_key', message: 'Невірний ключ ліцензії каси' }) },
+    signIn: async () => { signed += 1 },
+  }), NOW)
+  assert.equal(r.status, 'bad')
+  assert.equal(r.message, 'Checkbox: Невірний ключ ліцензії каси')
+  assert.equal(signed, 0)
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ register: async () => { throw httpErr(403) } }), NOW)).message, 'Checkbox не приймає ключ ліцензії каси')
+  // збій Checkbox — не поганий ключ
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ register: async () => { throw httpErr(502) } }), NOW)).status, 'unknown')
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ register: async () => { throw new Error('timeout') } }), NOW)).status, 'unknown')
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ register: async () => 'oops' }), NOW)).status, 'unknown')
+})
+
+test('Checkbox: тестова каса, невірний PIN, блок, тестовий касир, прострочений ключ підпису — червоні', async () => {
+  const testReg = await checkCheckbox(cbFop(), cbIo({ register: async () => ({ ...REGISTER, is_test: true }) }), NOW)
+  assert.equal(testReg.status, 'bad')
+  assert.match(testReg.message, /тестова каса/)
+  const pin = await checkCheckbox(cbFop(), cbIo({ signIn: async () => { throw httpErrBody(403, { message: 'Невірний пін-код' }) } }), NOW)
+  assert.equal(pin.status, 'bad')
+  assert.equal(pin.message, 'Checkbox: Невірний пін-код')
+  assert.equal(pin.cashRegister.fiscalNumber, '4000123456') // каса вже відома: показуємо, яку саме перевіряли
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ signIn: async () => { throw httpErr(503) } }), NOW)).status, 'unknown')
+  for (const blocked of [true, 'Заблоковано адміністратором']) {
+    const r = await checkCheckbox(cbFop(), cbIo({ me: async () => ({ ...CASHIER, blocked }) }), NOW)
+    assert.equal(r.status, 'bad', String(blocked))
+    assert.match(r.message, /заблоковано/)
+  }
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ me: async () => ({ ...CASHIER, blocked: '' }) }), NOW)).status, 'ok')
+  assert.match((await checkCheckbox(cbFop(), cbIo({ me: async () => ({ ...CASHIER, signature_type: 'TEST' }) }), NOW)).message, /тестовий касир/)
+  assert.match((await checkCheckbox(cbFop(), cbIo({ me: async () => ({ ...CASHIER, is_test: true }) }), NOW)).message, /тестовий касир/)
+  const expired = await checkCheckbox(cbFop(), cbIo({ me: async () => ({ ...CASHIER, certificate_end: '2026-11-01T00:00:00Z' }) }), NOW)
+  assert.equal(expired.status, 'bad')
+  assert.match(expired.message, /скінчився/)
+})
+
+test('Checkbox: підпис касира — не відкрити зміну або не на звʼязку — червоний; відкрита зміна — не привід', async () => {
+  const closed = { shift: async () => ({ status: 'CLOSED' }) }
+  const cant = await checkCheckbox(cbFop(), cbIo({ ...closed, signature: async () => ({ online: true, shift_open_possibility: false }) }), NOW)
+  assert.equal(cant.status, 'bad')
+  assert.match(cant.message, /зміну зараз відкрити не можна/)
+  // зміна вже відкрита: другу не відкрити, але чеки йдуть
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ signature: async () => ({ online: true, shift_open_possibility: false }) }), NOW)).status, 'ok')
+  const offline = await checkCheckbox(cbFop(), cbIo({ signature: async () => ({ online: false }) }), NOW)
+  assert.equal(offline.status, 'bad')
+  assert.match(offline.message, /Підпис касира зараз недоступний/)
+  // зміну не прочитали, а відкрити не можна: це може бути й відкрита зміна — не червоний
+  const unknownShift = await checkCheckbox(cbFop(), cbIo({ shift: async () => { throw httpErr(500) }, signature: async () => ({ online: true, shift_open_possibility: false }) }), NOW)
+  assert.equal(unknownShift.status, 'unknown')
+  // профіль або підпис не прочитали — невідомо, а не «все добре»
+  assert.equal((await checkCheckbox(cbFop(), cbIo({ signature: async () => { throw httpErr(500) } }), NOW)).status, 'unknown')
+  const noMe = await checkCheckbox(cbFop(), cbIo({ me: async () => { throw httpErr(500) } }), NOW)
+  assert.equal(noMe.status, 'unknown')
+  assert.equal(noMe.cashRegister.title, 'Каса 1')
+})
+
+test('Checkbox: без ключа, PIN або з символами в ключі нікуди не ходимо; ключ і PIN не повертаємо', async () => {
+  const boom = async () => { throw new Error('не мав викликатись') }
+  const io = { register: boom, signIn: boom, me: boom, signature: boom, shift: boom }
+  assert.equal((await checkCheckbox(fullFop(), io, NOW)).status, 'none')
+  assert.match((await checkCheckbox(fullFop({ checkbox: { pinCode: '1' } }), io, NOW)).message, /ключа ліцензії/)
+  assert.match((await checkCheckbox(fullFop({ checkbox: { licenseKey: 'k' } }), io, NOW)).message, /PIN/)
+  assert.match((await checkCheckbox(fullFop({ checkbox: { licenseKey: 'ключ', pinCode: '1' } }), io, NOW)).message, /зайві символи/)
+  // логін і пароль замість PIN — теж вхід
+  assert.equal((await checkCheckbox(fullFop({ checkbox: { licenseKey: 'k', login: 'l', password: 'p' } }), cbIo(), NOW)).status, 'ok')
+  // вхід логіном і паролем: пароль у тексті помилки теж маскуємо
+  const loginFop = fullFop({ checkbox: { licenseKey: 'k', login: 'cashier', password: 'CB-PASSWORD-VALUE' } })
+  const pw = await checkCheckbox(loginFop, cbIo({ signIn: async () => { throw httpErrBody(422, { message: 'bad CB-PASSWORD-VALUE' }) } }), NOW)
+  assert.equal(pw.status, 'bad')
+  assert.ok(!JSON.stringify(pw).includes('CB-PASSWORD-VALUE'))
+  // Checkbox повторив ключ або PIN у тексті помилки — маскуємо
+  const echoed = await checkCheckbox(cbFop(), cbIo({ signIn: async () => { throw httpErrBody(403, { message: `ключ ${CB.licenseKey}, pin ${CB.pinCode}` }) } }), NOW)
+  assert.ok(!JSON.stringify(echoed).includes(CB.licenseKey))
+  assert.ok(!JSON.stringify(echoed).includes(CB.pinCode))
+})
+
+test('звірка: каса Checkbox і кабінет monobank різних осіб — червоний', async () => {
+  const io = (monoEdrpou) => ({
+    liqpayStatus: async () => ({ err_code: 'payment_not_found' }),
+    monoDetails: async () => ({ merchantName: 'ФОП', edrpou: monoEdrpou }),
+    monoReport: async () => ({ orders: [] }),
+    checkbox: cbIo(),
+    np: npOk(),
+  })
+  const same = await checkFopKeys(withAllKeys(), io('1234567890'))
+  assert.equal(same.checkbox.status, 'ok')
+  const other = await checkFopKeys(withAllKeys(), io('0987654321'))
+  assert.equal(other.checkbox.status, 'bad')
+  assert.match(other.checkbox.message, /іншій особі/)
+  assert.equal(other.monoAcquire.status, 'ok')
+  // monobank не назвав код — звіряти нічим, вердикт каси не чіпаємо
+  assert.equal((await checkFopKeys(withAllKeys(), io(''))).checkbox.status, 'ok')
 })
 
 // ---------- маршрут ----------

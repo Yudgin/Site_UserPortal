@@ -83,12 +83,22 @@ export interface KeyCheckItem {
   merchantName?: string // monobank: чей кабинет
   edrpou?: string
   paymentControl?: boolean | null // Нова Пошта: доступен ли «контроль оплаты»; null — неизвестно
+  cashRegister?: { title?: string; fiscalNumber?: string; address?: string } // Checkbox: какая касса
+  cashierName?: string // Checkbox: кассир
+  certificateEnd?: string // Checkbox: до какого числа действует ключ подписи (КЕП) кассира
+  shift?: string | null // Checkbox: OPENED / CLOSED / NONE…; null — не прочитали
 }
 export interface FopKeyCheck {
   liqpay: KeyCheckItem
   monoAcquire: KeyCheckItem
+  monoChast?: KeyCheckItem // нет в ответе прежней версии сервера
+  checkbox?: KeyCheckItem
   novaPoshta: KeyCheckItem
 }
+export interface TestReceiptInfo { receiptId?: string; fiscalCode?: string | null; taxUrl?: string | null; status?: string | null }
+// Чек возврата к тестовому чеку: создан (поля чека), не удался (error) или не создан (skipped: 'not_registered' — продажа
+// не прошла, возвращать нечего; 'sale_pending' — ДПС ещё не приняла продажу, возврат делает владелец в кабинете).
+export interface TestRefund extends TestReceiptInfo { error?: string; skipped?: string }
 
 export const fopsAdminApi = {
   list: async (): Promise<FopAdmin[]> => {
@@ -134,8 +144,8 @@ export const fopsAdminApi = {
       return { ok: false, error: err.response?.data?.error?.message || 'Не вдалося виконати запит' }
     }
   },
-  // РЕАЛЬНЫЙ тестовый чек на 10 грн кредами этого ФОП (Checkbox) — проверка данных кассы.
-  testReceipt: async (id: string): Promise<{ ok: boolean; data?: { receiptId?: string; fiscalCode?: string | null; taxUrl?: string | null; status?: string | null }; error?: string }> => {
+  // РЕАЛЬНЫЙ тестовый чек на 10 грн кассой этого ФОП (Checkbox) и сразу чек возврата — проверка кассы до конца.
+  testReceipt: async (id: string): Promise<{ ok: boolean; data?: TestReceiptInfo & { refund?: TestRefund }; error?: string }> => {
     try {
       const { data } = await axios.post(`${BACKEND_URL}/api/fops/admin/${encodeURIComponent(id)}/test-receipt`, {}, { headers: await adminHeaders() })
       return data?.success ? { ok: true, data: data.data } : { ok: false, error: data?.error?.message || 'Помилка' }

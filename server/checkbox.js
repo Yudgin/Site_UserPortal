@@ -20,14 +20,17 @@ export const goodsTotalKop = (goods) =>
 // uuid v4 (для идемпотентности чека)
 const uuid = () => crypto.randomUUID()
 
-// Кэш токена кассира пер-ФОП; пересоздаём при 401.
+// Кэш токена кассира пер-ФОП; пересоздаём при 401. Токен годится только с тем ключом кассы, с которым выдан:
+// ключ сменили (или проверили новый, пока у другого кода ФОП из кэша со старым) — новый вход, а не чужой токен.
 const tokenCache = new Map() // fopId -> access_token
+const tokenLicense = new Map() // fopId -> licenseKey, с которым выдан токен
+const tokenFor = (fop) => (tokenLicense.get(fop.id) === fop.checkbox.licenseKey ? tokenCache.get(fop.id) : undefined)
 
 const headers = (fop, withAuth = true) => ({
   'Content-Type': 'application/json',
   'X-Client-Name': CLIENT_NAME,
   'X-License-Key': fop.checkbox.licenseKey,
-  ...(withAuth && tokenCache.get(fop.id) ? { Authorization: `Bearer ${tokenCache.get(fop.id)}` } : {}),
+  ...(withAuth && tokenFor(fop) ? { Authorization: `Bearer ${tokenFor(fop)}` } : {}),
 })
 
 // Вход кассира (по пин-коду; иначе login/password). Кэширует токен.
@@ -46,11 +49,12 @@ export const signin = async (fop) => {
   }
   if (!token) throw new Error(`ФОП ${fop.id}: Checkbox signin не вернул токен`)
   tokenCache.set(fop.id, token)
+  tokenLicense.set(fop.id, cb.licenseKey)
   return token
 }
 
 const ensureToken = async (fop) => {
-  if (!tokenCache.get(fop.id)) await signin(fop)
+  if (!tokenFor(fop)) await signin(fop)
 }
 
 const is401 = (e) => !!(e.response && e.response.status === 401)
@@ -63,8 +67,12 @@ const readShift = (fop) => axios.get(`${BASE}/api/v1/cashier/shift`, { headers: 
 
 const openShift = async (fop) => {
   const cur = await readShift(fop)
-  if (cur && cur.data && cur.data.status === 'OPENED') return cur.data
-  await axios.post(`${BASE}/api/v1/shifts`, {}, { headers: headers(fop), timeout: 20000 })
+  const status = cur && cur.data && cur.data.status
+  if (status === 'OPENED') return cur.data
+  // Смена уже открывается (например, повтор после 401 посреди ожидания) — второй запрос на открытие не шлём, только ждём.
+  if (status !== 'CREATED' && status !== 'OPENING') {
+    await axios.post(`${BASE}/api/v1/shifts`, {}, { headers: headers(fop), timeout: 20000 })
+  }
   // ждём OPENED (регистрация в ДПС ~5-7с)
   for (let i = 0; i < 8; i++) {
     await new Promise((r) => setTimeout(r, 2000))
@@ -105,11 +113,9 @@ export const buildSellPayload = (fop, { goods, paymentLabel, receiptId }) => {
   }
 }
 
-// Выбить фискальный чек продажи. Возвращает {receiptId, fiscalCode, taxUrl, status}.
-export const sellReceipt = async (fop, { goods, paymentLabel, receiptId, deliveryEmail }) => {
+// Отправить готовое тело чека (продажа или возврат) в открытую смену. Возвращает {receiptId, fiscalCode, taxUrl, status}.
+const postReceipt = async (fop, payload) => {
   await ensureShift(fop)
-  const payload = buildSellPayload(fop, { goods, paymentLabel, receiptId })
-  if (deliveryEmail) payload.delivery = { email: deliveryEmail }
   let res
   try {
     res = await axios.post(`${BASE}/api/v1/receipts/sell`, payload, { headers: headers(fop), timeout: 30000 })
@@ -126,6 +132,24 @@ export const sellReceipt = async (fop, { goods, paymentLabel, receiptId, deliver
   const d = res.data || {}
   return { receiptId: d.id || payload.id, fiscalCode: d.fiscal_code || null, taxUrl: d.tax_url || null, status: d.status || null }
 }
+
+// Выбить фискальный чек продажи. Возвращает {receiptId, fiscalCode, taxUrl, status}.
+export const sellReceipt = async (fop, { goods, paymentLabel, receiptId, deliveryEmail }) => {
+  const payload = buildSellPayload(fop, { goods, paymentLabel, receiptId })
+  if (deliveryEmail) payload.delivery = { email: deliveryEmail }
+  return postReceipt(fop, payload)
+}
+
+// Чек возврата к чеку продажи relatedReceiptId: те же позиции с is_return и та же сумма тем же способом
+// (так в Checkbox оформляется возврат). Деньги, как и чек продажи, он не двигает: только фискальная запись.
+export const returnReceipt = async (fop, { goods, paymentLabel, relatedReceiptId, receiptId }) => {
+  if (!relatedReceiptId) throw new Error(`ФОП ${fop.id}: для чека возврата нужен id чека продажи`)
+  const sale = buildSellPayload(fop, { goods, paymentLabel, receiptId })
+  return postReceipt(fop, { ...sale, goods: sale.goods.map((g) => ({ ...g, is_return: true })), related_receipt_id: relatedReceiptId })
+}
+
+// Готова ли подпись (КЕП) кассира: {online, type, shift_open_possibility}. Только чтение (readAsCashier ниже).
+export const checkSignature = (fop) => readAsCashier(fop, '/api/v1/cashier/check-signature')
 
 export const closeShift = async (fop) => {
   await ensureToken(fop)
@@ -172,4 +196,4 @@ export const cashierShift = (fop) => readAsCashier(fop, '/api/v1/cashier/shift')
 // Касса по ключу лицензии: вход кассира не нужен.
 export const cashRegisterInfo = async (fop) => (await axios.get(`${BASE}/api/v1/cash-registers/info`, { headers: headers(fop, false), timeout: 15000 })).data
 
-export default { signin, ensureShift, sellReceipt, closeShift, getReceipt, cashierMe, cashierShift, cashRegisterInfo, buildSellPayload, toKop, goodsTotalKop }
+export default { signin, ensureShift, sellReceipt, returnReceipt, closeShift, getReceipt, cashierMe, cashierShift, cashRegisterInfo, checkSignature, buildSellPayload, toKop, goodsTotalKop }
