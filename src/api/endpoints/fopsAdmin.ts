@@ -48,7 +48,22 @@ export interface FopAdmin {
   methods: FopMethods
   novaPoshta: FopNovaPoshtaRefs
   secretsSet: FopSecretsSet
+  lastCheck?: FopLastCheck | null // последняя проверка ключей (вручную или ежедневная); нет — метки серые
 }
+
+// Урезанный результат проверки по провайдеру — для меток в списке (подробности — в окне проверки).
+export interface KeyCheckSummary { status: KeyCheckStatus; message: string; note?: string; subscriptionExp?: string; dateToBlock?: string; soon?: boolean }
+export interface FopLastCheck {
+  checkedAt: string
+  source: 'manual' | 'daily'
+  results: Partial<Record<keyof FopKeyCheck, KeyCheckSummary>>
+}
+// Подключены ли сообщения владельцу в Telegram и чем закончилась последняя ежедневная проверка.
+export interface FopChecksStatus {
+  telegram: boolean
+  lastRun: { at: string; checked: number; failed: number; issues: number; sent: boolean | null } | null
+}
+export interface FopChecksRun { at: string; checked: number; failed: number; issues: number; sent: boolean | null; telegram: boolean }
 
 // Секреты для сохранения (все опциональны; пустые/undefined НЕ перезаписывают существующие).
 export interface FopSecretsPayload {
@@ -80,6 +95,8 @@ export interface KeyCheckItem {
   message: string
   holderName?: string // monobank, личный токен: на кого выдан
   accounts?: BankAccountInfo[] // банки ФОП: счета и остатки
+  personalCards?: number // monobank: сколько личных карт человека портал не читает
+  moreAccounts?: boolean // ПриватБанк: показаны не все счета
   note?: string // ключ годен, но способ оплаты выключен
   merchantName?: string // monobank: чей кабинет
   edrpou?: string
@@ -145,6 +162,25 @@ export const fopsAdminApi = {
   checkKeys: async (id: string): Promise<{ ok: boolean; data?: FopKeyCheck; error?: string }> => {
     try {
       const { data } = await axios.post(`${BACKEND_URL}/api/fops/admin/${encodeURIComponent(id)}/check-keys`, {}, { headers: await adminHeaders() })
+      return data?.success ? { ok: true, data: data.data } : { ok: false, error: data?.error?.message || 'Помилка' }
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { error?: { message?: string } } } }
+      return { ok: false, error: err.response?.data?.error?.message || 'Не вдалося виконати запит' }
+    }
+  },
+  checksStatus: async (): Promise<FopChecksStatus | null> => {
+    try {
+      const { data } = await axios.get(`${BACKEND_URL}/api/fops/admin/checks-status`, { headers: await adminHeaders() })
+      return data?.success ? (data.data as FopChecksStatus) : null
+    } catch (e) {
+      console.error('fops checks-status:', e)
+      return null
+    }
+  },
+  // Та же проверка, что ежедневная: все активные ФОП, результат в метки, при проблемах — сообщение в Telegram.
+  runAllChecks: async (): Promise<{ ok: boolean; data?: FopChecksRun; error?: string }> => {
+    try {
+      const { data } = await axios.post(`${BACKEND_URL}/api/fops/checks/daily`, {}, { headers: await adminHeaders() })
       return data?.success ? { ok: true, data: data.data } : { ok: false, error: data?.error?.message || 'Помилка' }
     } catch (e: unknown) {
       const err = e as { response?: { data?: { error?: { message?: string } } } }

@@ -6,6 +6,7 @@ import { verifyFirebaseAdmin } from './adminAuth.js'
 import { getFop, loadFopFresh } from './fops.js'
 import { signin, sellReceipt, returnReceipt, getReceipt } from './checkbox.js'
 import { checkFopKeys } from './fopKeyCheck.js'
+import { runDailyKeyCheck, saveKeyCheck, forgetKeyCheck, loadKeyChecks, ownerTelegram, RUNS } from './fopKeyCheckDaily.js'
 
 const nowIso = () => new Date().toISOString()
 const clip = (v, n = 200) => (v == null ? '' : String(v).slice(0, n))
@@ -31,21 +32,27 @@ export function registerFopsAdmin(app, deps) {
   const {
     adminDb, refreshFops, verifyAdmin = verifyFirebaseAdmin, loadFop = loadFopFresh, checkKeys = checkFopKeys,
     receipts = { signin, sellReceipt, returnReceipt, getReceipt }, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    // Тот же общий токен, что у других заданий Cloud Scheduler (pay-reconcile, calls-reconcile): заголовок x-admin-token.
+    cronToken = process.env.PAYMENTS_ADMIN_TOKEN || '', notify = ownerTelegram(),
   } = deps
   const gate = async (req, res) => {
     if (await verifyAdmin(req)) return true
     res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника' } })
     return false
   }
+  // Ключи или настройки ФОП поменялись — прежний результат проверки уже не про них: метки станут серыми до новой проверки.
+  const forgetCheck = (id) => forgetKeyCheck(adminDb, id).catch((e) => console.error(`fops ${id}: скидання перевірки:`, e?.message))
 
   // Список ФОП для админки: мета + ФЛАГИ наличия секретов (без значений).
   app.get('/api/fops/admin', async (req, res) => {
     if (!(await gate(req, res))) return
     if (!adminDb) return res.status(503).json({ success: false })
     try {
-      const [metaSnap, secSnap] = await Promise.all([
+      const [metaSnap, secSnap, checks] = await Promise.all([
         adminDb.collection('fops').get(),
         adminDb.collection('fopSecrets').get(),
+        // Без результатов проверок список всё равно нужен: метки будут серыми.
+        loadKeyChecks(adminDb).catch((e) => { console.error('fops admin list: перевірки:', e.message); return {} }),
       ])
       const secrets = {}
       secSnap.forEach((d) => { secrets[d.id] = d.data() || {} })
@@ -69,6 +76,8 @@ export function registerFopsAdmin(app, deps) {
             privatAutoclient: !!(s.privatAutoclient && s.privatAutoclient.token),
             novaPay: !!(s.novaPay && s.novaPay.refreshToken),
           },
+          // Последняя проверка ключей (вручную или ежедневно): от неё цвет меток в списке.
+          lastCheck: checks[d.id] || null,
         }
       }).sort((a, b) => a.name.localeCompare(b.name))
       res.json({ success: true, data: items })
@@ -118,6 +127,7 @@ export function registerFopsAdmin(app, deps) {
       if (Object.keys(secretPatch).length) {
         await adminDb.collection('fopSecrets').doc(id).set(secretPatch, { merge: true })
       }
+      await forgetCheck(id)
 
       if (typeof refreshFops === 'function') await refreshFops(adminDb)
       res.json({ success: true, data: { id } })
@@ -136,6 +146,7 @@ export function registerFopsAdmin(app, deps) {
     if (!id || !SECRET_GROUPS.includes(group)) return res.status(400).json({ success: false })
     try {
       await adminDb.collection('fopSecrets').doc(id).set({ [group]: null }, { merge: true })
+      await forgetCheck(id)
       if (typeof refreshFops === 'function') await refreshFops(adminDb)
       res.json({ success: true })
     } catch (e) {
@@ -154,6 +165,7 @@ export function registerFopsAdmin(app, deps) {
       await Promise.all([
         adminDb.collection('fops').doc(id).delete(),
         adminDb.collection('fopSecrets').doc(id).delete(),
+        forgetCheck(id),
       ])
       if (typeof refreshFops === 'function') await refreshFops(adminDb)
       res.json({ success: true })
@@ -172,10 +184,53 @@ export function registerFopsAdmin(app, deps) {
     try {
       const fop = await loadFop(adminDb, id)
       if (!fop) return res.status(404).json({ success: false, error: { code: 'NO_FOP', message: 'ФОП не знайдено' } })
-      return res.json({ success: true, data: await checkKeys(fop) })
+      const startedAt = nowIso()
+      const data = await checkKeys(fop)
+      // Результат — в список (цвет меток). Не записался — проверка всё равно отдаётся владельцу.
+      try {
+        await saveKeyCheck(adminDb, id, data, 'manual', nowIso(), startedAt)
+      } catch (e) {
+        console.error(`fops check-keys ${id}: запис результату:`, e?.message)
+      }
+      return res.json({ success: true, data })
     } catch (e) {
       console.error(`fops check-keys ${id}:`, e?.message)
       return res.status(500).json({ success: false, error: { code: 'CHECK_FAILED', message: 'Не вдалося перевірити ключі' } })
+    }
+  })
+
+  // Ежедневная проверка ключей всех активных ФОП (Cloud Scheduler с x-admin-token) или по кнопке владельца.
+  app.post('/api/fops/checks/daily', async (req, res) => {
+    const byCron = !!cronToken && req.get('x-admin-token') === cronToken
+    if (!byCron && !(await gate(req, res))) return
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const run = await runDailyKeyCheck({ adminDb, loadFop, checkKeys, notify })
+      if (run.busy) return res.status(409).json({ success: false, error: { code: 'BUSY', message: 'Перевірка вже йде: спробуйте за хвилину' } })
+      return res.json({ success: true, data: { at: run.at, checked: run.checked, failed: run.failed, issues: run.issues, sent: run.sent, telegram: run.telegram } })
+    } catch (e) {
+      console.error('fops daily check:', e?.message)
+      return res.status(500).json({ success: false, error: { code: 'DAILY_FAILED', message: 'Щоденна перевірка не виконалась' } })
+    }
+  })
+
+  // Для страницы /fops: подключены ли сообщения в Telegram и чем закончилась последняя ежедневная проверка.
+  app.get('/api/fops/admin/checks-status', async (req, res) => {
+    if (!(await gate(req, res))) return
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const snap = await adminDb.collection(RUNS).doc('last').get()
+      const run = snap.exists ? snap.data() : null
+      return res.json({
+        success: true,
+        data: {
+          telegram: notify.configured,
+          lastRun: run ? { at: run.at, checked: run.checked, failed: run.failed, issues: run.issues || 0, sent: run.sent } : null,
+        },
+      })
+    } catch (e) {
+      console.error('fops checks-status:', e?.message)
+      return res.status(500).json({ success: false })
     }
   })
 

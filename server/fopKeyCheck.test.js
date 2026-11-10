@@ -5,6 +5,7 @@ import express from 'express'
 import { checkFopKeys, checkLiqpay, checkMonoAcquire, checkMonoChast, checkCheckbox, checkNovaPoshta, checkMonoPersonal, checkPrivatAutoclient, checkNovaPay } from './fopKeyCheck.js'
 import { fopAccounts } from './bankMono.js'
 import { latestBalances } from './bankPrivat.js'
+import { fopIssues, saveKeyCheck } from './fopKeyCheckDaily.js'
 import { registerFopsAdmin } from './fopsAdmin.js'
 import { loadFopFresh } from './fops.js'
 
@@ -371,6 +372,14 @@ test('звірка: каса Checkbox і кабінет monobank різних о
   assert.equal(other.checkbox.status, 'bad')
   assert.match(other.checkbox.message, /іншій особі/)
   assert.equal(other.monoAcquire.status, 'ok')
+  // каса чужа: про підписку цієї каси не говоримо, нагадуємо щодня
+  const inTwoDays = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv' }).format(new Date(Date.now() + 2 * 24 * 3600 * 1000))
+  const soonIo = { ...io('0987654321'), checkbox: cbIo({ me: async () => ({ ...CASHIER, organization: { ...CASHIER.organization, subscription_exp: inTwoDays } }) }) }
+  const mismatchSoon = await checkFopKeys(withAllKeys(), soonIo)
+  assert.equal(mismatchSoon.checkbox.status, 'bad')
+  assert.equal(mismatchSoon.checkbox.urgent, true)
+  assert.equal(mismatchSoon.checkbox.note, undefined)
+  assert.equal(mismatchSoon.checkbox.expiring, undefined)
   // monobank не назвав код — звіряти нічим, вердикт каси не чіпаємо
   assert.equal((await checkFopKeys(withAllKeys(), io(''))).checkbox.status, 'ok')
 })
@@ -461,7 +470,8 @@ test('monobank особистий токен: показує лише рахун
     { iban: 'UA-FOP-1', currency: 'UAH', balance: 12345.67 },
     { iban: 'UA-FOP-EUR', currency: 'EUR', balance: 50 },
   ])
-  assert.match(ok.note, /Особисті картки цієї людини \(1\) портал не читає/)
+  assert.equal(ok.personalCards, 1)
+  assert.equal(ok.note, undefined)
   const json = JSON.stringify(ok)
   assert.ok(!json.includes('UA-PERSONAL-1'), 'особистий рахунок не має потрапити у відповідь')
   assert.ok(!json.includes('9999.99'), 'залишок особистої картки не має потрапити у відповідь')
@@ -539,7 +549,7 @@ test('ПриватБанк Автоклієнт: залишки останньо
   assert.ok(!json.includes(BANK.privat) && !json.includes(BANK.privatId), 'ключі не мають потрапити у відповідь')
 
   const more = await checkPrivatAutoclient(fop, privatIo({ balances: async () => ({ status: 'SUCCESS', exist_next_page: true, balances: [{ acc: 'UA-1', currency: 'UAH', balanceOut: '1' }] }) }))
-  assert.match(more.note, /не всі рахунки/)
+  assert.equal(more.moreAccounts, true)
 })
 
 test('ПриватБанк Автоклієнт: відмови і стани банку', async () => {
@@ -590,7 +600,8 @@ test('NovaPay: лише повнота даних, зеленого вердик
   assert.equal(part.status, 'bad')
   assert.match(part.message, /сертифікат/)
   const full = checkNovaPay(fullFop({ novaPay: { login: 'l', refreshToken: BANK.npRefresh, certificate: '-----BEGIN CERTIFICATE-----' } }))
-  assert.equal(full.status, 'unknown')
+  assert.equal(full.status, 'none')
+  assert.match(full.message, /Дані збережено/)
   assert.ok(!JSON.stringify(full).includes(BANK.npRefresh))
 })
 
@@ -607,7 +618,7 @@ test('перевірка всіх ключів: банки входять у в�
   })
   assert.equal(r.bankMono.status, 'ok')
   assert.equal(r.bankPrivat.status, 'ok')
-  assert.equal(r.bankNovaPay.status, 'unknown')
+  assert.equal(r.bankNovaPay.status, 'none')
   const json = JSON.stringify(r)
   for (const v of Object.values(BANK)) assert.ok(!json.includes(v), `витік ${v}`)
 })
@@ -645,4 +656,22 @@ test('ФОП: ключі банків зберігаються і в списк�
   assert.equal(item.secretsSet.novaPay, true)
   const json = JSON.stringify(list)
   for (const v of Object.values(BANK)) assert.ok(!json.includes(v), `витік ${v}`)
+})
+
+test('щоденна перевірка: відмова банку йде власнику, NovaPay і залишки — ні', async () => {
+  const results = {
+    bankMono: { status: 'bad', message: 'monobank не приймає цей токен', accounts: [{ iban: 'UA-FOP-1', balance: 5 }] },
+    bankPrivat: { status: 'ok', message: 'ок', accounts: [{ iban: 'UA-PRIVAT-1', currency: 'UAH', balance: 250.5 }] },
+    bankNovaPay: { status: 'bad', message: 'Не заповнено: сертифікат' },
+  }
+  const issues = fopIssues({ id: 'f1', name: 'ФОП' }, results)
+  assert.deepEqual(issues.map((i) => [i.provider, i.title, i.text]), [['bankMono', 'Рахунок monobank', 'monobank не приймає цей токен']])
+
+  // у збереженому результаті для міток немає рахунків і залишків
+  let saved
+  const db = { collection: () => ({ doc: () => ({ get: async () => ({ exists: false }), set: async (d) => { saved = d } }) }) }
+  await saveKeyCheck(db, 'f1', results, 'manual')
+  assert.equal(saved.results.bankPrivat.status, 'ok')
+  const json = JSON.stringify(saved)
+  assert.ok(!json.includes('UA-PRIVAT-1') && !json.includes('250.5') && !json.includes('UA-FOP-1'), 'рахунки і залишки не зберігаємо')
 })

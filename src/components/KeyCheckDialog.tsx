@@ -91,6 +91,8 @@ export default function KeyCheckDialog({ open, fopName, data, error, onClose }: 
                   {(r.merchantName || r.edrpou) && <Box sx={{ mt: 0.5 }}>{key === 'checkbox' ? 'Організація в Checkbox' : 'Кабінет'}: {r.merchantName ? <b>{r.merchantName}</b> : 'без назви'}{r.edrpou ? `, код ${r.edrpou}` : ''}</Box>}
                   {r.holderName && <Box sx={{ mt: 0.5 }}>Токен видано на: <b>{r.holderName}</b></Box>}
                   {r.accounts?.map((a, i) => <Box key={`${a.iban}-${i}`} sx={{ mt: 0.5, fontFamily: 'monospace', fontSize: 13 }}>{accountLine(a)}</Box>)}
+                  {r.moreAccounts && <Box sx={{ mt: 0.5 }}>Показано не всі рахунки.</Box>}
+                  {!!r.personalCards && <Box sx={{ mt: 0.5 }}>Особисті картки цієї людини ({r.personalCards}) портал не читає.</Box>}
                   {lines.map((l) => <Box key={l} sx={{ mt: 0.5 }}>{l}</Box>)}
                   {r.note && <Box sx={{ mt: 0.5 }}>{r.note}</Box>}
                 </Alert>
