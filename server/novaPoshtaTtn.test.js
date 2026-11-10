@@ -467,3 +467,60 @@ test('preview: per-minute limit per uid', async () => {
     assert.equal(r.json.error.code, 'RATE_LIMITED')
   } finally { await t.close() }
 })
+
+// ---------- замовлення кораблика через магазин-партнера (§26.1) ----------
+test('create: boat order of a partner shop — COD is what the client pays us; a shop waybill is refused', async () => {
+  const t = await startApp({ staff: OWNER })
+  try {
+    const base = {
+      clientName: 'Покупець Магазину', clientPhone: '+380671112233', clientCityRef: 'city-1', clientWarehouseRef: 'wh-1',
+      payMethods: ['cod'], total: 10000, lines: [{ price: 10000, qty: 1, shopPct: 15 }],
+    }
+    const shop = { kind: 'dropship', dropshipperId: 'shop-1', ttnBy: 'us' }
+    t.db.data.boatOrders = {
+      'bo-retail': { ...base },
+      'bo-split': { ...base, ...shop, collectByUs: 8000 },
+      'bo-shop-all': { ...base, ...shop, collectByUs: 0 },
+      'bo-shop-ttn': { ...base, ...shop, ttnBy: 'shop', collectByUs: 0 },
+      'bo-buyout': { ...base, ...shop, kind: 'buyout' },
+      'bo-edited': { ...base, ...shop, collectByUs: 8000 },
+    }
+    const lastWrite = (id) => t.db.writes.filter((x) => x.id === id).at(-1)?.patch
+
+    // Роздріб — як було: наложка на всю суму замовлення.
+    let r = await t.create({ boatOrderId: 'bo-retail', templateId: 'tpl-ret' })
+    assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.equal(lastSave(t).BackwardDeliveryData[0].RedeliveryString, '10000')
+    assert.equal(lastWrite('bo-retail').collectByUs, undefined)
+
+    // Аванс магазину, решта нам → наложка лише на нашу частину.
+    r = await t.create({ boatOrderId: 'bo-split', templateId: 'tpl-ret' })
+    assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.equal(lastSave(t).BackwardDeliveryData[0].RedeliveryString, '8000')
+    assert.equal(lastWrite('bo-split').npCodAmount, 8000)
+    assert.equal(lastWrite('bo-split').npFopId, 'fop1')
+    assert.equal(lastWrite('bo-split').collectByUs, undefined, 'unchanged amount is not rewritten')
+
+    // Усе отримує магазин / викуп → наша накладна без наложки.
+    r = await t.create({ boatOrderId: 'bo-shop-all', templateId: 'tpl-ret' })
+    assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.equal(lastSave(t).BackwardDeliveryData, undefined)
+    assert.equal(lastWrite('bo-shop-all').npCodAmount, 0)
+    r = await t.create({ boatOrderId: 'bo-buyout', templateId: 'tpl-ret' })
+    assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.equal(lastSave(t).BackwardDeliveryData, undefined)
+
+    // Накладну створює магазин → нашу не робимо, до НП не ходимо.
+    const before = t.npCalls.length
+    r = await t.create({ boatOrderId: 'bo-shop-ttn', templateId: 'tpl-ret' })
+    assert.equal(r.status, 409)
+    assert.equal(r.json.error.code, 'SHOP_TTN')
+    assert.equal(t.npCalls.length, before)
+
+    // Суму наложки змінили в діалозі → вона ж стає «клієнт платить нам» у замовленні.
+    r = await t.create({ boatOrderId: 'bo-edited', templateId: 'tpl-ret', codAmount: 7000 })
+    assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.equal(lastSave(t).BackwardDeliveryData[0].RedeliveryString, '7000')
+    assert.equal(lastWrite('bo-edited').collectByUs, 7000)
+  } finally { await t.close() }
+})
