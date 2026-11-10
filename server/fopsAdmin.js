@@ -181,9 +181,14 @@ export function registerFopsAdmin(app, deps) {
   // реальную смену. Ошибку Checkbox отдаём текстом — по ней видно причину (неверный licenseKey/PIN, касса не активна).
   const TEST_GOODS = [{ name: 'Ремонт (тестовий чек)', price: 10, qty: 1, code: 'TEST-REPAIR' }]
   const SETTLED = new Set(['DONE', 'ERROR', 'CANCELLED'])
-  const checkboxText = (e) => ((e.response && e.response.data)
-    ? (typeof e.response.data === 'string' ? e.response.data : JSON.stringify(e.response.data))
-    : (e.message || 'невідома помилка'))
+  const checkboxText = (e) => {
+    const d = e.response && e.response.data
+    if (!d) return e.message || 'невідома помилка'
+    if (typeof d === 'string') return d
+    // Обычный ответ Checkbox {code, message}: человеку — текст, в скобках — код для поиска.
+    if (typeof d.message === 'string' && d.message) return typeof d.code === 'string' && d.code ? `${d.message} (${d.code})` : d.message
+    return JSON.stringify(d)
+  }
   // Регистрация чека в ДПС асинхронная (CREATED → DONE): ждём до ~20 с, дальше отдаём то, что есть.
   const settle = async (fop, r) => {
     let cur = r
