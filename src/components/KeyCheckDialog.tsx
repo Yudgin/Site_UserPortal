@@ -51,6 +51,7 @@ const dateLine = (iso?: string) => (uaDate(iso) ? `Ключ підпису (КЕ
 // Оплата услуг Checkbox: подписка и состояние оплаты (значение статуса — как его отдал Checkbox).
 const billingLine = (r: KeyCheckItem) => {
   const parts = [
+    typeof r.balanceUah === 'number' && `баланс ${r.balanceUah.toLocaleString('uk-UA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} грн`,
     uaDate(r.subscriptionExp) && `підписка до ${uaDate(r.subscriptionExp)}`,
     r.billingStatus && `статус «${r.billingStatus}»`,
     uaDate(r.dateToBlock) && `блокування з ${uaDate(r.dateToBlock)}`,

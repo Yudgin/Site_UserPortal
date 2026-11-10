@@ -129,8 +129,9 @@ const cbFail = (e, fop, what) => {
 }
 
 const CHECKBOX_IO = { register: cashRegisterInfo, signIn: signin, me: cashierMe, signature: checkSignature, shift: cashierShift, billing: billingStatus }
-// Статусы оплаты Checkbox не документированы: красным считаем только явно «плохие» слова, остальное показываем как есть.
-const BAD_BILLING_STATUS = /block|disabl|suspend|debt|unpaid|inactive|expired/i
+// Статусы оплаты Checkbox не документированы. В бою 2026-11-10: payed — оплачено, disabled и frozen — касса заблокирована.
+// Красным считаем только явно «плохие» слова, остальное показываем как есть.
+const BAD_BILLING_STATUS = /block|disabl|suspend|debt|unpaid|inactive|expired|frozen|freez/i
 const DAY_MS = 24 * 3600 * 1000
 const uaDate = (v) => {
   const d = new Date(v)
@@ -177,6 +178,9 @@ export const checkCheckbox = async (fop, io = {}, now = () => new Date()) => {
   const subscriptionExp = clip(m?.organization?.subscription_exp, 40)
   const dateToBlock = clip(b?.date_to_block, 40)
   const billingState = clip(b?.status, 40)
+  // units — остаток на счёте Checkbox в копейках (сверено владельцем с кабинетом 2026-11-10: 69600 = 696 грн). В список ФОП
+  // не сохраняется, как и остатки банков: только в окне проверки.
+  const balanceUah = Number.isFinite(b?.units) ? b.units / 100 : null
   // Значения статуса оплаты ещё не сверены с документацией: пишем их в журнал, чтобы уточнить правила.
   if (b || subscriptionExp) console.log('key-check checkbox billing:', JSON.stringify({ fop: fop.id, status: billingState, dateToBlock, subscriptionExp, units: b?.units ?? null }))
   const extra = {
@@ -191,6 +195,7 @@ export const checkCheckbox = async (fop, io = {}, now = () => new Date()) => {
     ...(subscriptionExp ? { subscriptionExp } : {}),
     ...(billingState ? { billingStatus: billingState } : {}),
     ...(dateToBlock ? { dateToBlock } : {}),
+    ...(balanceUah !== null ? { balanceUah } : {}),
   }
   // Касса заблокирована за неоплату: любой из запросов мог получить этот отказ.
   const blocked = [meR, sigR, shiftR, billR].find((r) => r.status === 'rejected' && BILLING_BLOCK.test(cbCode(r.reason)))

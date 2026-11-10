@@ -108,6 +108,7 @@ export interface KeyCheckItem {
   subscriptionExp?: string // Checkbox: подписка организации действует до (YYYY-MM-DD)
   billingStatus?: string // Checkbox: статус оплаты услуг как его отдал Checkbox
   dateToBlock?: string // Checkbox: с какого момента касса будет заблокирована за неоплату
+  balanceUah?: number // Checkbox: остаток на счёте, грн
 }
 export interface FopKeyCheck {
   liqpay: KeyCheckItem

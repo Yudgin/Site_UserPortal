@@ -340,10 +340,23 @@ test('Checkbox: дата блокування і статус оплати', asy
     assert.equal(r.status, 'bad', status)
     assert.equal(r.billingStatus, status)
   }
+  // так Checkbox відповів у бою: frozen — блок, payed — оплачено
+  assert.equal((await checkCheckbox(cbFop(), bill({ status: 'frozen' }), NOW)).status, 'bad')
+  assert.equal((await checkCheckbox(cbFop(), bill({ status: 'payed' }), NOW)).status, 'ok')
   // незнайомий статус — показуємо як є, вердикт не псуємо
   const odd = await checkCheckbox(cbFop(), bill({ status: 'TRIAL' }), NOW)
   assert.equal(odd.status, 'ok')
   assert.equal(odd.billingStatus, 'TRIAL')
+})
+
+test('Checkbox: баланс рахунку з units у гривнях (копійки), тільки коли Checkbox його дав', async () => {
+  const bill = (v) => cbIo({ billing: async () => v })
+  assert.equal((await checkCheckbox(cbFop(), bill({ status: 'payed', units: 69600 }), NOW)).balanceUah, 696)
+  assert.equal((await checkCheckbox(cbFop(), bill({ status: 'payed', units: 0 }), NOW)).balanceUah, 0)
+  assert.equal((await checkCheckbox(cbFop(), bill({ status: 'payed' }), NOW)).balanceUah, undefined)
+  assert.equal((await checkCheckbox(cbFop(), bill({ status: 'payed', units: '696' }), NOW)).balanceUah, undefined)
+  // заблокована каса теж показує баланс: видно, чи вистачає грошей на оплату
+  assert.equal((await checkCheckbox(cbFop(), bill({ status: 'disabled', units: 0 }), NOW)).balanceUah, 0)
 })
 
 test('Checkbox: стан оплати не прочитали — ключі зелені, але з підказкою перевірити оплату', async () => {
