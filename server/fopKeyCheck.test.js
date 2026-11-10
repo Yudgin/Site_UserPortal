@@ -369,6 +369,14 @@ test('звірка: каса Checkbox і кабінет monobank різних о
   assert.equal(other.checkbox.status, 'bad')
   assert.match(other.checkbox.message, /іншій особі/)
   assert.equal(other.monoAcquire.status, 'ok')
+  // каса чужа: про підписку цієї каси не говоримо, нагадуємо щодня
+  const inTwoDays = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv' }).format(new Date(Date.now() + 2 * 24 * 3600 * 1000))
+  const soonIo = { ...io('0987654321'), checkbox: cbIo({ me: async () => ({ ...CASHIER, organization: { ...CASHIER.organization, subscription_exp: inTwoDays } }) }) }
+  const mismatchSoon = await checkFopKeys(withAllKeys(), soonIo)
+  assert.equal(mismatchSoon.checkbox.status, 'bad')
+  assert.equal(mismatchSoon.checkbox.urgent, true)
+  assert.equal(mismatchSoon.checkbox.note, undefined)
+  assert.equal(mismatchSoon.checkbox.expiring, undefined)
   // monobank не назвав код — звіряти нічим, вердикт каси не чіпаємо
   assert.equal((await checkFopKeys(withAllKeys(), io(''))).checkbox.status, 'ok')
 })
