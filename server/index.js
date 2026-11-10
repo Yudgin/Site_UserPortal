@@ -32,6 +32,7 @@ import { registerBinotelWebhook } from './binotelWebhook.js'
 import { registerIncomingRefresh } from './incomingRefresh.js'
 import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
+import { registerParcels } from './parcels.js'
 import { registerVoiceTranscribe } from './voiceTranscribe.js'
 import { registerEstimates } from './estimates.js'
 import { registerMasterEstimates } from './masterEstimates.js'
@@ -1303,6 +1304,9 @@ registerVoiceTranscribe(app, { adminDb })
 
 // Справочники НП по ключу конкретного ФОП (отправители/контакты + добавление) — owner-gated.
 registerNpAccount(app)
+// Журнал відправлень «Посилки» (§36): НП по всіх ФОП і особистих акаунтах, ручні записи, передачі водієві.
+// Синхронізація — POST /api/parcels/sync (x-admin-token, Cloud Scheduler) або кнопка власника.
+registerParcels(app, { adminDb })
 // Подгружаем ФОПы из Firestore на старте (перекрывают ENV-сид, если заданы).
 refreshFops(adminDb).catch((e) => console.error('initial refreshFops:', e?.message || e))
 // Периодический рефреш — чтобы ДРУГИЕ инстансы Cloud Run подхватили изменения ФОПов (кэш в памяти

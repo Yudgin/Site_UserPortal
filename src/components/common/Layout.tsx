@@ -122,6 +122,7 @@ export default function Layout() {
     if (access.can('preliminary')) items.push({ text: 'Пропозиція клієнту', icon: <EstimateIcon />, path: '/offer-editor' })
     if (access.can('actual')) items.push({ text: 'Фактична калькуляція', icon: <EstimateIcon />, path: '/actual-estimate' })
     if (access.role === 'accountant') items.push({ text: 'Оплати та чеки', icon: <PaymentsIcon />, path: '/payments-admin' })
+    if (access.role === 'director') items.push({ text: 'Посилки', icon: <ShippingIcon />, path: '/parcels' })
     nav.push({ group: 'Сервіс', icon: <InboxIcon />, items })
   }
 
@@ -160,7 +161,8 @@ export default function Layout() {
       { text: 'Презентація', icon: <PresentationIcon />, path: '/presentation' },
       { text: 'Опросник', icon: <QuestionnaireIcon />, path: '/questionnaire' },
     ] })
-    nav.push({ group: 'Доставка (Нова Пошта)', icon: <ShippingIcon />, items: [
+    nav.push({ group: 'Доставка', icon: <ShippingIcon />, items: [
+      { text: 'Посилки', icon: <ShippingIcon />, path: '/parcels' },
       { text: 'Шаблони посилок', icon: <ShippingIcon />, path: '/np-templates' },
     ] })
     nav.push({ group: 'Продажі корабликів', icon: <BoatSalesIcon />, items: [
