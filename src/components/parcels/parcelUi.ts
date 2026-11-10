@@ -1,5 +1,5 @@
 // Підписи й форматування для журналу «Посилки» (§36).
-import type { Parcel, ParcelAttention, ParcelGroup, ParcelMethod, Currency } from '@/api/endpoints/parcels'
+import type { Parcel, ParcelAttention, ParcelGroup, ParcelMethod, Currency, PaidMethod } from '@/api/endpoints/parcels'
 
 export const GROUP_LABELS: Record<ParcelGroup, string> = {
   draft: 'Створена', transit: 'В дорозі', arrived: 'У відділенні', received: 'Отримана', problem: 'Проблема', deleted: 'Видалена', other: 'Інше',
@@ -12,6 +12,8 @@ export const ATTENTION_LABELS: Record<ParcelAttention, string> = {
   problem: 'Відмова або проблема', waiting: 'Лежить 3+ дні', storage: 'Платне зберігання', autoReturn: 'Скоро повернення', driver: 'У водія 5+ днів',
 }
 export const CURRENCIES: Currency[] = ['EUR', 'UAH', 'PLN', 'USD']
+export const PAID_METHOD_LABELS: Record<PaidMethod, string> = { cash: 'готівка', card: 'на картку', transfer: 'переказ', other: 'інше' }
+export const PAID_METHODS: PaidMethod[] = ['cash', 'card', 'transfer', 'other']
 const CUR_SIGN: Record<Currency, string> = { EUR: '€', UAH: 'грн', PLN: 'zł', USD: '$' }
 
 export const fmtDateTime = (iso?: string | null): string => {
