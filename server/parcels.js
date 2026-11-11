@@ -9,8 +9,9 @@
 //   PUT    /api/parcels/manual/:id         правка ручного запису;  DELETE — видалення.
 //   PUT    /api/parcels/:id/meta           нотатка і привʼязка до заявки для будь-якої посилки (власник).
 //   GET    /api/parcels/transfers          реєстр передач водієві (власник).
-//   PUT    /api/parcels/transfers/:id      створити ('new') / змінити передачу: водій, сума, валюта, посилки. Сума
-//                                          ділиться порівну між посилками (копійка до копійки).  DELETE — видалити.
+//   PUT    /api/parcels/transfers/:id      створити ('new') / змінити передачу: водій, сума, валюта, посилки, позначка
+//                                          «оплачено» (дата, спосіб). Сума ділиться порівну між посилками (копійка до
+//                                          копійки).  DELETE — видалити.
 //   GET/PUT /api/parcels/settings          «наші телефони»: посилка на такий номер — вхідна (власник).
 //   GET    /api/parcels/accounts           акаунти НП (ФОП з ключем + особисті) зі станом синхронізації (власник).
 //   PUT    /api/parcels/accounts/:id       особистий акаунт: назва, активність, ключ (write-only).  DELETE — видалити.
@@ -31,6 +32,7 @@ export const MANUAL_METHODS = ['pickup', 'bus', 'other']
 export const MANUAL_GROUPS = ['draft', 'transit', 'received', 'problem']
 const MANUAL_STATUS = { draft: 'Підготовлено', transit: 'Передано', received: 'Отримано', problem: 'Проблема' }
 export const CURRENCIES = ['EUR', 'UAH', 'PLN', 'USD']
+export const PAID_METHODS = ['cash', 'card', 'transfer', 'other'] // як заплатили водієві
 
 // ---- Акаунти НП: ФОП з ключем (ключ лежить у fopSecrets) + особисті (npAccounts / npAccountSecrets) ----
 // «Наші телефони» — номери, посилки на які вважаються вхідними: задані власником (npSyncState/_meta.ownPhones)
@@ -254,7 +256,7 @@ export function registerParcels(app, deps = {}) {
       if (s.exists && s.data().transfer?.id === id) await ref.update({ transfer: null, updatedAt: t })
     }
     for (const pid of tr.parcelIds) {
-      await col().doc(pid).update({ transfer: { id, date: tr.date, driver: tr.driver, share: shares[pid], currency: tr.currency }, updatedAt: t })
+      await col().doc(pid).update({ transfer: { id, date: tr.date, driver: tr.driver, share: shares[pid], currency: tr.currency, paid: tr.paid === true }, updatedAt: t })
     }
     return shares
   }
@@ -350,6 +352,10 @@ export function registerParcels(app, deps = {}) {
         date: dayOf(b.date, t.slice(0, 10)), driver, driverPhone: normPhone(b.driverPhone) || clip(b.driverPhone, 20), route: clip(b.route, 200),
         cost: Math.round(Math.max(0, num(b.cost)) * 100) / 100, currency: CURRENCIES.includes(b.currency) ? b.currency : 'EUR',
         parcelIds, note: clip(b.note, 500), done: b.done === true,
+        // Оплата водієві: лише позначка (гроші портал не надсилає). Дата — день оплати, спосіб — зі списку.
+        paid: b.paid === true,
+        paidAt: b.paid === true ? dayOf(b.paidAt, prev?.paidAt || t.slice(0, 10)) : null,
+        paidMethod: b.paid === true ? (PAID_METHODS.includes(b.paidMethod) ? b.paidMethod : prev?.paidMethod || 'cash') : null,
         createdAt: prev?.createdAt || t, updatedAt: t,
       }
       const shares = await applyTransfer(ref.id, tr, prev?.parcelIds || [], t)

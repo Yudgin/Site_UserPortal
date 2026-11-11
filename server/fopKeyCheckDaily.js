@@ -13,6 +13,9 @@ export const PROVIDER_TITLES = {
   monoChast: 'monobank Частини',
   checkbox: 'Checkbox (чеки)',
   novaPoshta: 'Нова Пошта',
+  // Банки ФОП (остатки и выписки). NovaPay здесь нет: его подключение портал ещё не проверяет.
+  bankMono: 'Рахунок monobank',
+  bankPrivat: 'Рахунок ПриватБанку',
 }
 const FOPS_PAGE = 'https://my.runferry.com/fops'
 

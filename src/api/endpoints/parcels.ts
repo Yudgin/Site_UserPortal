@@ -22,7 +22,8 @@ export type Currency = 'EUR' | 'UAH' | 'PLN' | 'USD'
 
 export interface ParcelParty { name?: string; company?: string; phone?: string; city?: string; address?: string }
 export interface ParcelLink { kind: 'return' | 'incoming' | 'order' | 'manual'; serviceRequestId: string | null; boatOrderId: string | null; serviceCenterId: string | null; title?: string }
-export interface ParcelTransferRef { id: string; date: string; driver: string; share: number; currency: Currency }
+export type PaidMethod = 'cash' | 'card' | 'transfer' | 'other'
+export interface ParcelTransferRef { id: string; date: string; driver: string; share: number; currency: Currency; paid?: boolean }
 
 export interface Parcel {
   id: string
@@ -101,6 +102,9 @@ export interface ParcelTransfer {
   shares: Record<string, number>
   note?: string
   done: boolean
+  paid?: boolean // водієві заплачено (лише позначка: гроші портал не надсилає)
+  paidAt?: string | null // день оплати, РРРР-ММ-ДД
+  paidMethod?: PaidMethod | null
 }
 export type ParcelTransferPayload = Omit<ParcelTransfer, 'id' | 'shares'>
 

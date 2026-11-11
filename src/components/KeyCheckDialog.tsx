@@ -1,6 +1,6 @@
 // Результат кнопки «Перевірити ключі» на /fops: по каждому провайдеру — вердикт сервера.
 import { Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Stack, Typography } from '@mui/material'
-import type { FopKeyCheck, KeyCheckItem, KeyCheckStatus } from '@/api/endpoints/fopsAdmin'
+import type { BankAccountInfo, FopKeyCheck, KeyCheckItem, KeyCheckStatus } from '@/api/endpoints/fopsAdmin'
 
 const SEVERITY: Record<KeyCheckStatus, 'success' | 'error' | 'warning' | 'info'> = {
   ok: 'success', bad: 'error', unknown: 'warning', none: 'info',
@@ -12,7 +12,18 @@ const ROWS: { key: keyof FopKeyCheck; title: string }[] = [
   { key: 'monoChast', title: 'monobank Частини' },
   { key: 'checkbox', title: 'Checkbox (чеки)' },
   { key: 'novaPoshta', title: 'Нова Пошта' },
+  { key: 'bankMono', title: 'Рахунок monobank (залишки та виписки)' },
+  { key: 'bankPrivat', title: 'Рахунок ПриватБанку (залишки та виписки)' },
+  { key: 'bankNovaPay', title: 'Рахунок NovaPay (залишки та виписки)' },
 ]
+
+// Счёт ФОП, как его показал банк: по нему владелец сверяет, что ключ от нужного ФОП.
+const accountLine = (a: BankAccountInfo) => {
+  const balance = typeof a.balance === 'number'
+    ? `${a.balance.toLocaleString('uk-UA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${a.currency || ''}`.trim()
+    : 'залишок невідомий'
+  return [a.iban, balance, a.owner].filter(Boolean).join(' · ')
+}
 
 const paymentControlLine = (v: KeyCheckItem['paymentControl']) => {
   if (v === true) return 'Контроль оплати (гроші на рахунок ФОП): доступний у цього відправника.'
@@ -40,6 +51,7 @@ const dateLine = (iso?: string) => (uaDate(iso) ? `Ключ підпису (КЕ
 // Оплата услуг Checkbox: подписка и состояние оплаты (значение статуса — как его отдал Checkbox).
 const billingLine = (r: KeyCheckItem) => {
   const parts = [
+    typeof r.balanceUah === 'number' && `баланс ${r.balanceUah.toLocaleString('uk-UA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} грн`,
     uaDate(r.subscriptionExp) && `підписка до ${uaDate(r.subscriptionExp)}`,
     r.billingStatus && `статус «${r.billingStatus}»`,
     uaDate(r.dateToBlock) && `блокування з ${uaDate(r.dateToBlock)}`,
@@ -78,6 +90,10 @@ export default function KeyCheckDialog({ open, fopName, data, error, onClose }: 
                   <Box sx={{ fontWeight: 600 }}>{title}</Box>
                   {r.message}
                   {(r.merchantName || r.edrpou) && <Box sx={{ mt: 0.5 }}>{key === 'checkbox' ? 'Організація в Checkbox' : 'Кабінет'}: {r.merchantName ? <b>{r.merchantName}</b> : 'без назви'}{r.edrpou ? `, код ${r.edrpou}` : ''}</Box>}
+                  {r.holderName && <Box sx={{ mt: 0.5 }}>Токен видано на: <b>{r.holderName}</b></Box>}
+                  {r.accounts?.map((a, i) => <Box key={`${a.iban}-${i}`} sx={{ mt: 0.5, fontFamily: 'monospace', fontSize: 13 }}>{accountLine(a)}</Box>)}
+                  {r.moreAccounts && <Box sx={{ mt: 0.5 }}>Показано не всі рахунки.</Box>}
+                  {!!r.personalCards && <Box sx={{ mt: 0.5 }}>Особисті картки цієї людини ({r.personalCards}) портал не читає.</Box>}
                   {lines.map((l) => <Box key={l} sx={{ mt: 0.5 }}>{l}</Box>)}
                   {r.note && <Box sx={{ mt: 0.5 }}>{r.note}</Box>}
                 </Alert>
@@ -86,6 +102,7 @@ export default function KeyCheckDialog({ open, fopName, data, error, onClose }: 
             <Typography variant="caption" color="text.secondary">
               Гроші не списуються, чеки й накладні не створюються, зміна на касі не відкривається. ПриватБанк «Оплата
               частинами» напряму ця кнопка не перевіряє: такий спосіб ще не підключений, частини ПриватБанку йдуть через LiqPay.
+              Рахунки банків портал лише читає: платежів не створює.
             </Typography>
           </Stack>
         )}

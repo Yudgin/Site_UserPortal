@@ -76,7 +76,7 @@ export function ParcelDetailDialog({ parcel, accounts, owner, onClose, onChanged
         <Row label="Оголошена вартість">{fmtMoney(p.declaredCost)}</Row>
         <Row label="Накладений платіж">{fmtMoney(p.cod)}</Row>
         {p.method === 'np' && <Row label="Доставка НП">{fmtMoney(p.deliveryCost)}{p.payer ? ` · платить ${p.payer === 'Sender' ? 'відправник' : p.payer === 'Recipient' ? 'одержувач' : 'третя особа'}` : ''}{p.payStatus === 'NeedPayment' ? ' · не оплачено' : ''}</Row>}
-        {p.transfer && <Row label="Передача водієві">{fmtDate(p.transfer.date)} · {p.transfer.driver} · частка {fmtMoney(p.transfer.share, p.transfer.currency)}</Row>}
+        {p.transfer && <Row label="Передача водієві">{fmtDate(p.transfer.date)} · {p.transfer.driver} · частка {fmtMoney(p.transfer.share, p.transfer.currency)} · {p.transfer.paid ? 'оплачено' : 'не оплачено'}</Row>}
         {p.extraCost && <Row label="Вартість передачі">{fmtMoney(p.extraCost.amount, p.extraCost.currency)}</Row>}
         {(p.weight || p.seats) ? <Row label="Вага / місць">{p.weight ? `${p.weight} кг` : '—'} / {p.seats || '—'}</Row> : null}
         {can.length > 0 && <Row label="НП дозволяє">{can.join(', ')}</Row>}

@@ -23,6 +23,7 @@ import { FieldValue } from 'firebase-admin/firestore'
 import { ADMIN_EMAIL, verifyFirebaseStaff } from './adminAuth.js'
 import { getFop } from './fops.js'
 import { combine, rateLimit } from './rateLimit.js'
+import { boatCodAmount, orderKind } from './boatShop.js'
 
 const NP_URL = 'https://api.novaposhta.ua/v2.0/json/'
 const nowIso = () => new Date().toISOString()
@@ -111,7 +112,8 @@ export async function computeCod(adminDb, { explicit, sr, srId, boId, tpl, fop, 
     } catch { /* ignore */ }
     return 0
   }
-  if (boId && !sr?.paidAt) return Math.round(Number(sr?.total) || 0)
+  // Замовлення кораблика: роздріб — уся сума; замовлення магазину — лише те, що клієнт платить НАМ (boatShop.js).
+  if (boId) return boatCodAmount(sr)
   return 0
 }
 
@@ -339,6 +341,10 @@ export function registerNpTtn(app, deps = {}) {
         if (!srSnap.exists) return err(res, 404, 'NO_SR', srId ? 'Заявку не знайдено' : 'Замовлення не знайдено')
         if (!tplSnap.exists) return err(res, 404, 'NO_TPL', 'Шаблон не знайдено')
         sr = srSnap.data() // заявка або замовлення: clientName/clientPhone — однакові поля
+        // Замовлення магазину з ЙОГО накладною (§26.1): нашу не створюємо — номер ТТН дає магазин.
+        if (boId && orderKind(sr) === 'dropship' && sr.ttnBy === 'shop') {
+          return err(res, 409, 'SHOP_TTN', 'Накладну за цим замовленням створює магазин — впишіть його номер ТТН у картці замовлення')
+        }
         tpl = tplSnap.data()
       }
       const scenario = tpl.scenario || 'incoming'
@@ -398,9 +404,14 @@ export function registerNpTtn(app, deps = {}) {
         }
         await subjRef.set(patch, { merge: true })
       } else {
+        // Замовлення магазину (дропшипінг): фактична наложка в накладній — це те, що клієнт платить нам.
+        // Якщо в діалозі суму змінили, записуємо її в замовлення: від неї рахується борг магазину (§26.1).
+        const shopCodChanged = orderKind(sr) === 'dropship' && !sr.paidAt && codAmount > 0 && codAmount !== boatCodAmount(sr)
         await subjRef.set({
           ttn, npDocRef: doc.Ref || null, npScenario: scenario,
           npCostOnSite: doc.CostOnSite || null, npEstimatedDelivery: doc.EstimatedDeliveryDate || null,
+          npCodAmount: codAmount > 0 ? codAmount : 0, npFopId: fop.id || null,
+          ...(shopCodChanged ? { collectByUs: codAmount } : {}),
           updatedAt: nowIso(),
         }, { merge: true })
       }

@@ -5,6 +5,8 @@
 //  • Checkbox — касса по ключу лицензии, вход кассира по PIN, его профиль, готовность подписи, смена и оплата
 //    услуг Checkbox (подписка, блокировка за неоплату); смену не открываем, чеков не создаём;
 //  • Нова Пошта — отправители кабинета и опции выбранного отправителя («контроль оплаты»).
+//  • банки ФОП (остатки и выписки, не приём оплат) — monobank: client-info по личному токену, берём только счета ФОП;
+//    ПриватБанк «Автоклієнт»: состояние дня и остатки по активным счетам; NovaPay: только полнота данных.
 // Значения ключей наружу и в журнал не попадают: отдаём только вердикты. Зелёный вердикт — лишь
 // по подтверждённому ответу; всё непонятное — 'unknown' с кодом ответа, а не «всё хорошо».
 import { queryStatus } from './liqpay.js'
@@ -13,6 +15,8 @@ import { storeReport } from './monoChast.js'
 import { cashRegisterInfo, signin, cashierMe, checkSignature, cashierShift, billingStatus } from './checkbox.js'
 import { npCall, npErr } from './novaPoshtaTtn.js'
 import { methodOn } from './fops.js'
+import { clientInfo, fopAccounts } from './bankMono.js'
+import { settings as privatSettings, interimBalances, latestBalances } from './bankPrivat.js'
 
 const clip = (v, n = 200) => (v == null ? '' : String(v).slice(0, n))
 const verdict = (status, message, extra = {}) => ({ status, message, ...extra })
@@ -125,8 +129,9 @@ const cbFail = (e, fop, what) => {
 }
 
 const CHECKBOX_IO = { register: cashRegisterInfo, signIn: signin, me: cashierMe, signature: checkSignature, shift: cashierShift, billing: billingStatus }
-// Статусы оплаты Checkbox не документированы: красным считаем только явно «плохие» слова, остальное показываем как есть.
-const BAD_BILLING_STATUS = /block|disabl|suspend|debt|unpaid|inactive|expired/i
+// Статусы оплаты Checkbox не документированы. В бою 2026-11-10: payed — оплачено, disabled и frozen — касса заблокирована.
+// Красным считаем только явно «плохие» слова, остальное показываем как есть.
+const BAD_BILLING_STATUS = /block|disabl|suspend|debt|unpaid|inactive|expired|frozen|freez/i
 const DAY_MS = 24 * 3600 * 1000
 const uaDate = (v) => {
   const d = new Date(v)
@@ -173,6 +178,9 @@ export const checkCheckbox = async (fop, io = {}, now = () => new Date()) => {
   const subscriptionExp = clip(m?.organization?.subscription_exp, 40)
   const dateToBlock = clip(b?.date_to_block, 40)
   const billingState = clip(b?.status, 40)
+  // units — остаток на счёте Checkbox в копейках (сверено владельцем с кабинетом 2026-11-10: 69600 = 696 грн). В список ФОП
+  // не сохраняется, как и остатки банков: только в окне проверки.
+  const balanceUah = Number.isFinite(b?.units) ? b.units / 100 : null
   // Значения статуса оплаты ещё не сверены с документацией: пишем их в журнал, чтобы уточнить правила.
   if (b || subscriptionExp) console.log('key-check checkbox billing:', JSON.stringify({ fop: fop.id, status: billingState, dateToBlock, subscriptionExp, units: b?.units ?? null }))
   const extra = {
@@ -187,6 +195,7 @@ export const checkCheckbox = async (fop, io = {}, now = () => new Date()) => {
     ...(subscriptionExp ? { subscriptionExp } : {}),
     ...(billingState ? { billingStatus: billingState } : {}),
     ...(dateToBlock ? { dateToBlock } : {}),
+    ...(balanceUah !== null ? { balanceUah } : {}),
   }
   // Касса заблокирована за неоплату: любой из запросов мог получить этот отказ.
   const blocked = [meR, sigR, shiftR, billR].find((r) => r.status === 'rejected' && BILLING_BLOCK.test(cbCode(r.reason)))
@@ -284,15 +293,119 @@ export const checkNovaPoshta = async (fop, np = npCall) => {
   }
 }
 
+// ---------- Банки ФОП: остатки и выписки (только чтение, не приём оплат) ----------
+
+const ACCOUNTS_SHOWN = 12
+const shownAccounts = (accounts) => accounts.slice(0, ACCOUNTS_SHOWN).map((a) => ({
+  iban: clip(a.iban, 40), currency: clip(a.currency, 8), balance: a.balance, ...(a.owner ? { owner: clip(a.owner) } : {}),
+}))
+
+// monobank, личный токен владельца ФОП. Токен открывает и личные карты: наружу отдаём только счета ФОП.
+export const checkMonoPersonal = async (fop, info = clientInfo) => {
+  const token = fop.monoPersonal?.token
+  if (!token) return verdict('none', 'Токен не заданий')
+  if (!printable(token)) return verdict('bad', 'Токен містить зайві символи: вставте його ще раз')
+  try {
+    const d = await info(token)
+    if (!isObject(d)) return verdict('unknown', 'monobank повернув незрозумілу відповідь, спробуйте пізніше')
+    const { accounts, personal } = fopAccounts(d)
+    const holder = d.name ? { holderName: clip(d.name) } : {}
+    if (!accounts.length) {
+      return verdict('bad', 'Токен дійсний, але рахунків ФОП за ним не видно. Токен має видати власник цього ФОП у своєму застосунку monobank.', holder)
+    }
+    return verdict('ok', 'Токен дійсний, рахунки ФОП видно. Звірте, що це рахунки саме цього ФОП.', {
+      ...holder, accounts: shownAccounts(accounts),
+      ...(personal ? { personalCards: personal } : {}), // только число: сами карты наружу не отдаём
+    })
+  } catch (e) {
+    const http = e?.response?.status
+    if (http === 401 || http === 403) return verdict('bad', 'monobank не приймає цей токен')
+    if (http === 429) return verdict('unknown', 'monobank приймає один запит на хвилину: повторіть перевірку за хвилину')
+    console.error('key-check mono personal:', http || e?.message)
+    return verdict('unknown', http ? `monobank відповів кодом ${http}, спробуйте пізніше` : 'monobank не відповів, спробуйте пізніше')
+  }
+}
+
+const PRIVAT_IO = { settings: privatSettings, balances: interimBalances, wait: (ms) => new Promise((r) => setTimeout(r, ms)) }
+// Банк просит не чаще одного запроса в секунду.
+const PRIVAT_PAUSE_MS = 1100
+
+// ПриватБанк «Автоклієнт»: состояние дня банка, затем остатки по всем активным счетам. Только чтение.
+export const checkPrivatAutoclient = async (fop, io = {}) => {
+  const { settings, balances, wait } = { ...PRIVAT_IO, ...io }
+  const creds = fop.privatAutoclient || {}
+  if (!creds.token && !creds.id) return verdict('none', 'Token не заданий')
+  if (!creds.token) return verdict('bad', 'Немає token')
+  if (!printable(creds.token) || (creds.id && !printable(creds.id))) return verdict('bad', 'Token або id містить зайві символи: вставте ще раз')
+  const fail = (e, what) => {
+    const http = e?.response?.status
+    if (http === 401) {
+      return verdict('bad', creds.id ? 'ПриватБанк не приймає цей token або id' : 'ПриватБанк не приймає цей token. Якщо банк видав пару id і token, заповніть обидва поля.')
+    }
+    if (http === 403) return verdict('bad', 'ПриватБанк відмовив: рахунок вимкнено в налаштуваннях Автоклієнта у Приват24 для бізнесу')
+    console.error(`key-check privat (${what}):`, http || e?.message)
+    return verdict('unknown', http ? `ПриватБанк відповів кодом ${http}, спробуйте пізніше` : 'ПриватБанк не відповів, спробуйте пізніше')
+  }
+  // Ответ с status ERROR приходит и с кодом 200: текст банка показываем как есть, ключей в нём нет.
+  const refused = (r) => {
+    if (isObject(r) && r.status !== 'ERROR') return null
+    const text = isObject(r) ? clip(r.message, 160) : ''
+    return verdict('unknown', text ? `Не вдалося підтвердити, відповідь ПриватБанку: ${text}` : 'ПриватБанк повернув незрозумілу відповідь, спробуйте пізніше')
+  }
+
+  let day
+  try {
+    day = await settings(creds)
+  } catch (e) {
+    return fail(e, 'стан дня')
+  }
+  const dayRefused = refused(day)
+  if (dayRefused) return dayRefused
+  const st = isObject(day.settings) ? day.settings : day
+  if ((st.phase && st.phase !== 'WRK') || st.work_balance === 'Y') {
+    return verdict('unknown', 'Token дійсний, але банк зараз закриває день і залишків не віддає: повторіть перевірку пізніше')
+  }
+
+  await wait(PRIVAT_PAUSE_MS)
+  let r
+  try {
+    r = await balances(creds)
+  } catch (e) {
+    return fail(e, 'залишки')
+  }
+  const balRefused = refused(r)
+  if (balRefused) return balRefused
+  if (!Array.isArray(r.balances)) return verdict('unknown', 'ПриватБанк повернув незрозумілу відповідь, спробуйте пізніше')
+  const accounts = latestBalances(r.balances)
+  if (!accounts.length) {
+    return verdict('unknown', 'Token дійсний, але активних рахунків банк не показав. Перевірте, що Автоклієнт підключено саме в цього ФОП.')
+  }
+  return verdict('ok', 'Token дійсний, рахунки видно. Звірте, що це рахунки саме цього ФОП.', {
+    accounts: shownAccounts(accounts), ...(r.exist_next_page === true ? { moreAccounts: true } : {}),
+  })
+}
+
+// NovaPay: подключение портал ещё не проверяет (нужна официальная инструкция API из кабинета), смотрим только полноту.
+// Полные данные — 'none' (метка серая, «не проверено»): зелёного вердикта без настоящей проверки не даём.
+export const checkNovaPay = (fop) => {
+  const { login, refreshToken, certificate } = fop.novaPay || {}
+  if (!login && !refreshToken && !certificate) return verdict('none', 'Дані не задані')
+  const missing = [!login && 'логін', !refreshToken && 'Refresh Token', !certificate && 'сертифікат'].filter(Boolean)
+  if (missing.length) return verdict('bad', `Не заповнено: ${missing.join(', ')}`)
+  return verdict('none', 'Дані збережено. Перевіряти підключення NovaPay портал ще не вміє: перевірка і завантаження виписок зʼявляться з наступним оновленням.')
+}
+
 const digits = (v) => String(v || '').replace(/\D/g, '')
 
 export const checkFopKeys = async (fop, io = {}) => {
-  const [liqpay, monoAcquire, monoChast, checkbox, novaPoshta] = await Promise.all([
+  const [liqpay, monoAcquire, monoChast, checkbox, novaPoshta, bankMono, bankPrivat] = await Promise.all([
     checkLiqpay(fop, io.liqpayStatus),
     checkMonoAcquire(fop, io.monoDetails),
     checkMonoChast(fop, io.monoReport),
     checkCheckbox(fop, io.checkbox),
     checkNovaPoshta(fop, io.np),
+    checkMonoPersonal(fop, io.monoInfo),
+    checkPrivatAutoclient(fop, io.privat),
   ])
   // Чек и оплата должны быть от одного лица: коды кассы Checkbox и кабинета monobank сверяем сами.
   const cashCode = digits(checkbox.edrpou)
@@ -305,7 +418,7 @@ export const checkFopKeys = async (fop, io = {}) => {
     delete checkbox.note
     delete checkbox.expiring
   }
-  return { liqpay, monoAcquire, monoChast, checkbox, novaPoshta }
+  return { liqpay, monoAcquire, monoChast, checkbox, novaPoshta, bankMono, bankPrivat, bankNovaPay: checkNovaPay(fop) }
 }
 
 export default checkFopKeys

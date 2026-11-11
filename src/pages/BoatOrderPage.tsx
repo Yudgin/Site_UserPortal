@@ -1,7 +1,9 @@
 // Картка замовлення кораблика (власник): клієнт + адреса НП, конфігуратор (модель → ряд →
 // колір, глибиномір, сумка, ехолот, аксесуари — опції фільтруються за сумісністю з моделлю),
-// вартість (автозбір із каталогу + ручні правки), хід виконання (статуси з історією), дропшип.
-// Дії (ТТН / посилання на оплату / чек) — фаза 3.
+// вартість (автозбір із каталогу + ручні правки), хід виконання (статуси з історією).
+// Продаж через магазин-партнера (§26.1): вид замовлення (роздріб / дропшипінг / викуп), чия накладна,
+// комісія магазину в кожному рядку, сума «клієнт платить нам» → хто кому винен.
+// Дії: ТТН / посилання на оплату / чек.
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
@@ -25,7 +27,9 @@ import type { NpAddress } from '@/types/npTemplate'
 import {
   BOAT_ORDER_STATUSES, BOAT_ORDER_STATUS_LABELS, BOAT_OPTION_KIND_LABELS, BOAT_ORDER_PAY_METHOD_LABELS, optionFitsModel, discountPct,
   lineEffTotal, lineDiscountAmount,
-  type BoatModel, type BoatOption, type BoatOrder, type BoatOrderLine, type BoatOrderStatus, type Dropshipper,
+  BOAT_ORDER_KINDS, BOAT_ORDER_KIND_LABELS, SHOP_PAY_TERM_DAYS,
+  orderKind, clientDueToUs, payMode, orderShopNet, orderShopFee, shopDue, applyShopPct, withShopDerived,
+  type BoatModel, type BoatOption, type BoatOrder, type BoatOrderKind, type BoatOrderLine, type BoatOrderStatus, type Dropshipper,
 } from '@/types/boats'
 import { secureId } from '@/utils/id'
 import { canonicalPhone } from '@/utils/phone'
@@ -90,51 +94,96 @@ export default function BoatOrderPage() {
   const buildLines = (): BoatOrderLine[] => {
     if (!order) return []
     const lines: BoatOrderLine[] = []
-    if (model && row) lines.push({ id: secureId(8), label: `Кораблик ${model.name} ${row.name}${order.color ? ` (${order.color})` : ''}`, price: row.basePrice, oldPrice: row.oldPrice || null, qty: 1 })
+    if (model && row) lines.push({ id: secureId(8), kind: 'boat', label: `Кораблик ${model.name} ${row.name}${order.color ? ` (${order.color})` : ''}`, price: row.basePrice, oldPrice: row.oldPrice || null, qty: 1 })
     const pushOpt = (oid?: string | null) => {
       const o = options.find((x) => x.id === oid)
-      if (o) lines.push({ id: secureId(8), label: `${BOAT_OPTION_KIND_LABELS[o.kind]}: ${o.name}`, price: o.price, oldPrice: o.oldPrice || null, qty: 1 })
+      if (o) lines.push({ id: secureId(8), kind: o.kind, label: `${BOAT_OPTION_KIND_LABELS[o.kind]}: ${o.name}`, price: o.price, oldPrice: o.oldPrice || null, qty: 1 })
     }
     if (order.needDepthGauge) pushOpt(order.depthGaugeOptionId)
     pushOpt(order.bagOptionId)
     pushOpt(order.echoOptionId)
     for (const a of order.accessories || []) {
       const o = options.find((x) => x.id === a.optionId)
-      if (o) lines.push({ id: secureId(8), label: `${BOAT_OPTION_KIND_LABELS[o.kind]}: ${o.name}`, price: o.price, oldPrice: o.oldPrice || null, qty: a.qty || 1 })
+      if (o) lines.push({ id: secureId(8), kind: o.kind, label: `${BOAT_OPTION_KIND_LABELS[o.kind]}: ${o.name}`, price: o.price, oldPrice: o.oldPrice || null, qty: a.qty || 1 })
     }
     return lines
   }
+
+  // ---- Продаж через магазин-партнера ----
+  const shop = useMemo(() => droppers.find((d) => d.id === order?.dropshipperId) || null, [droppers, order?.dropshipperId])
+  const kind: BoatOrderKind = order ? orderKind(order) : 'retail'
+  const shopOrder = kind !== 'retail'
+
+  // Нові рядки + сума. Якщо клієнт платив нам УСЮ суму, після зміни рядків це так і лишається.
+  const withTotals = (lines: BoatOrderLine[]): Partial<BoatOrder> => {
+    const total = sumLines(lines)
+    const wasFull = !!order && shopOrder && kind === 'dropship' && order.ttnBy !== 'shop' && order.total > 0 && Number(order.collectByUs) >= order.total
+    return { lines, total, ...(wasFull ? { collectByUs: total } : {}) }
+  }
+
   const recalc = () => {
-    const lines = buildLines()
-    patch({ lines, total: sumLines(lines) })
+    const built = buildLines()
+    patch(withTotals(shopOrder ? applyShopPct(built, shop?.terms) : built))
   }
 
   const patchLine = (idx: number, p: Partial<BoatOrderLine>) => {
     if (!order) return
-    const lines = order.lines.map((l, i) => (i === idx ? { ...l, ...p } : l))
-    patch({ lines, total: sumLines(lines) })
+    patch(withTotals(order.lines.map((l, i) => (i === idx ? { ...l, ...p } : l))))
   }
   const addLine = () => order && patch({ lines: [...order.lines, { id: secureId(8), label: '', price: 0, qty: 1 }] })
   const dropLine = (idx: number) => {
     if (!order) return
-    const lines = order.lines.filter((_, i) => i !== idx)
-    patch({ lines, total: sumLines(lines) })
+    patch(withTotals(order.lines.filter((_, i) => i !== idx)))
+  }
+
+  const setKind = (k: BoatOrderKind) => {
+    if (!order || k === kind) return
+    if (k === 'retail') return patch({ kind: 'retail', dropshipperId: null, ttnBy: null, collectByUs: null, payTo: 'us' })
+    // Викуп: накладна наша, кінцевий покупець нам не платить — магазин платить на рахунок ФОП.
+    if (k === 'buyout') return patch({ kind: k, ttnBy: 'us', collectByUs: 0 })
+    // Дропшипінг: чия накладна — з умов магазину (якщо він уже обраний); інакше вирішиться при виборі магазину.
+    patch({ kind: k, ...(shop ? { ttnBy: order.ttnBy || (shop.terms?.ttnBy === 'shop' ? 'shop' : 'us') } : {}) })
+  }
+  // Вибір магазину: комісія з його умов іде в рядки. Поки накладної немає — «чия накладна» і «хто отримує
+  // гроші» беруться з умов магазину; якщо номер ТТН уже вписано — вибране не чіпаємо.
+  const pickShop = (sid: string) => {
+    if (!order) return
+    const s = droppers.find((d) => d.id === sid)
+    if (!s) return patch({ dropshipperId: null })
+    const lines = applyShopPct(order.lines, s.terms)
+    if (kind === 'buyout') return patch({ dropshipperId: sid, lines, ttnBy: 'us', collectByUs: 0 })
+    const keep = !!order.ttn && !!order.ttnBy
+    const ttnBy: 'us' | 'shop' = keep ? (order.ttnBy === 'shop' ? 'shop' : 'us') : s.terms?.ttnBy === 'shop' ? 'shop' : 'us'
+    const collectByUs = ttnBy === 'shop' ? 0
+      : keep && order.collectByUs != null ? order.collectByUs
+      : s.terms?.collectBy === 'us' ? order.total : 0
+    patch({ dropshipperId: sid, lines, ttnBy, collectByUs, ...(collectByUs > 0 && !(order.payMethods || []).length ? { payMethods: ['cod'] } : {}) })
+  }
+  const setTtnBy = (v: 'us' | 'shop') => patch({ ttnBy: v, ...(v === 'shop' ? { collectByUs: 0 } : {}) })
+  // «Клієнт платить нам»: 0…сума замовлення. Якщо способів оплати ще немає — вмикаємо наложку (сума піде в нашу ТТН).
+  const setCollect = (v: number) => {
+    if (!order) return
+    const c = Math.min(Math.max(Math.round((Number(v) || 0) * 100) / 100, 0), order.total)
+    patch({ collectByUs: c, ...(c > 0 && !(order.payMethods || []).length ? { payMethods: ['cod'] } : {}) })
   }
 
   const save = async () => {
     if (!order) return
+    if (shopOrder && !order.dropshipperId) { notify('Оберіть магазин', 'error'); return }
+    const prepared = withShopDerived(order)
     setSaving(true)
-    const res = await boatOrderService.save(order)
+    const res = await boatOrderService.save(prepared)
     setSaving(false)
     // Сервіс записав телефон канонічним — показуємо те, що збережено.
-    if (res) { setOrder((o) => (o ? { ...o, clientPhone: canonicalPhone(o.clientPhone) } : o)); setDirty(false); notify('Збережено') } else notify('Не вдалося зберегти', 'error')
+    if (res) { setOrder({ ...prepared, clientPhone: canonicalPhone(prepared.clientPhone) }); setDirty(false); notify('Збережено') } else notify('Не вдалося зберегти', 'error')
   }
 
   // Зміна статусу: історія + миттєве збереження (щоб хід виконання не губився без «Зберегти»).
   const setStatus = async (s: BoatOrderStatus) => {
     if (!order || s === order.status) return
+    if (shopOrder && !order.dropshipperId) { notify('Оберіть магазин', 'error'); return }
     const next: BoatOrder = {
-      ...order, clientPhone: canonicalPhone(order.clientPhone), status: s,
+      ...withShopDerived(order), clientPhone: canonicalPhone(order.clientPhone), status: s,
       statusHistory: [...(order.statusHistory || []), { status: s, at: new Date().toISOString(), by: user?.email || null }],
       ...(s === 'done' && !order.soldAt ? { soldAt: new Date().toISOString().slice(0, 10) } : {}),
     }
@@ -220,6 +269,13 @@ export default function BoatOrderPage() {
   }
 
   const accessories = order.accessories || []
+  // Замовлення магазину: скільки клієнт платить нам, комісія, хто кому винен (формула — types/boats.ts).
+  const toUs = clientDueToUs(order)
+  const mode = payMode(order)
+  const shopNet = orderShopNet(order.lines)
+  const shopFee = orderShopFee(order.lines)
+  const due = shopDue(order)
+  const codDefault = Math.round(toUs)
 
   return (
     <Container maxWidth="md" sx={{ py: 3 }}>
@@ -254,7 +310,7 @@ export default function BoatOrderPage() {
 
       {/* Клієнт */}
       <Paper sx={{ p: 2, mb: 2 }}>
-        <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Клієнт</Typography>
+        <Typography variant="subtitle2" sx={{ mb: 1.5 }}>{kind === 'buyout' ? 'Отримувач (склад магазину)' : 'Клієнт'}</Typography>
         <Stack spacing={2}>
           {/* ПІБ роздільно (потрібно для НП/документів); clientName тримаємо синхронним зведенням.
               Для старих замовлень (тільки clientName) частини підставляються розбиттям по пробілах. */}
@@ -394,6 +450,11 @@ export default function BoatOrderPage() {
                 <MenuItem value="uah">грн</MenuItem>
                 <MenuItem value="pct">%</MenuItem>
               </TextField>
+              {shopOrder && (
+                <TextField label="Комісія %" type="number" value={l.shopPct || ''} size="small" sx={{ width: 96 }} placeholder="0"
+                  inputProps={{ min: 0, max: 100, step: 0.5 }}
+                  onChange={(e) => patchLine(idx, { shopPct: Math.min(Math.max(Number(e.target.value) || 0, 0), 100) })} />
+              )}
               {discountPct(l.price, l.oldPrice) != null && (
                 <Chip size="small" color="error" label={`-${discountPct(l.price, l.oldPrice)}%`} />
               )}
@@ -416,12 +477,70 @@ export default function BoatOrderPage() {
         </Stack>
       </Paper>
 
+      {/* Продаж через магазин-партнера: вид замовлення, магазин, чия накладна, скільки клієнт платить нам */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }} sx={{ mb: shopOrder ? 1.5 : 0 }}>
+          <Typography variant="subtitle2" sx={{ flexGrow: 1 }}>Продаж через магазин</Typography>
+          <ToggleButtonGroup exclusive size="small" value={kind} onChange={(_, v) => v && setKind(v as BoatOrderKind)}>
+            {BOAT_ORDER_KINDS.map((k) => <ToggleButton key={k} value={k}>{BOAT_ORDER_KIND_LABELS[k]}</ToggleButton>)}
+          </ToggleButtonGroup>
+        </Stack>
+        {shopOrder && (
+          <Stack spacing={1.5}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }}>
+              <TextField select label="Магазин" value={order.dropshipperId || ''} size="small" sx={{ minWidth: 240 }}
+                error={!order.dropshipperId} helperText={!order.dropshipperId ? 'оберіть магазин' : undefined}
+                onChange={(e) => pickShop(e.target.value)}>
+                {droppers.filter((d) => d.active !== false || d.id === order.dropshipperId).map((d) => <MenuItem key={d.id} value={d.id}>{d.name}</MenuItem>)}
+              </TextField>
+              {kind === 'dropship' && (
+                <ToggleButtonGroup exclusive size="small" value={order.ttnBy === 'shop' ? 'shop' : 'us'}
+                  onChange={(_, v) => v && setTtnBy(v as 'us' | 'shop')}>
+                  <ToggleButton value="us">Наша ТТН</ToggleButton>
+                  <ToggleButton value="shop">ТТН магазину</ToggleButton>
+                </ToggleButtonGroup>
+              )}
+            </Stack>
+            {kind === 'dropship' && order.ttnBy !== 'shop' && (
+              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                <TextField label="Клієнт платить нам, грн" type="number" size="small" sx={{ width: 210 }}
+                  value={order.collectByUs ?? ''} placeholder="0" inputProps={{ min: 0, max: order.total }}
+                  onChange={(e) => setCollect(Number(e.target.value))} />
+                <Button size="small" variant={mode === 'none' ? 'contained' : 'outlined'} onClick={() => setCollect(0)}>Усе магазину</Button>
+                <Button size="small" variant={mode === 'full' ? 'contained' : 'outlined'} onClick={() => setCollect(order.total)} disabled={!order.total}>Уся сума нам</Button>
+                {mode === 'split' && <Chip size="small" color="info" label={`аванс магазину ${fmtUah(Math.round((order.total - toUs) * 100) / 100)}`} />}
+              </Stack>
+            )}
+            {kind === 'dropship' && order.ttnBy === 'shop' && (
+              <Typography variant="body2" color="text.secondary">
+                Накладну створив магазин: наложку за нею отримує він, при відмові посилка повертається йому. Номер ТТН впишіть у «Діях» — за ним стежитимемо за посилкою.
+              </Typography>
+            )}
+            {kind === 'buyout' && (
+              <Typography variant="body2" color="text.secondary">
+                Магазин купує кораблик собі на склад: накладна наша, без наложки; магазин платить на рахунок ФОП.
+              </Typography>
+            )}
+            {order.dropshipperId && (
+              <Alert severity={shopFee <= 0 && order.lines.length ? 'warning' : due < 0 ? 'warning' : 'info'}>
+                Роздрібна сума {fmtUah(order.total)} · комісія магазину {fmtUah(shopFee)} · магазину коштує {fmtUah(shopNet)}.
+                {kind === 'dropship' && <> Клієнт платить нам {fmtUah(toUs)}.</>}{' '}
+                <b>{due > 0 ? `Магазин винен нам ${fmtUah(due)}.` : due < 0 ? `Ми винні магазину ${fmtUah(-due)}.` : 'Розрахунок нульовий.'}</b>{' '}
+                Борг зʼявляється, коли посилку отримано; строк оплати — {shop?.terms?.payTermDays || SHOP_PAY_TERM_DAYS} дн.
+                {shopFee <= 0 && order.lines.length > 0 && ' Комісію не задано: перевірте відсотки в рядках вартості або в картці магазину.'}
+              </Alert>
+            )}
+          </Stack>
+        )}
+      </Paper>
+
       {/* Способи оплати замовлення: онлайн-методи + наложений платіж (сума піде в ТТН) */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Способи оплати</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          Оберіть, як клієнт може оплатити. «Наложений платіж» — сума замовлення автоматично
-          підставиться наложкою при створенні ТТН (якщо не оплачено онлайн).
+          {shopOrder
+            ? `Як клієнт платить НАМ свою частину (${fmtUah(toUs)}). «Наложений платіж» — саме ця сума підставиться наложкою при створенні нашої ТТН.`
+            : 'Оберіть, як клієнт може оплатити. «Наложений платіж» — сума замовлення автоматично підставиться наложкою при створенні ТТН (якщо не оплачено онлайн).'}
         </Typography>
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
           {Object.entries(BOAT_ORDER_PAY_METHOD_LABELS).map(([m, label]) => {
@@ -461,11 +580,13 @@ export default function BoatOrderPage() {
         <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Дії</Typography>
         <Stack spacing={1.5}>
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-            <Button variant="outlined" startIcon={<TtnIcon />} onClick={() => setTtnDialog(true)} disabled={dirty}>
-              Створити ТТН
-            </Button>
-            {/* ТТН можна ввести і вручну (якщо накладну створено поза системою) — «Зберегти» запише */}
-            <TextField label="ТТН (можна вручну)" size="small" sx={{ minWidth: 190 }}
+            {!(shopOrder && order.ttnBy === 'shop') && (
+              <Button variant="outlined" startIcon={<TtnIcon />} onClick={() => setTtnDialog(true)} disabled={dirty}>
+                Створити ТТН
+              </Button>
+            )}
+            {/* ТТН можна ввести і вручну (накладну створено поза системою або її дав магазин) — «Зберегти» запише */}
+            <TextField label={shopOrder && order.ttnBy === 'shop' ? 'ТТН магазину' : 'ТТН (можна вручну)'} size="small" sx={{ minWidth: 190 }}
               value={order.ttn || ''} placeholder="напр. 20450…"
               onChange={(e) => patch({ ttn: e.target.value.trim() || null })} />
             {order.ttn && (
@@ -480,8 +601,12 @@ export default function BoatOrderPage() {
               </>
             )}
           </Stack>
-          {order.payTo === 'dropshipper' ? (
-            <Alert severity="info">Гроші отримує дропшипер — посилання на оплату і чек на його стороні; тут лише фіксуємо суму.</Alert>
+          {kind === 'buyout' ? (
+            <Alert severity="info">Викуп: магазин платить на рахунок ФОП — посилання на оплату не створюється.</Alert>
+          ) : shopOrder && mode === 'none' ? (
+            <Alert severity="info">Гроші клієнта отримує магазин — посилання на оплату і чек на його стороні; тут лише фіксуємо суму.</Alert>
+          ) : shopOrder && mode === 'split' ? (
+            <Alert severity="info">Часткова оплата: клієнт платить нам {fmtUah(toUs)} наложкою в нашій ТТН. Посилання на частину суми не створюється.</Alert>
           ) : (
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
               {order.paidAt ? (
@@ -513,32 +638,6 @@ export default function BoatOrderPage() {
         </Stack>
       </Paper>
 
-      {/* Дропшипінг */}
-      <Paper sx={{ p: 2, mb: 2 }}>
-        <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Дропшипінг</Typography>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }}>
-          <TextField select label="Дропшипер" value={order.dropshipperId || ''} size="small" sx={{ minWidth: 240 }}
-            onChange={(e) => patch({ dropshipperId: e.target.value || null, ...(e.target.value ? {} : { payTo: 'us' }) })}>
-            <MenuItem value="">— пряме замовлення —</MenuItem>
-            {droppers.filter((d) => d.active !== false).map((d) => <MenuItem key={d.id} value={d.id}>{d.name}</MenuItem>)}
-          </TextField>
-          {order.dropshipperId && (
-            <ToggleButtonGroup exclusive size="small" value={order.payTo || 'us'}
-              onChange={(_, v) => v && patch({ payTo: v })}>
-              <ToggleButton value="us">Оплата нам</ToggleButton>
-              <ToggleButton value="dropshipper">Оплата дропшиперу</ToggleButton>
-            </ToggleButtonGroup>
-          )}
-        </Stack>
-        {order.dropshipperId && (
-          <Alert severity={order.payTo === 'dropshipper' ? 'warning' : 'info'} sx={{ mt: 1.5 }}>
-            {order.payTo === 'dropshipper'
-              ? 'Гроші отримує дропшипер — ми не генеруємо посилання на оплату і не видаємо чек (чек — на стороні дропшипера). Сума фіксується для взаєморозрахунків.'
-              : 'Гроші отримуємо ми — наші посилання на оплату і наш чек; частка дропшипера накопичується для взаєморозрахунків.'}
-          </Alert>
-        )}
-      </Paper>
-
       {/* Нотатка */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <TextField label="Нотатка" value={order.note || ''} onChange={(e) => patch({ note: e.target.value })} size="small" fullWidth multiline minRows={2} />
@@ -557,7 +656,7 @@ export default function BoatOrderPage() {
         onClose={() => setTtnDialog(false)}
         boatOrderId={order.id}
         defaultCost={order.total > 0 ? order.total : undefined}
-        defaultCod={(order.payMethods || []).includes('cod') && !order.paidAt && order.total > 0 ? order.total : undefined}
+        defaultCod={(order.payMethods || []).includes('cod') && !order.paidAt && codDefault > 0 ? codDefault : undefined}
         defaultFopId={order.payFops?.cod || undefined}
         clientName={order.clientName}
         clientPhone={order.clientPhone}
@@ -565,7 +664,13 @@ export default function BoatOrderPage() {
         clientCityName={order.clientCityName || undefined}
         clientWarehouseRef={order.clientWarehouseRef || undefined}
         clientWarehouseName={order.clientWarehouseName || undefined}
-        onCreated={(ttn) => setOrder((o) => (o ? { ...o, ttn } : o))}
+        onCreated={async (ttn) => {
+          setOrder((o) => (o ? { ...o, ttn } : o))
+          // Сервер записав у замовлення накладну і фактичну наложку (для замовлення магазину — «клієнт платить нам»).
+          // Діалог відкривається лише без незбережених змін, тому перечитати замовлення безпечно.
+          const fresh = await boatOrderService.get(order.id)
+          if (fresh) setOrder(fresh)
+        }}
       />
 
       {/* Діалог посилання на оплату */}

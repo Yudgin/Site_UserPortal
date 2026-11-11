@@ -164,7 +164,8 @@ test('передачі водієві: сума порівну на посилк
     assert.equal(made.status, 200)
     const id = made.json.data.id
     assert.deepEqual(made.json.data.shares, { 1: 13.34, 2: 13.33, 3: 13.33 })
-    assert.deepEqual(s.db._get('parcels', '2').transfer, { id, date: '2026-11-08', driver: 'Микола', share: 13.33, currency: 'EUR' })
+    assert.deepEqual(s.db._get('parcels', '2').transfer, { id, date: '2026-11-08', driver: 'Микола', share: 13.33, currency: 'EUR', paid: false })
+    assert.deepEqual([made.json.data.paid, made.json.data.paidAt, made.json.data.paidMethod], [false, null, null]) // нова передача — не оплачена
     assert.equal(s.db._get('parcelTransfers', id).driverPhone, '+380671234567')
     // інша передача не може забрати ту саму посилку
     assert.equal((await s.call('PUT', '/api/parcels/transfers/new', 'owner', { driver: 'Інший', cost: 10, parcelIds: ['2', '4'] })).status, 409)
@@ -175,6 +176,18 @@ test('передачі водієві: сума порівну на посилк
     assert.equal(s.db._get('parcels', '3').transfer, null)
     assert.equal(s.db._get('parcels', '1').transfer.share, 20)
     assert.equal(s.db._get('parcelTransfers', id).done, true)
+    // позначка «оплачено»: дата і спосіб; без дати — сьогодні, невідомий спосіб — готівка; зняли позначку — дата і спосіб очищаються
+    const same = { date: '2026-11-08', driver: 'Микола', cost: 40, currency: 'EUR', parcelIds: ['1', '2'], done: true }
+    const paid = await s.call('PUT', `/api/parcels/transfers/${id}`, 'owner', { ...same, paid: true, paidAt: '2026-11-09', paidMethod: 'card' })
+    assert.deepEqual([paid.json.data.paid, paid.json.data.paidAt, paid.json.data.paidMethod], [true, '2026-11-09', 'card'])
+    assert.equal(s.db._get('parcels', '1').transfer.paid, true)
+    const keep = await s.call('PUT', `/api/parcels/transfers/${id}`, 'owner', { ...same, paid: true }) // дата і спосіб не передані — лишаються
+    assert.deepEqual([keep.json.data.paidAt, keep.json.data.paidMethod], ['2026-11-09', 'card'])
+    const unpaid = await s.call('PUT', `/api/parcels/transfers/${id}`, 'owner', { ...same, paid: false, paidAt: '2026-11-09', paidMethod: 'card' })
+    assert.deepEqual([unpaid.json.data.paid, unpaid.json.data.paidAt, unpaid.json.data.paidMethod], [false, null, null])
+    assert.equal(s.db._get('parcels', '2').transfer.paid, false)
+    const today = await s.call('PUT', `/api/parcels/transfers/${id}`, 'owner', { ...same, paid: true, paidMethod: 'bitcoin' })
+    assert.deepEqual([today.json.data.paidAt, today.json.data.paidMethod], ['2026-11-10', 'cash'])
     const list = await s.call('GET', '/api/parcels/transfers', 'owner')
     assert.equal(list.json.data.length, 1)
     assert.equal((await s.call('PUT', '/api/parcels/transfers/nope', 'owner', { driver: 'x', parcelIds: ['1'] })).status, 404)
