@@ -21,6 +21,7 @@ import { registerFopsAdmin } from './fopsAdmin.js'
 import { registerNpTtn } from './novaPoshtaTtn.js'
 import { registerTelegramLinks } from './telegramLinks.js'
 import { registerOperatorBot } from './operatorBot.js'
+import { registerStaffBot } from './staffBot.js'
 import { registerCalls } from './calls.js'
 import { registerFmcCalls } from './fmcCalls.js'
 import { registerBinotelCalls } from './binotelCalls.js'
@@ -1272,6 +1273,10 @@ registerNpTtn(app, { adminDb, notifyClient })
 registerTelegramLinks(app, { adminDb })
 // Операторский бот (поглощение TelegramBot): спит без TELEGRAM_OPERATOR_BOT_TOKEN (фазы Б1-Б4).
 registerOperatorBot(app, { adminDb })
+// Telegram-бот СОТРУДНИКОВ по заявкам (поиск/внесение информации через ИИ с подтверждением кнопкой):
+// без TELEGRAM_STAFF_BOT_TOKEN и TELEGRAM_STAFF_WEBHOOK_SECRET вебхук не регистрируется (fail closed),
+// /api/staff-bot/link отвечает 503. ИИ — тот же клиент/модель, что и у остальных эндпоинтов.
+registerStaffBot(app, { adminDb, anthropic, AI_MODEL, buildUsage, mergeConsecutiveMessages, siteUrl: SITE_URL })
 // Журнал дзвінків: зеркальные события/результаты от операторского бота (X-Calls-Token).
 registerCalls(app, { adminDb })
 // Дзвінки з застосунку сервісу через АТС: основна — Binotel (BINOTEL_KEY/SECRET; запис → розшифровка →

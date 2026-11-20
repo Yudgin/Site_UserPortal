@@ -7,7 +7,8 @@ import {
   Container, Box, Paper, Typography, Button, Alert, CircularProgress, Chip, Stack, TextField, MenuItem,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
 } from '@mui/material'
-import { Home as HomeIcon, Refresh as RefreshIcon, CloudSync as SyncIcon } from '@mui/icons-material'
+import { Home as HomeIcon, Refresh as RefreshIcon, CloudSync as SyncIcon, Telegram as TelegramIcon } from '@mui/icons-material'
+import { staffBotApi } from '@/api/endpoints/staffBot'
 import { useAccess } from '@/store/accessStore'
 import { useStaffGate, centerVisible } from '@/hooks/useStaffGate'
 import { serviceRequestService } from '@/api/serviceRequestService'
@@ -70,6 +71,17 @@ export default function ServiceRequestsListPage() {
     setSyncing(false)
   }
   useEffect(() => { load() }, [load])
+
+  // Telegram-бот співробітників: одноразове посилання привʼязки (сервер, 30 хв). Відкриваємо в новій
+  // вкладці і дублюємо текстом — якщо браузер заблокував спливаюче вікно.
+  const [botMsg, setBotMsg] = useState<{ ok: boolean; text: string; url?: string } | null>(null)
+  const connectBot = async () => {
+    setBotMsg(null)
+    const r = await staffBotApi.link()
+    if (!r.ok || !r.url) { setBotMsg({ ok: false, text: r.error || 'Не вдалося створити посилання' }); return }
+    window.open(r.url, '_blank', 'noopener')
+    setBotMsg({ ok: true, url: r.url, text: r.connected ? 'Telegram уже підключено. Щоб перепідключити інший акаунт — відкрийте посилання і натисніть Start:' : 'Відкрийте посилання в Telegram і натисніть Start — бот привʼяже ваш акаунт (посилання діє 30 хв):' })
+  }
   useEffect(() => { setShown(PAGE) }, [statusFilter, sourceFilter, q, centerFilter])
 
   const is1c6 = (r: ServiceRequest) => r.id.startsWith('sr-1c6-')
@@ -122,11 +134,17 @@ export default function ServiceRequestsListPage() {
               Синхронізувати з 1С
             </Button>
           )}
+          <Button startIcon={<TelegramIcon />} onClick={connectBot} title="Бот у Telegram: пошук заявок і внесення інформації (доп. витрати, діагностика, ТТН, статус)">Telegram-бот</Button>
           <Button startIcon={<RefreshIcon />} onClick={load} disabled={loading}>Оновити</Button>
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
         </Box>
       </Box>
       {syncMsg && <Alert severity={syncMsg.ok ? 'success' : 'warning'} sx={{ mb: 2 }} onClose={() => setSyncMsg(null)}>{syncMsg.text}</Alert>}
+      {botMsg && (
+        <Alert severity={botMsg.ok ? 'info' : 'error'} sx={{ mb: 2 }} onClose={() => setBotMsg(null)}>
+          {botMsg.text}{botMsg.url && <> <a href={botMsg.url} target="_blank" rel="noreferrer">{botMsg.url}</a></>}
+        </Alert>
+      )}
 
       <Stack direction="row" spacing={0.5} sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap alignItems="center">
         <Chip label={`Усі (${visibleRows.length})`} size="small" color={statusFilter === 'all' ? 'primary' : 'default'} onClick={() => setStatusFilter('all')} />

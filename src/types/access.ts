@@ -124,6 +124,11 @@ export interface UserProfile {
   createdAt: string
   updatedAt: string
   createdBy?: string | null
+  // Telegram-бот співробітників по заявках: привʼязка пишеться ТІЛЬКИ backend-ом (/start <токен>).
+  telegramUserId?: number | null
+  telegramChatId?: string | null
+  telegramUsername?: string | null
+  telegramLinkedAt?: string | null
 }
 
 // Сервисный центр (зона обслуживания). Наш реестр; externalId — маппинг к 1С ServiceCenter.ID.

@@ -106,9 +106,11 @@ service cloud.firestore {
     // документ (легаси boats/settings/updatedAt), но НЕ трогая RBAC-поля — иначе self-escalation.
     // pbxLine (внутренняя линия Binotel для звонков из приложения) — тоже только владелец: иначе
     // сотрудник мог бы назначить себе чужую линию. Свой мобильный (pbxPhone) сотрудник пишет сам.
+    // telegram* — привʼязка Telegram-бота співробітників (пише лише backend через /start <токен>): інакше
+    // співробітник міг би «привласнити» чужий Telegram id і діяти в боті від чужого профілю.
     function touchesRbacKeys() {
       return request.resource.data.diff(resource.data).affectedKeys()
-        .hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine', 'calcVisibility']);
+        .hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine', 'calcVisibility', 'telegramUserId', 'telegramChatId', 'telegramUsername', 'telegramLinkedAt']);
     }
     match /users/{userId} {
       allow get: if isPriceAdmin() || (request.auth != null && request.auth.uid == userId);
@@ -119,7 +121,7 @@ service cloud.firestore {
       // Создание: владелец — что угодно; сам пользователь — только БЕЗ RBAC-полей.
       allow create: if isPriceAdmin()
         || (request.auth != null && request.auth.uid == userId
-            && !request.resource.data.keys().hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine', 'calcVisibility']));
+            && !request.resource.data.keys().hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine', 'calcVisibility', 'telegramUserId', 'telegramChatId', 'telegramUsername', 'telegramLinkedAt']));
       // Обновление: владелец — что угодно; сам пользователь — только не меняя RBAC-полей.
       allow update: if isPriceAdmin()
         || (request.auth != null && request.auth.uid == userId && !touchesRbacKeys());
