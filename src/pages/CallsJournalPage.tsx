@@ -4,6 +4,8 @@
 //  2) власник переглядає СВОЮ ЧЕРГУ — це і «Нові» (без резюме, напр. пропущені), і
 //     «Оброблені» — додає свою дію/коментар і відправляє в «Архів».
 // Джерела подій: 1С через операторський бот (зеркало) + прямий вебхук Kyivstar FMC.
+// З картки дзвінка — «Запросити в чат» (ChatInviteDialog, source='phone'): людина отримує SMS з посиланням на
+// чат з помічником за темою; на картках номера видно вже створені запрошення (chatInvites за телефоном).
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -14,7 +16,7 @@ import {
   Home as HomeIcon, Refresh as RefreshIcon, Call as CallIcon, CheckCircle as ReviewedIcon,
   Archive as ArchiveIcon, Unarchive as UnarchiveIcon, AddComment as NoteIcon, ArrowForward as FwdIcon,
   AssignmentTurnedIn as TaskDoneIcon, Assignment as TaskIcon, Add as AddIcon, Done as DoneIcon,
-  History as HistoryIcon, Sailing as BoatIcon,
+  History as HistoryIcon, Sailing as BoatIcon, Forum as ChatInviteIcon,
 } from '@mui/icons-material'
 import { useAccess } from '@/store/accessStore'
 import { useStaffGate } from '@/hooks/useStaffGate'
@@ -24,6 +26,10 @@ import {
 import { callsAdminApi } from '@/api/endpoints/callsAdmin'
 import { boatOrderService } from '@/api/boatOrderService'
 import { serviceApi } from '@/api/endpoints/service'
+import { chatInviteService } from '@/api/chatInviteService'
+import ChatInviteDialog from '@/components/ChatInviteDialog'
+import { canonicalPhone } from '@/utils/phone'
+import type { ChatInviteRecord } from '@/types/chat'
 
 const PAGE = 50
 
@@ -47,6 +53,16 @@ type Row = {
   notes: CallNote[]
 }
 
+// Підказка до чипа запрошення: коли, хто, SMS, чи відкрила людина посилання.
+const inviteTip = (x: ChatInviteRecord) => [
+  `Запрошення в чат ${fmtDT(x.createdAt)}`,
+  x.by?.email ? `запросив ${x.by.email}` : '',
+  x.deliver === 'sms'
+    ? `SMS: ${x.sms?.status === 'sent' ? 'надіслано' : x.sms?.status === 'failed' ? `не надіслано${x.sms.error ? ` (${x.sms.error})` : ''}` : 'надсилається'}`
+    : 'без SMS',
+  x.openedAt ? `клієнт відкрив ${fmtDT(x.openedAt)}` : 'клієнт ще не відкривав посилання',
+].filter(Boolean).join(' · ')
+
 const COLUMNS: { key: CallWorkflowStatus; title: string; hint: string }[] = [
   { key: 'new', title: 'Нові', hint: 'без резюме оператора (в т.ч. пропущені)' },
   { key: 'processed', title: 'Оброблені оператором', hint: 'є резюме — додайте дію і в архів' },
@@ -69,6 +85,7 @@ export default function CallsJournalPage() {
   const [noteDraft, setNoteDraft] = useState<Record<string, string>>({})
   const [busyKey, setBusyKey] = useState('')
   const [noteError, setNoteError] = useState('')
+  const [loadTick, setLoadTick] = useState(0) // кожне «Оновити» — і запрошення перечитуються
 
   // Оператору задачи не грузим (доска оператора их не показывает, правила — только владелец).
   const isOperator = access.isOperator
@@ -81,6 +98,7 @@ export default function CallsJournalPage() {
     ])
     setEvents(e); setResults(r); setTasks(t)
     setLoading(false)
+    setLoadTick((n) => n + 1)
   }, [isOperator])
   // Ждём профиль (роль), чтобы не дёргать недоступные оператору коллекции.
   useEffect(() => { if (access.loaded || access.isOwner) load() }, [load, access.loaded, access.isOwner])
@@ -132,6 +150,23 @@ export default function CallsJournalPage() {
     }
     return out.sort((a, b) => (b.at || '').localeCompare(a.at || '')) // нові зверху
   }, [events, results])
+
+  // Запрошення в чат з помічником за номерами на дошці. Власник бачить усі, оператор — лише свої (firestore.rules).
+  const [invites, setInvites] = useState<ChatInviteRecord[]>([])
+  const [inviteRow, setInviteRow] = useState<Row | null>(null)
+  const phoneKey = useMemo(() => [...new Set(rows.map((r) => canonicalPhone(r.phone)).filter((p) => p.startsWith('+380')))].sort().join(','), [rows])
+  useEffect(() => {
+    if (!phoneKey) { setInvites([]); return }
+    let alive = true
+    chatInviteService.listByPhones(phoneKey.split(','), access.isOwner).then((list) => { if (alive) setInvites(list) })
+    return () => { alive = false }
+  }, [phoneKey, loadTick, access.isOwner])
+  const invitesByPhone = useMemo(() => {
+    const m = new Map<string, ChatInviteRecord[]>()
+    for (const x of invites) if (x.phone) m.set(x.phone, [...(m.get(x.phone) || []), x])
+    for (const arr of m.values()) arr.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    return m
+  }, [invites])
 
   const employees = useMemo(() => {
     const set = new Map<string, string>()
@@ -327,6 +362,24 @@ export default function CallsJournalPage() {
         {!inKanban && r.status === 'archived' && <Chip size="small" variant="outlined" icon={<ArchiveIcon />} label="архів" />}
       </Stack>
 
+      {/* Запрошення в чат з помічником на цей номер (нові зверху) */}
+      {(() => {
+        const inv = invitesByPhone.get(canonicalPhone(r.phone)) || []
+        if (!inv.length) return null
+        return (
+          <Stack direction="row" spacing={0.5} sx={{ mt: 0.75 }} flexWrap="wrap" useFlexGap alignItems="center">
+            {inv.slice(0, 3).map((x) => (
+              <Tooltip key={x.id} title={inviteTip(x)}>
+                <Chip size="small" variant="outlined" icon={<ChatInviteIcon />} sx={{ maxWidth: '100%' }}
+                  color={x.openedAt ? 'success' : x.sms?.status === 'failed' ? 'warning' : 'default'}
+                  label={`Чат: ${x.topic}${x.openedAt ? ' · відкрито' : ''}`} />
+              </Tooltip>
+            ))}
+            {inv.length > 3 && <Typography variant="caption" color="text.secondary">ще {inv.length - 3}</Typography>}
+          </Stack>
+        )
+      })()}
+
       {/* Резюме операторів (з бота) */}
       {r.results.map((x) => (
         <Box key={x.id} sx={{ mt: 1, pl: 1.5, borderLeft: 2, borderColor: x.reviewedAt ? 'success.main' : 'warning.main' }}>
@@ -355,10 +408,11 @@ export default function CallsJournalPage() {
         </Box>
       ))}
 
-      {/* Дія + перемещения */}
+      {/* Дія + перемещения. У вузьких колонках канбану кнопки переносяться під поле (інакше крайні — «в архів» —
+          виходили за картку) */}
       {inKanban && (
-        <Stack direction="row" spacing={1} sx={{ mt: 1.5 }} alignItems="center">
-          <TextField size="small" fullWidth placeholder="Додати дію / коментар…"
+        <Stack direction="row" spacing={1} sx={{ mt: 1.5 }} alignItems="center" flexWrap="wrap" useFlexGap>
+          <TextField size="small" sx={{ flex: '1 1 180px', minWidth: 0 }} placeholder="Додати дію / коментар…"
             value={noteDraft[r.key] || ''}
             onChange={(e) => setNoteDraft((d) => ({ ...d, [r.key]: e.target.value }))} />
           <Tooltip title="Зберегти коментар">
@@ -367,6 +421,12 @@ export default function CallsJournalPage() {
           {r.phone && (
             <Tooltip title="Історія обращень з 1С">
               <span><IconButton size="small" disabled={busyKey === r.key} onClick={() => openHistory(r.phone)}><HistoryIcon fontSize="small" /></IconButton></span>
+            </Tooltip>
+          )}
+          {r.phone && (
+            <Tooltip title="Запросити в чат з помічником (SMS із посиланням)">
+              <span><IconButton size="small" color="primary" aria-label="Запросити в чат" disabled={busyKey === r.key} onClick={() => setInviteRow(r)}>
+                <ChatInviteIcon fontSize="small" /></IconButton></span>
             </Tooltip>
           )}
           {!operatorMode && (
@@ -633,6 +693,17 @@ export default function CallsJournalPage() {
           <Button variant="contained" onClick={createTask} disabled={!newTaskTitle.trim()}>Створити</Button>
         </DialogActions>
       </Dialog>
+
+      {/* «Запросити в чат»: номер і імʼя з картки. Заявку з дзвінка передає лише власник — сервер пускає до заявки
+          тільки її центр (OTHER_CENTER), а в оператора центрів немає; оператор запрошує за номером. */}
+      {inviteRow && (
+        <ChatInviteDialog open source="phone"
+          phone={canonicalPhone(inviteRow.phone)}
+          name={inviteRow.clientName}
+          serviceRequestId={access.isOwner ? inviteRow.event?.serviceRequestId || undefined : undefined}
+          onClose={() => setInviteRow(null)}
+          onCreated={(x) => setInvites((list) => [x, ...list.filter((y) => y.id !== x.id)])} />
+      )}
 
       {/* Історія обращень клієнта з 1С (дзвінки, консультації тощо) — за телефоном */}
       <Dialog open={histOpen} onClose={() => setHistOpen(false)} maxWidth="sm" fullWidth>
