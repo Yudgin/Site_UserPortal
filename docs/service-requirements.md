@@ -1676,3 +1676,15 @@ SMS), запись в журнал `notifications` с `meta.source` (`voice-gate
 (раздел перенесён из §32 — номер занят калькуляциями мастера). Выпуск — через «Портал: главная сессия выпусков» по
 заявке (слово владельца 2026-11-20 «То что ждет выпуска - выпускаем»). Без секрета `voice-gateway-token` маршрут шлюза
 отвечает 503 — безопасно; без задания Cloud Scheduler опрос НП не запускается. Плата за SMS (часть 3) не делалась.
+
+**Выпуск 2026-11-20 по слову владельца («То что ждет выпуска - выпускаем»), заявка сессии «Повторная отправка ссылки на
+заявку и доставка SMS» (d94f618):** сервер `runferry-backend-00116-qid`, ветка `deploy/backend-2026-11-20-resend-link`
+(от `deploy/backend-2026-11-20-env-guard`); следующие ветки сервера резать от неё. Откат: `runferry-backend-00113-duj`;
+хостинг не менялся (`20ef83f9e9e9e3f4`). Страж «МОЖНО» (`--optional-env VOICE_GATEWAY_TOKEN,RESEND_LINK_PER_DAY` — в бою не
+заданы сознательно), кандидат под тегом `rc-mac-resend-link`: `/api/voice-gateway/resend-link` → 503 `NOT_CONFIGURED`,
+`/api/service-requests/x/resend-link` → 403, `/api/np/return-tracking/reconcile` без токена → 403, с `x-admin-token` и
+`?dryRun=1` → 200: `withReturnTtn` 21, `tracked` 7, `received` 2 (даты доставки 23.09 и 23.10, `approx` false), у пяти код НП 3,
+`written` 0, ошибок нет. Переменные — те же 38. Тесты сервера 271/271. **Задания Cloud Scheduler `return-tracking` нет** —
+без него опрос НП не идёт, `isOpen` работает как раньше; задание (`0 8-21/3 * * *` Europe/Kyiv, `x-admin-token`) — по слову
+владельца. Секрет `voice-gateway-token` не создан — создаётся при включении `VG_AI_RESEND_URL` в шлюзе.
+
