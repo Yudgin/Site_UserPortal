@@ -5,7 +5,7 @@
 
 import { buildCatalog, tName, workTurnkeyPrice, formatMoney, resolveActiveSeason, currentMonth, expandKit } from '@/utils/pricing'
 import type { PriceListDoc } from '@/api/pricingService'
-import type { Lang } from '@/types/pricing'
+import type { Lang, Material } from '@/types/pricing'
 import type { KnowledgeArticle } from '@/types/knowledge'
 import type { BehaviorCorrection, BehaviorScope } from '@/types/feedback'
 import type { ComplaintTemplate } from '@/types/complaint'
@@ -61,9 +61,22 @@ export function buildPriceContext(doc: PriceListDoc, lang: Lang = 'uk'): string 
   return lines.join('\n')
 }
 
-// База знаний для консультаций и самопомощи: заголовок, признаки, текст, видео/ссылки.
+// Связанные со статьёй запчасти: название, цена и ссылка на карточку сайта.
+// Только активные позиции с опубликованной карточкой — черновики клиенту не называем.
+// Зеркало relatedPartsLine в server/siteCatalog.js.
+export function relatedPartsLine(skus: string[] | undefined, materials: Material[]): string {
+  if (!skus?.length) return ''
+  const parts = skus
+    .map((s) => materials.find((m) => m.code === s))
+    .filter((m): m is Material => !!m && m.active && m.site?.status === 'published' && !!m.site.url)
+    .map((m) => `${m.name.uk || m.code} [${m.code}] — ${m.price} грн — ${m.site!.url}`)
+  return parts.length ? 'Запчастини (можна дати клієнту посилання): ' + parts.join('; ') : ''
+}
+
+// База знаний для консультаций и самопомощи: заголовок, признаки, текст, видео/ссылки, запчасти.
 // Статьи «для мастеров» (forMasters) в клиентский контекст НЕ попадают.
-export function buildKnowledgeContext(articles: KnowledgeArticle[], lang: Lang = 'uk'): string {
+// materials — материалы прайса: по ним раскрываются связанные запчасти (relatedSkus).
+export function buildKnowledgeContext(articles: KnowledgeArticle[], lang: Lang = 'uk', materials: Material[] = []): string {
   const active = articles.filter((a) => a.active && !a.forMasters)
   if (!active.length) return ''
   const lines: string[] = []
@@ -75,6 +88,8 @@ export function buildKnowledgeContext(articles: KnowledgeArticle[], lang: Lang =
     lines.push(tName(a.body, lang))
     if (a.videos.length) lines.push('Відео: ' + a.videos.map((v) => `${v.title} — ${v.url}`).join('; '))
     if (a.links.length) lines.push('Посилання: ' + a.links.join('; '))
+    const parts = relatedPartsLine(a.relatedSkus, materials)
+    if (parts) lines.push(parts)
     lines.push('')
   }
   return lines.join('\n')

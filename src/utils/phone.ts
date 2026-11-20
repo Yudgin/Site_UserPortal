@@ -24,3 +24,11 @@ export const formatPhone = (raw: string | null | undefined): string => {
   }
   return raw?.trim() || ''
 }
+
+// Канонічний вид для зберігання в заявках/оповіщеннях: +380XXXXXXXXX (так пишуть синк 1С і форма
+// /repair/new). Якщо номер не розпізнано як український — повертаємо обрізаний ввід як є.
+export const canonicalPhone = (raw: string | null | undefined): string => {
+  const d = normalizePhone(raw)
+  if (d.length === 12 && d.startsWith('380')) return '+' + d
+  return (raw || '').trim()
+}

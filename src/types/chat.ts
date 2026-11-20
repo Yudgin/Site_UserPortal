@@ -92,6 +92,50 @@ export const TOPIC_LABELS: Record<ChatTopic, string> = {
   other: 'Інше',
 }
 
+// Беседа-приглашение: сотрудник заранее знает тему («Кришка для Solo V2») и приглашает человека в чат
+// по SMS-ссылке /c/<id> (server/chatInvites.js); первое сообщение ИИ (приветствие с уточняющими вопросами)
+// уже лежит в сессии. Клиентский блок на сессии виден по ссылке и неизменяем (firestore.rules); служебная
+// запись с заметкой для ИИ, статусом SMS и отметкой «відкрито» — chatInvites/{id} (ChatInviteRecord).
+export type ChatInviteMode = 'knowledge' | 'estimate'
+
+export interface ChatInvite {
+  topic: string // тема — видна клиенту (SMS, шапка чата), українською
+  mode: ChatInviteMode // режим помощника по умолчанию
+  createdAt: string
+}
+
+export type ChatInviteSource = 'portal' | 'app' | 'bot' | 'phone' | 'other'
+
+// Служебная запись приглашения (chatInvites/{sessionId}); пишет только сервер, читает персонал
+// (владелец/директор — все, остальные — свои).
+export interface ChatInviteRecord {
+  id: string
+  sessionId: string
+  topic: string
+  topicInput: string | null // как написал сотрудник, если ИИ перевёл тему на украинский
+  details: string | null // заметка для ИИ (клиенту не показывается, но может просочиться в ответы)
+  mode: ChatInviteMode
+  phone: string | null // +380XXXXXXXXX
+  name: string | null
+  serviceRequestId: string | null
+  serviceCenterId: string | null
+  source: ChatInviteSource
+  deliver: 'sms' | 'none'
+  by: { uid: string; email: string | null; role: string }
+  url: string
+  createdAt: string
+  openedAt: string | null // когда человек впервые открыл ссылку
+  opening: { messageId: string; source: 'ai' | 'fallback' } | null
+  sms: {
+    status: 'pending' | 'sent' | 'failed' | 'skipped'
+    text: string | null
+    error: string | null
+    notificationId: string | null
+    attempts: number
+    lastAttemptAt: string | null
+  }
+}
+
 export interface ChatSession {
   id: string
   createdAt: string
@@ -112,6 +156,7 @@ export interface ChatSession {
   authorization?: ServiceAuthorization // согласование объёма работ клиентом
   outcome?: ChatOutcome // чем закончилась переписка (для менеджера)
   estimate?: PreliminaryEstimate // последняя структурированная предварительная оценка от ИИ
+  invite?: ChatInvite // беседа создана приглашением сотрудника (тема известна заранее)
 }
 
 // Чем закончилась переписка по сервису

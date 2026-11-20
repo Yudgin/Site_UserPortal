@@ -23,16 +23,29 @@ export interface WorkCategory {
   order: number
 }
 
-// Материал (расходник), привязывается к работе. Цена фиксированная (без сезона).
+// Карточка товара на сайте (runferry.ua / runferry.de…), связанная с материалом по артикулу.
+// Артикул = Material.code (решение владельца 2026-10-23, runferry-briefs/catalog/site-portal-parts-link-2026-10-23.md).
+// Пишет инструмент агента server/scripts/site-catalog.mjs; здесь — копия для показа.
+export interface MaterialSiteLink {
+  slug: string
+  status: 'draft' | 'published'
+  url?: string // ссылка на карточку — только у опубликованной
+  syncedAt: string
+}
+
+// Материал (расходник или запчасть), привязывается к работе. Цена фиксированная (без сезона).
 export interface Material {
   id: string
-  code: string
+  code: string // артикул: для запчастей с карточкой на сайте — общий ключ с сайтом, не менять
   name: LocalizedText
   unit: LocalizedText // единица измерения: шт, мл, компл.
   price: number // цена за единицу, грн
   // Отметка «продажа нового оборудования»: если этот материал попал в смету,
   // наценка высокого сезона снимается со ВСЕЙ сметы (достаточно одной такой позиции).
   waivesHighSeasonSurcharge?: boolean
+  // Модели, к которым подходит запчасть (строки из BOAT_MODELS: «Solo V2»…); нет — не указано
+  compatibleModels?: string[]
+  site?: MaterialSiteLink // карточка на сайте (если заведена)
   active: boolean
 }
 
@@ -183,6 +196,16 @@ export interface PricingSettings {
 
 export type EstimateLineType = 'labor' | 'material' | 'addon'
 
+// Посилання рядка кошторису на рядок калькуляції майстра (зеркало masterLineRef у server/masterEstimates.js).
+// Лише id і індекс: кошторис і журнал заявки читає весь персонал, а сума майстру і виконавець — тільки в
+// masterEstimates (правила: власник/директор/бухгалтер і сам виконавець).
+export interface MasterLineRef {
+  masterEstimateId: string
+  index: number
+}
+
+export const masterLineRef = (r: MasterLineRef): MasterLineRef => ({ masterEstimateId: String(r.masterEstimateId), index: Number(r.index) })
+
 // Одна строка детальной сметы
 export interface EstimateLine {
   type: EstimateLineType
@@ -196,6 +219,12 @@ export interface EstimateLine {
   lineTotal: number
   // Сума рядка ДО знижки кошторису (тільки для показу; чек/оплата — за lineTotal)
   grossLineTotal?: number // итог строки, грн (с учётом сезона для labor)
+  // Рядок ПОЗА прайсом (додаткова витрата: доставка, запчастина…; refId 'extra:<id>'). Редактор
+  // факту НЕ перебудовує такі рядки з каталогу, а зберігає як є (див. appendExtraLines).
+  extra?: boolean
+  // Рядок із калькуляції МАЙСТРА (сервер masterEstimates): за ним сервер відхиляє повторне дописування
+  // тієї ж калькуляції у факт. Редактор зберігає поле як є при засіві та збереженні.
+  fromMaster?: MasterLineRef
   sourceKitId?: string // из какого набора пришла работа (для группировки)
   fromWorkId?: string // к какой работе относится материал/доп.
   // Мульти-жалобы:

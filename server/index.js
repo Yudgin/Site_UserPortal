@@ -9,6 +9,9 @@ import { getFirestore } from 'firebase-admin/firestore'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { registerTelegramBot } from './telegram.js'
+import { createMessengerCore } from './messengerCore.js'
+import { registerChatInvites } from './chatInvites.js'
+import { inviteSystemBlock, withInviteLead } from './chatInvitePrompt.js'
 import { registerViberBot } from './viber.js'
 import { registerManagerReply } from './managerReply.js'
 import { registerServiceRequests } from './serviceRequests.js'
@@ -19,13 +22,22 @@ import { registerNpTtn } from './novaPoshtaTtn.js'
 import { registerTelegramLinks } from './telegramLinks.js'
 import { registerOperatorBot } from './operatorBot.js'
 import { registerCalls } from './calls.js'
+import { registerFmcCalls } from './fmcCalls.js'
+import { registerBinotelCalls } from './binotelCalls.js'
+import { registerBinotelWebhook } from './binotelWebhook.js'
+import { registerIncomingRefresh } from './incomingRefresh.js'
 import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
+import { registerParcels } from './parcels.js'
+import { registerVoiceTranscribe } from './voiceTranscribe.js'
+import { registerEstimates } from './estimates.js'
+import { registerMasterEstimates } from './masterEstimates.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
 import { registerUserProfiles } from './userProfiles.js'
 import { verifyFirebaseAdmin, verifyFirebaseStaff } from './adminAuth.js'
 import { rateLimit, combine } from './rateLimit.js'
+import { resolveAiMode, expandSystem, expandUserContent, MODEL_PRICES } from './aiModes.js'
 
 dotenv.config()
 
@@ -62,7 +74,10 @@ app.use(cors({
 app.use((_req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); next() })
 // Операторский бот под /operator-bot разбирает тело САМ (лимит 1mb + свой JSON-ответ на битый JSON,
 // как в standalone) — глобальные парсеры его пропускают, иначе его express.json стал бы no-op.
-const notOperatorBot = (mw) => (req, res, next) => (req.path.startsWith('/operator-bot') ? next() : mw(req, res, next))
+// Вебхуки Binotel (/api/binotel/*) тоже читают сырое тело сами: журнал хранит байты как прислала АТС,
+// а вложенные form-поля разбирает свой парсер (binotelWebhook.js).
+const selfParsedBody = (p) => p.startsWith('/operator-bot') || p.toLowerCase().startsWith('/api/binotel/') // маршрути Express нечутливі до регістру
+const notOperatorBot = (mw) => (req, res, next) => (selfParsedBody(req.path) ? next() : mw(req, res, next))
 // rawBody сохраняем для проверки подписи Viber-/monobank-вебхуков (HMAC-SHA256 сырого тела).
 app.use(notOperatorBot(express.json({ verify: (req, _res, buf) => { req.rawBody = buf } })))
 // LiqPay шлёт вебхук form-urlencoded (поля data + signature)
@@ -129,6 +144,19 @@ const smsVerifyLimiter = rateLimit({ name: 'sms-verify', windowMs: 10 * 60 * 100
 const aiPublicLimiter = rateLimit({ name: 'ai', windowMs: 60 * 1000, max: 20 })
 // Прокси к внешним сервисам (Nova Poshta, 1С-settings): 40/мин на IP (защита квоты/абьюза).
 const proxyLimiter = rateLimit({ name: 'proxy', windowMs: 60 * 1000, max: 40 })
+// improve-text лишається ПУБЛІЧНИМ (анонімні форми /questionnaire, /repair/new), але при валідному
+// токені співробітника ліміт ключиться по uid — інакше майстри за одним Wi-Fi мастерської ділять
+// 20/хв по IP з клієнтськими чатами. Фронт і мобільний додаток уже шлють Bearer.
+const aiStaffLimiter = rateLimit({ name: 'ai-staff', windowMs: 60 * 1000, max: 30, keyFn: (req) => req.staff.uid })
+const aiPublicOrStaffLimiter = async (req, res, next) => {
+  try {
+    if (/^Bearer /.test(req.get('authorization') || '')) {
+      const staff = await verifyFirebaseStaff(req)
+      if (staff) { req.staff = staff; return aiStaffLimiter(req, res, next) }
+    }
+  } catch { /* невалідний токен → як анонім */ }
+  return aiPublicLimiter(req, res, next)
+}
 
 // Отправить произвольный SMS через TurboSMS. Возвращает { ok, messageId?, error? }.
 // В DEV (без токена) — логируем и считаем успехом, чтобы поток не падал.
@@ -551,20 +579,22 @@ if (!ANTHROPIC_API_KEY) {
 const AI_MODEL = 'claude-opus-4-8'
 const AI_PRICE = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }
 
-// Собрать сведения об использовании токенов и стоимости из ответа Claude
-const buildUsage = (usage = {}) => {
+// Собрать сведения об использовании токенов и стоимости из ответа Claude.
+// model — фактическая модель ответа (режим expand идёт на другой модели, см. aiModes.js).
+const buildUsage = (usage = {}, model = AI_MODEL) => {
+  const price = MODEL_PRICES[model] || AI_PRICE
   const inputTokens = usage.input_tokens || 0
   const outputTokens = usage.output_tokens || 0
   const cacheRead = usage.cache_read_input_tokens || 0
   const cacheWrite = usage.cache_creation_input_tokens || 0
   const costUsd =
-    (inputTokens * AI_PRICE.input +
-      outputTokens * AI_PRICE.output +
-      cacheRead * AI_PRICE.cacheRead +
-      cacheWrite * AI_PRICE.cacheWrite) /
+    (inputTokens * price.input +
+      outputTokens * price.output +
+      cacheRead * price.cacheRead +
+      cacheWrite * price.cacheWrite) /
     1e6
   return {
-    model: AI_MODEL,
+    model,
     inputTokens,
     outputTokens,
     cacheRead,
@@ -593,7 +623,7 @@ const AI_CONTEXTS = {
 }
 
 // Публичный: используется анонимными клиентами на /questionnaire и /repair/new (не гейтить!).
-app.post('/api/ai/improve-text', aiPublicLimiter, async (req, res) => {
+app.post('/api/ai/improve-text', aiPublicOrStaffLimiter, async (req, res) => {
   try {
     const { currentText = '', userPrompt = '', history = [], context = 'generic', lang = 'uk' } = req.body
     // Доп. справочный контекст (напр. скарга клієнта + переписка) — ИИ опирается, но не копирует дословно.
@@ -605,10 +635,18 @@ app.post('/api/ai/improve-text', aiPublicLimiter, async (req, res) => {
         error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано (ANTHROPIC_API_KEY відсутній)' },
       })
     }
-    if (!userPrompt || !String(userPrompt).trim()) {
+    // mode: 'expand' — «розгорнути для клієнта» (короткі нотатки → повний текст), власний промпт і модель.
+    const mode = resolveAiMode(req.body)
+    if (mode.name !== 'expand' && (!userPrompt || !String(userPrompt).trim())) {
       return res.status(400).json({
         success: false,
         error: { code: 'MISSING_PROMPT', message: 'Опишіть, що потрібно змінити' },
+      })
+    }
+    if (mode.name === 'expand' && !String(currentText).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_TEXT', message: 'Спочатку надиктуйте або напишіть нотатки діагностики' },
       })
     }
 
@@ -618,7 +656,7 @@ app.post('/api/ai/improve-text', aiPublicLimiter, async (req, res) => {
       .map((h, i) => `${i + 1}. Запит: ${h.prompt}${h.resultPreview ? `\n   Результат: ${h.resultPreview}` : ''}`)
       .join('\n')
 
-    const system = [
+    const system = mode.name === 'expand' ? expandSystem(contextNote) : [
       'Ти — редактор ділових текстів для українського сервісного центру.',
       contextNote,
       'Пиши завжди УКРАЇНСЬКОЮ мовою, незалежно від мови запиту користувача (навіть якщо запит російською). ' +
@@ -628,20 +666,27 @@ app.post('/api/ai/improve-text', aiPublicLimiter, async (req, res) => {
     ].join('\n')
     void lang // мова відповіді завжди українська; параметр lang — на майбутнє (мультимовність)
 
-    const userContent = [
+    const userContent = mode.name === 'expand' ? expandUserContent({ currentText, userPrompt, reference }) : [
       historyText ? `Історія попередніх правок (для наступності):\n${historyText}\n` : '',
       reference ? `Довідкові матеріали (скарга клієнта та переписка) — спирайся на них, але НЕ копіюй дослівно:\n"""\n${reference}\n"""\n` : '',
       `Поточний текст:\n"""\n${currentText}\n"""\n`,
       `Що потрібно змінити:\n${userPrompt}`,
     ].filter(Boolean).join('\n')
 
-    const message = await anthropic.messages.create({
-      model: 'claude-opus-4-8',
-      max_tokens: 4096,
-      output_config: { effort: 'low' },
+    const request = {
+      model: mode.model,
+      max_tokens: mode.maxTokens,
+      output_config: { effort: mode.effort },
       system,
       messages: [{ role: 'user', content: userContent }],
-    })
+    }
+    let message = await anthropic.messages.create(request)
+    // Класифікатори новішої моделі можуть відмовити (stop_reason refusal) — тоді та сама задача на
+    // звичній моделі редактора, щоб майстер не лишився без тексту.
+    if (message.stop_reason === 'refusal' && mode.model !== AI_MODEL) {
+      console.warn('AI improve-text: refusal on', mode.model, '→ retry on', AI_MODEL)
+      message = await anthropic.messages.create({ ...request, model: AI_MODEL, max_tokens: 4096, output_config: { effort: 'low' } })
+    }
 
     const text = (message.content || [])
       .filter((b) => b.type === 'text')
@@ -649,7 +694,7 @@ app.post('/api/ai/improve-text', aiPublicLimiter, async (req, res) => {
       .join('')
       .trim()
 
-    res.json({ success: true, data: { text, usage: buildUsage(message.usage) } })
+    res.json({ success: true, data: { text, usage: buildUsage(message.usage, message.model || mode.model), mode: mode.name } })
   } catch (error) {
     console.error('AI improve-text error:', error?.message || error)
     res.status(500).json({
@@ -658,6 +703,11 @@ app.post('/api/ai/improve-text', aiPublicLimiter, async (req, res) => {
     })
   }
 })
+
+// Приглашения в чат (server/chatInvites.js): регистрируются ниже, вместе с остальными модулями; здесь —
+// чтобы чаты оценки/консультации по sessionId подмешивали тему приглашения (из служебной записи, не от клиента).
+let chatInviteActions = null
+const inviteForSession = async (sessionId) => (sessionId && chatInviteActions ? chatInviteActions.inviteFor(String(sessionId)) : null)
 
 // Системный промпт диалогового консультанта (оценка стоимости с эскалацией)
 const CHAT_SYSTEM = [
@@ -684,7 +734,7 @@ const CHAT_SYSTEM = [
 
 app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
   try {
-    const { messages = [], priceContext = '', knowledgeContext = '', corrections = [] } = req.body
+    const { messages = [], priceContext = '', knowledgeContext = '', corrections = [], sessionId = null } = req.body
 
     if (!anthropic) {
       return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
@@ -701,6 +751,9 @@ app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
         .slice(-40)
         .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text).slice(0, 8000) }))
     )
+    // Беседа-приглашение начинается с приветствия ИИ — перед ним служебная реплика «человек открыл приглашение».
+    const invite = await inviteForSession(sessionId)
+    if (invite) chatMessages = withInviteLead(chatMessages, invite)
     // После среза окно могло начаться с ответа ассистента — убираем ведущие assistant (Anthropic
     // требует, чтобы диалог начинался с user), иначе длинные диалоги ловили бы 400.
     while (chatMessages.length && chatMessages[0].role !== 'user') chatMessages = chatMessages.slice(1)
@@ -715,6 +768,7 @@ app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
       ? `\n\nСАМОДОПОМОГА (безкоштовні рішення з бази знань). ЯКЩО проблема клієнта збігається з якимось матеріалом — СПЕРШУ доброзичливо запропонуй це безкоштовне рішення (стисло, по кроках), і лише потім платний ремонт:\n${knowledgeContext}`
       : ''
     const system = CHAT_SYSTEM + corrText + (priceContext ? `\n\nПРАЙС (лише ці позиції можна використовувати для оцінки):\n${priceContext}` : '') + selfHelp
+      + (invite ? inviteSystemBlock(invite) : '')
 
     const message = await anthropic.messages.create({
       model: AI_MODEL,
@@ -891,7 +945,7 @@ const KNOWLEDGE_SYSTEM = [
 
 app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
   try {
-    const { messages = [], knowledgeContext = '', corrections = [] } = req.body
+    const { messages = [], knowledgeContext = '', corrections = [], sessionId = null } = req.body
 
     if (!anthropic) {
       return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
@@ -907,6 +961,8 @@ app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
         .slice(-40)
         .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text).slice(0, 8000) }))
     )
+    const invite = await inviteForSession(sessionId)
+    if (invite) chatMessages = withInviteLead(chatMessages, invite)
     while (chatMessages.length && chatMessages[0].role !== 'user') chatMessages = chatMessages.slice(1)
     if (chatMessages.length === 0) {
       return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
@@ -917,7 +973,7 @@ app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
       ? `\n\nДОДАТКОВІ ПРАВИЛА (корекції поведінки, дотримуйся їх):\n${corrections.map((c, i) => `${i + 1}. ${c}`).join('\n')}`
       : ''
     const knowledgeText = knowledgeContext ? `\n\nБАЗА ЗНАНЬ (використовуй лише ці матеріали):\n${knowledgeContext}` : ''
-    const system = KNOWLEDGE_SYSTEM + knowledgeText + correctionText
+    const system = KNOWLEDGE_SYSTEM + knowledgeText + correctionText + (invite ? inviteSystemBlock(invite) : '')
 
     const message = await anthropic.messages.create({
       model: AI_MODEL,
@@ -1174,7 +1230,7 @@ const MESSENGER_SYSTEM = MESSENGER_PREAMBLE + '\n' + CHAT_SYSTEM
 
 // Канальные отправители (заполняются транспортами) — для доставки ответа менеджера клиенту.
 const messengerSenders = {}
-const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM: MESSENGER_SYSTEM, mergeConsecutiveMessages, buildUsage, senders: messengerSenders }
+const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM: MESSENGER_SYSTEM, mergeConsecutiveMessages, buildUsage, senders: messengerSenders, inviteFor: inviteForSession }
 registerTelegramBot(app, messengerDeps)
 registerViberBot(app, messengerDeps)
 // Ответ менеджера из веб-инбокса → доставка в канал + возврат бота при упоминании.
@@ -1186,25 +1242,59 @@ registerClientProfiles(app, { adminDb })
 // Саморегистрация сотрудника при входе (identity; роль назначает владелец).
 registerUserProfiles(app, { adminDb })
 // Журнал информирования клиента: авто-выбор канала (мессенджер в окне / иначе SMS).
-registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUrl: SITE_URL })
+const { notifyClient } = registerNotifications(app, { adminDb, senders: messengerSenders, sendSms, siteUrl: SITE_URL })
+// Приглашение в чат с ИИ по теме: POST /api/chat-invites (персонал) — тема по-украински, первое сообщение ИИ,
+// ссылка ${SITE_URL}/c/<id> и SMS; POST /api/chat-invites/open — отметка «відкрито». Из бота — chatInviteActions.createInvite.
+chatInviteActions = registerChatInvites(app, {
+  // CHAT_INVITE_SITE_URL — сайт для ссылок в SMS-приглашениях, если не основной (тестовая копия сайта при проверке).
+  adminDb, notifyClient, siteUrl: (process.env.CHAT_INVITE_SITE_URL || SITE_URL).replace(/\/$/, ''), core: createMessengerCore(messengerDeps),
+  anthropic, AI_MODEL, KNOWLEDGE_SYSTEM, buildUsage,
+}).actions
+// Фактичний кошторис із застосунку сервісу: створити за обраним варіантом, витрата поза прайсом,
+// вилучити витрату (ядро розрахунків — estimateEngine.js, спільне з Telegram-ботом співробітників).
+registerEstimates(app, { adminDb, notifyClient })
+// Роботи по заявці і калькуляції майстра (виконавці, партнерські центри): «на основі» в обидва боки.
+registerMasterEstimates(app, { adminDb, notifyClient })
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 registerPayments(app, { adminDb })
 // Управление ФОПами (владелец): мета в Firestore, секреты write-only (fopSecrets, backend-only).
 registerFopsAdmin(app, { adminDb, refreshFops })
-// Создание ТТН Новой Почты (InternetDocument.save) по шаблону — сценарий «приём кораблика».
-registerNpTtn(app, { adminDb })
+// Создание ТТН Новой Почты (InternetDocument.save) по шаблону: власник — будь-який шаблон; директор із
+// застосунку — шаблон «з ремонту» свого центру (+ превʼю /api/np/ttn/preview, за бажанням notifyClient).
+registerNpTtn(app, { adminDb, notifyClient })
 // Deep-link Telegram: генерация ссылки t.me/<бот>?start=<токен> из заявки (владелец).
 registerTelegramLinks(app, { adminDb })
 // Операторский бот (поглощение TelegramBot): спит без TELEGRAM_OPERATOR_BOT_TOKEN (фазы Б1-Б4).
 registerOperatorBot(app, { adminDb })
 // Журнал дзвінків: зеркальные события/результаты от операторского бота (X-Calls-Token).
 registerCalls(app, { adminDb })
+// Дзвінки з застосунку сервісу через АТС: основна — Binotel (BINOTEL_KEY/SECRET; запис → розшифровка →
+// резюме до заявки), запасна — Київстар FMC (KYIVSTAR_FMC_*). Обидві відповідають на той самий
+// POST /api/calls/originate, тому реєструємо лише одну: Binotel, якщо налаштована.
+if (process.env.BINOTEL_KEY && process.env.BINOTEL_SECRET) {
+  registerBinotelCalls(app, { adminDb, anthropic })
+} else {
+  registerFmcCalls(app, { adminDb })
+}
+// Вебхуки АТС Binotel: POST /api/binotel/call-settings (apiCallSettings — сейчас через 1С-прокси, потом
+// напрямую). Ответ {customerData, routeData} по нашей базе; маршрутизацию переключает Firestore
+// system/binotelRouting. Токен BINOTEL_WEBHOOK_TOKEN (Secret Manager binotel-webhook-token).
+registerBinotelWebhook(app, { adminDb, siteUrl: SITE_URL })
+// Статус вхідної посилки (клієнт → ми) для заявок, де кораблик ще не в нас: POST /api/service-requests/refresh-incoming
+// (x-admin-token, Cloud Scheduler раз на добу) — для фази «чекаємо кораблик» правила відкритої заявки.
+registerIncomingRefresh(app, { adminDb, npRequest })
 // Синхронизация картотеки ремонтов из 1С (admin/scheduler): upsert в serviceRequests.
 registerOnecSync(app, { adminDb })
+// Голосова надиктовка з застосунку сервісу: POST /api/ai/transcribe (staff, аудіо → текст; рушій у stt.js,
+// ключ ELEVENLABS_API_KEY у Secret Manager). Далі текст іде в існуючий /api/ai/improve-text без змін.
+registerVoiceTranscribe(app, { adminDb })
 
 // Справочники НП по ключу конкретного ФОП (отправители/контакты + добавление) — owner-gated.
 registerNpAccount(app)
+// Журнал відправлень «Посилки» (§36): НП по всіх ФОП і особистих акаунтах, ручні записи, передачі водієві.
+// Синхронізація — POST /api/parcels/sync (x-admin-token, Cloud Scheduler) або кнопка власника.
+registerParcels(app, { adminDb })
 // Подгружаем ФОПы из Firestore на старте (перекрывают ENV-сид, если заданы).
 refreshFops(adminDb).catch((e) => console.error('initial refreshFops:', e?.message || e))
 // Периодический рефреш — чтобы ДРУГИЕ инстансы Cloud Run подхватили изменения ФОПов (кэш в памяти

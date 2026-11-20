@@ -4,6 +4,8 @@
 // ответить тем же CHAT_SYSTEM-ИИ, привязать профиль по телефону, эскалировать в инбокс.
 // Персистенция — через firebase-admin (доверенный backend, минуя клиентские правила).
 import { FieldValue } from 'firebase-admin/firestore'
+import { inviteSystemBlock, withInviteLead } from './chatInvitePrompt.js'
+import { relatedPartsLine } from './siteCatalog.js'
 
 const round2 = (n) => Math.round(n * 100) / 100
 export const nowIso = () => new Date().toISOString()
@@ -80,9 +82,10 @@ export const accumulateUsage = (prev, u) => {
 // Срок ответа менеджера при эскалации — приблизительно 48 часов (MVP)
 export const escalationDue = () => new Date(Date.now() + 48 * 3600 * 1000).toISOString()
 
-// Фабрика ядра. deps: { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM, mergeConsecutiveMessages, buildUsage }
+// Фабрика ядра. deps: { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM, mergeConsecutiveMessages, buildUsage,
+//   inviteFor? (sessionId → служебная запись приглашения или null, server/chatInvites.js) }
 export function createMessengerCore(deps) {
-  const { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM, mergeConsecutiveMessages, buildUsage } = deps
+  const { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM, mergeConsecutiveMessages, buildUsage, inviteFor } = deps
 
   // Компактный прайс-контекст для ИИ из priceList/current
   const buildPriceContext = async () => {
@@ -119,6 +122,12 @@ export function createMessengerCore(deps) {
       const snap = await adminDb.collection('knowledgeArticles').limit(300).get()
       const arts = snap.docs.map((d) => d.data()).filter((a) => a.active && !a.forMasters)
       if (!arts.length) return ''
+      // Связанные запчасти (relatedSkus) — из прайса: название, цена, ссылка на карточку сайта
+      let materials = []
+      if (arts.some((a) => Array.isArray(a.relatedSkus) && a.relatedSkus.length)) {
+        const pl = await adminDb.doc('priceList/current').get()
+        materials = (pl.exists && pl.data().materials) || []
+      }
       const lines = []
       for (const a of arts) {
         const flags = [a.forConsultation ? 'консультація' : '', a.forSelfService ? 'самодопомога' : ''].filter(Boolean).join('/')
@@ -126,6 +135,8 @@ export function createMessengerCore(deps) {
         lines.push((a.body && a.body.uk) || '')
         if (Array.isArray(a.videos) && a.videos.length) lines.push('Відео: ' + a.videos.map((v) => `${v.title} — ${v.url}`).join('; '))
         if (Array.isArray(a.links) && a.links.length) lines.push('Посилання: ' + a.links.join('; '))
+        const parts = relatedPartsLine(a.relatedSkus, materials)
+        if (parts) lines.push(parts)
         lines.push('')
       }
       return lines.join('\n')
@@ -234,7 +245,9 @@ export function createMessengerCore(deps) {
   // Ответ ИИ по истории сессии (тот же CHAT_SYSTEM, что и в веб-чате).
   // opts.managerDirective — указание менеджера боту (Telegram Business: менеджер позвал бота).
   const aiReply = async (session, opts = {}) => {
-    const history = mergeConsecutiveMessages(
+    // Беседа-приглашение (веб-чат по SMS-ссылке): тема — из служебной записи; история начинается с приветствия ИИ.
+    const invite = session.invite && typeof inviteFor === 'function' ? await inviteFor(session.id) : null
+    let history = mergeConsecutiveMessages(
       session.messages
         .filter((m) => !m.internal && m.text)
         .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text) }))
@@ -242,6 +255,7 @@ export function createMessengerCore(deps) {
     // Модель должна отвечать на последнее сообщение КЛИЕНТА → убираем хвостовые assistant-реплики
     // (в т.ч. ручную реплику менеджера, которой он позвал бота — её смысл идёт через директиву).
     while (history.length && history[history.length - 1].role === 'assistant') history.pop()
+    if (invite) history = withInviteLead(history, invite)
     if (!history.length || history[0].role !== 'user') {
       return { reply: 'Опишіть, будь ласка, вашу проблему з корабликом.', needsManager: false, intent: 'service' }
     }
@@ -256,7 +270,8 @@ export function createMessengerCore(deps) {
       CHAT_SYSTEM +
       (priceContext ? `\n\nПРАЙС (лише ці позиції можна використовувати для оцінки):\n${priceContext}` : '') +
       selfHelp +
-      directive
+      directive +
+      (invite ? inviteSystemBlock(invite) : '')
     try {
       const msg = await anthropic.messages.create({
         model: AI_MODEL,
@@ -300,7 +315,7 @@ export function createMessengerCore(deps) {
     }
   }
 
-  return { buildPriceContext, newSession, findSession, saveSession, appendMessages, upsertProfile, applyEscalation, aiReply, captureContactPhone, phoneAskLine }
+  return { buildPriceContext, buildKnowledgeContext, newSession, findSession, saveSession, appendMessages, upsertProfile, applyEscalation, aiReply, captureContactPhone, phoneAskLine }
 }
 
 export default createMessengerCore

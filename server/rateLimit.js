@@ -2,7 +2,7 @@
 // ВАЖНО: стор в памяти процесса — на Cloud Run с несколькими инстансами защита делится по
 // инстансам (каждый считает свои запросы), но абьюз всё равно резко ограничивается. Для строгого
 // распределённого лимита нужен общий стор (Redis/Firestore) — оставлено на потом.
-const buckets = new Map() // key -> number[] (таймстемпы попаданий)
+const buckets = new Map() // key -> { windowMs, hits: number[] } (таймстемпы попаданий + окно лимитера)
 
 const clientIp = (req) => {
   const fwd = req.headers['x-forwarded-for']
@@ -13,8 +13,10 @@ const clientIp = (req) => {
 // Проверка окна БЕЗ коммита: возвращает { ok, commit() }. commit() фиксирует попадание.
 const check = (key, windowMs, max) => {
   const now = Date.now()
-  let arr = buckets.get(key)
-  if (!arr) { arr = []; buckets.set(key, arr) }
+  let b = buckets.get(key)
+  if (!b) { b = { windowMs, hits: [] }; buckets.set(key, b) }
+  b.windowMs = windowMs
+  const arr = b.hits
   while (arr.length && now - arr[0] > windowMs) arr.shift()
   return { ok: arr.length < max, commit: () => arr.push(now) }
 }
@@ -56,12 +58,14 @@ export const combine = (...mws) => (req, res, next) => {
 
 export { clientIp }
 
-// Периодическая очистка пустых/старых ключей, чтобы Map не рос бесконечно.
+// Периодическая очистка пустых/старых ключей, чтобы Map не рос бесконечно. Порог — окно САМОГО
+// лимитера (раньше жёсткие 60 минут срезали суточные окна: дневной лимит работал как часовой).
 const CLEAN_EVERY_MS = 10 * 60 * 1000
 setInterval(() => {
   const now = Date.now()
-  for (const [key, arr] of buckets) {
-    while (arr.length && now - arr[0] > 60 * 60 * 1000) arr.shift()
+  for (const [key, b] of buckets) {
+    const arr = b.hits
+    while (arr.length && now - arr[0] > b.windowMs) arr.shift()
     if (!arr.length) buckets.delete(key)
   }
 }, CLEAN_EVERY_MS).unref?.()

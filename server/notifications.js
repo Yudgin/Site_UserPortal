@@ -7,8 +7,30 @@
 //   • Нет мессенджер-сессии (заявка с веб-формы) или окно закрыто → SMS (TurboSMS).
 // Пороги настраиваются через env (в часах): NOTIFY_VIBER_WINDOW_H (24), NOTIFY_TELEGRAM_WINDOW_H (0=без лимита).
 import { verifyFirebaseStaff } from './adminAuth.js'
+import { rateLimit, combine } from './rateLimit.js'
 
 const nowIso = () => new Date().toISOString()
+
+// Довільне повідомлення (custom) — платний SMS-шлюз: обмеження довжини (один SMS-сегмент кирилицею
+// ≈ 70 символів, тому 300 = до 5 сегментів), ліміт на співробітника (ключ — uid, майстри можуть
+// сидіти за одним NAT) і ідемпотентність за clientKey (подвійний тап/ретрай ≠ другий SMS).
+const CUSTOM_MAX_LEN = Number(process.env.NOTIFY_CUSTOM_MAX_LEN || 300)
+const CLIENT_KEY_RE = /^[A-Za-z0-9_-]{8,64}$/
+const customLimiter = combine(
+  rateLimit({ name: 'notify-custom-min', windowMs: 60 * 1000, max: Number(process.env.NOTIFY_CUSTOM_PER_MIN || 10),
+    keyFn: (req) => req.staff.uid, message: 'Забагато повідомлень — зачекайте хвилину' }),
+  rateLimit({ name: 'notify-custom-day', windowMs: 24 * 3600 * 1000, max: Number(process.env.NOTIFY_CUSTOM_PER_DAY || 60),
+    keyFn: (req) => req.staff.uid, message: 'Денний ліміт повідомлень клієнтам вичерпано' }),
+)
+const NP_TRACK_URL = 'https://novaposhta.ua/tracking/?cargo_number='
+// Події, які приймає /api/notify. Невідоме імʼя раніше проходило як «вільний текст» повз cap/ліміт.
+const ALLOWED_EVENTS = ['offer', 'actual', 'ttn', 'custom']
+// Події з готовим текстом, ідемпотентні лише за clientKey (а не «одна на заявку»): custom — текст майстра,
+// chat-invite — SMS-запрошення в чат (server/chatInvites.js, лише внутрішній виклик, не через /api/notify).
+const KEYED_EVENTS = ['custom', 'chat-invite']
+// ТТН Нової Пошти — 14 цифр; приймаємо 8–20 цифр після очищення (інші формати перевізників).
+const normTtn = (v) => { const d = String(v ?? '').replace(/\D/g, ''); return d && d !== '0' ? d : '' }
+const TTN_RE = /^\d{8,20}$/
 
 const CHANNEL_WINDOW_MS = {
   viber: Number(process.env.NOTIFY_VIBER_WINDOW_H || 24) * 3600 * 1000,
@@ -67,7 +89,9 @@ export function registerNotifications(app, deps) {
 
   // Основной вызов: отправить оповещение клиенту. Авто-выбор канала (мессенджер → иначе SMS).
   // Идемпотентно по (serviceRequestId, event) для авто-событий (offer/actual/ttn) — не задваивает.
-  async function notifyClient({ serviceRequestId = null, sessionId = null, phone = null, text = null, event = 'custom', link = null, ttn = null, by = null }) {
+  // journal — что записать в журнал вместо фактических текста/сессии (chat-invite: ссылка на чат — это доступ к нему,
+  // а журнал читает весь персонал; клиенту уходит полный текст).
+  async function notifyClient({ serviceRequestId = null, sessionId = null, phone = null, text = null, event = 'custom', link = null, ttn = null, by = null, clientKey = null, journal = null }) {
     // Подтягиваем заявку (получатель, ссылки).
     let req = null
     if (serviceRequestId) {
@@ -85,8 +109,12 @@ export function registerNotifications(app, deps) {
       if (event === 'offer' && req.offerId) resolvedLink = `${siteUrl}/offer/${req.offerId}`
       if (event === 'actual' && req.actualEstimateId) resolvedLink = `${siteUrl}/estimate/${req.actualEstimateId}`
     }
-    const resolvedTtn = ttn || req?.waybillNumber || null
-    const body = event === 'custom' ? (text || '') : template(event, { link: resolvedLink, ttn: resolvedTtn, text })
+    // ТТН відправлення клієнту: явний номер → returnTtn («→ клієнту»). waybillNumber — ТТН «до нас»,
+    // її клієнту НЕ шлемо (легасі-записи переносить бекфіл). Посилання на трекінг НП — з цифр номера.
+    const resolvedTtn = event === 'ttn' ? (normTtn(ttn) || normTtn(req?.returnTtn) || null) : null
+    if (event === 'ttn' && !resolvedTtn) throw Object.assign(new Error('Вкажіть ТТН відправлення клієнту'), { code: 'NO_TTN', status: 400 })
+    if (!resolvedLink && event === 'ttn' && resolvedTtn) resolvedLink = `${NP_TRACK_URL}${resolvedTtn}`
+    const body = KEYED_EVENTS.includes(event) ? (text || '') : template(event, { link: resolvedLink, ttn: resolvedTtn, text })
     if (!body || !body.trim()) throw new Error('empty notification body')
 
     // Идемпотентность авто-событий (offer/actual/ttn): детерминированный id + ТРАНЗАКЦИОННЫЙ захват,
@@ -94,10 +122,17 @@ export function registerNotifications(app, deps) {
     // (другой вызов сейчас шлёт) тоже пропускаем; иначе резервируем и продолжаем отправку.
     // ВАЖНО: ttn идемпотентен ПО НОМЕРУ накладной — исправленный/новый ТТН уходит клиенту, а
     // повторная отправка того же номера не задваивается (offer/actual — по одному разу на заявку).
+    // custom — ідемпотентний за clientKey (ключ генерує клієнт на кожне нове повідомлення; формат
+    // валідовано вище), без ключа — як раніше, окремий документ на кожну відправку.
     const ttnSlug = String(resolvedTtn || 'none').replace(/[^\w-]+/g, '').slice(0, 40)
-    const autoId = serviceRequestId && event !== 'custom'
-      ? (event === 'ttn' ? `ntf-${serviceRequestId}-ttn-${ttnSlug}` : `ntf-${serviceRequestId}-${event}`)
-      : null
+    // chat-invite ідемпотентний за ключем (= id запрошення) і без заявки: запрошення зазвичай ще без заявки.
+    const keyed = KEYED_EVENTS.includes(event)
+    const customKey = keyed && clientKey && CLIENT_KEY_RE.test(String(clientKey)) ? String(clientKey) : null
+    const autoId = event === 'chat-invite' && customKey
+      ? `ntf-${serviceRequestId || 'na'}-chat-invite-${customKey}`
+      : serviceRequestId && (!keyed || customKey)
+        ? (event === 'ttn' ? `ntf-${serviceRequestId}-ttn-${ttnSlug}` : keyed ? `ntf-${serviceRequestId}-${event}-${customKey}` : `ntf-${serviceRequestId}-${event}`)
+        : null
     const ref = autoId ? adminDb.collection('notifications').doc(autoId) : adminDb.collection('notifications').doc()
     if (autoId) {
       const claim = await adminDb.runTransaction(async (tx) => {
@@ -155,14 +190,15 @@ export function registerNotifications(app, deps) {
       id: ref.id,
       createdAt: nowIso(),
       serviceRequestId: serviceRequestId || null,
-      sessionId: sid,
+      serviceCenterId: req?.serviceCenterId || null, // розріз по центрах для стрічки «Увага»
+      sessionId: journal && journal.sessionId !== undefined ? journal.sessionId : sid,
       phone: toPhone || null,
       event,
       channel,
       via,
       status: ok ? 'sent' : 'failed',
       error: error || null,
-      text: body,
+      text: journal && typeof journal.text === 'string' ? journal.text : body,
       by: by || null,
     }
     await ref.set(rec)
@@ -178,8 +214,14 @@ export function registerNotifications(app, deps) {
       return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника, директора або майстра' } })
     }
     try {
-      const { serviceRequestId, sessionId, text, event, link, ttn } = req.body || {}
-      let { phone } = req.body || {}
+      const { serviceRequestId, text, event, clientKey } = req.body || {}
+      let { phone, sessionId, link, ttn } = req.body || {}
+      const ev = event || 'custom'
+      if (!ALLOWED_EVENTS.includes(ev)) return res.status(400).json({ success: false, error: { code: 'BAD_EVENT', message: 'Невідома подія оповіщення' } })
+      if (ev === 'ttn' && ttn !== undefined && ttn !== null && ttn !== '') {
+        ttn = normTtn(ttn)
+        if (!TTN_RE.test(ttn)) return res.status(400).json({ success: false, error: { code: 'BAD_TTN', message: 'ТТН має містити лише цифри (8–20)' } })
+      } else if (ev === 'ttn') ttn = null
       if (staff.role !== 'owner') {
         if (!serviceRequestId) return res.status(400).json({ success: false, error: { code: 'NEED_REQUEST', message: 'Потрібна заявка' } })
         const srSnap = await adminDb.collection('serviceRequests').doc(String(serviceRequestId)).get()
@@ -187,20 +229,39 @@ export function registerNotifications(app, deps) {
         if (!sr) return res.status(404).json({ success: false, error: { code: 'NO_SR', message: 'Заявку не знайдено' } })
         const own = !!sr.serviceCenterId && staff.centers.some((c) => c && c.centerId === sr.serviceCenterId)
         if (!own) return res.status(403).json({ success: false, error: { code: 'OTHER_CENTER', message: 'Заявка іншого сервісного центру' } })
-        phone = null // телефон — только из заявки
+        // Не-власник: адресат і посилання — ТІЛЬКИ із заявки (інакше можна направити повідомлення
+        // в чужу сесію месенджера або підмінити посилання на кошторис).
+        phone = null; sessionId = null; link = null
+      }
+      if (ev === 'custom') {
+        const body = String(text || '').trim()
+        if (!body) return res.status(400).json({ success: false, error: { code: 'EMPTY_TEXT', message: 'Порожнє повідомлення' } })
+        if (body.length > CUSTOM_MAX_LEN) {
+          return res.status(400).json({ success: false, error: { code: 'TEXT_TOO_LONG', message: `Повідомлення задовге (максимум ${CUSTOM_MAX_LEN} символів)` } })
+        }
+      }
+      // Ліміт на співробітника для подій, які ініціює людина (custom і ttn; offer/actual ідемпотентні
+      // по заявці). combine синхронний: якщо перевищено — 429 уже надіслано.
+      if (ev === 'custom' || ev === 'ttn') {
+        req.staff = staff
+        let passed = false
+        customLimiter(req, res, () => { passed = true })
+        if (!passed) return
       }
       const rec = await notifyClient({
         serviceRequestId: serviceRequestId || null,
         sessionId: sessionId || null,
         phone: phone || null,
         text: text || null,
-        event: event || 'custom',
+        event: ev,
         link: link || null,
         ttn: ttn || null,
         by: staff.email || staff.uid,
+        clientKey: clientKey || null,
       })
       res.json({ success: true, data: rec })
     } catch (e) {
+      if (e?.status === 400) return res.status(400).json({ success: false, error: { code: e.code || 'BAD_REQ', message: e.message } })
       console.error('notify error:', e?.message || e)
       res.status(500).json({ success: false, error: { code: 'NOTIFY_FAILED', message: e?.message || 'Не вдалося надіслати' } })
     }

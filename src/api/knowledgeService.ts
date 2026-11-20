@@ -1,5 +1,5 @@
 import { db, auth, storage } from './firebase'
-import { doc, getDoc, setDoc, collection, getDocs, deleteDoc, query, limit } from 'firebase/firestore'
+import { doc, getDoc, collection, getDocs, deleteDoc, query, limit, runTransaction } from 'firebase/firestore'
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
 import type { KnowledgeArticle, KnowledgeImage } from '@/types/knowledge'
 
@@ -16,20 +16,38 @@ export const newKnowledgeId = (): string => {
 }
 const generateId = newKnowledgeId
 
+// Итог сохранения статьи: conflict — в базе уже другая версия (кто и когда сохранил); null — ошибка/нет прав.
+export type SaveKnowledgeResult =
+  | { id: string; updatedAt: string; updatedBy: string | null }
+  | { conflict: { updatedAt: string; updatedBy: string | null } }
+  | null
+
 export const knowledgeService = {
   // Сохранить статью (создать или обновить). Доступно администратору (см. firestore.rules).
-  save: async (article: Omit<KnowledgeArticle, 'updatedAt' | 'updatedBy'> & { id?: string }): Promise<{ id: string } | null> => {
+  // updatedAt статьи — версия, открытая в редакторе: если в базе статья уже другая (правка из другой
+  // вкладки или связи запчастей от инструмента агента server/scripts/site-catalog.mjs), не перезаписываем —
+  // статья пишется целиком и молча откатила бы чужую правку. Сверка и запись — одна транзакция.
+  save: async (
+    article: Omit<KnowledgeArticle, 'updatedBy'> & { id?: string },
+  ): Promise<SaveKnowledgeResult> => {
     if (!db || !auth?.currentUser) return null
+    const firestore = db
+    const email = auth.currentUser.email
     try {
       const id = article.id || generateId()
-      const payload: KnowledgeArticle = {
-        ...article,
-        id,
-        updatedAt: new Date().toISOString(),
-        updatedBy: auth.currentUser.email,
-      }
-      await setDoc(doc(db, COLLECTION, id), payload)
-      return { id }
+      return await runTransaction(firestore, async (tx): Promise<SaveKnowledgeResult> => {
+        const articleRef = doc(firestore, COLLECTION, id)
+        const cur = await tx.get(articleRef)
+        if (cur.exists()) {
+          const c = cur.data() as KnowledgeArticle
+          if ((c.updatedAt || '') !== (article.updatedAt || '')) {
+            return { conflict: { updatedAt: c.updatedAt, updatedBy: c.updatedBy ?? null } }
+          }
+        }
+        const payload: KnowledgeArticle = { ...article, id, updatedAt: new Date().toISOString(), updatedBy: email }
+        tx.set(articleRef, payload)
+        return { id, updatedAt: payload.updatedAt, updatedBy: payload.updatedBy }
+      })
     } catch (error) {
       console.error('Error saving knowledge article:', error)
       return null

@@ -12,7 +12,7 @@ import { npTemplateService } from '@/api/npTemplateService'
 import { boatPayApi, type FopPublic } from '@/api/endpoints/boatPay'
 import { npTtnApi } from '@/api/endpoints/npTtn'
 import { searchCities, getWarehouses, type NPCity, type NPWarehouse } from '@/api/endpoints/novaposhta'
-import { SIZE_LABELS, SCENARIO_LABELS, type NpTemplate } from '@/types/npTemplate'
+import { SIZE_LABELS, SCENARIO_LABELS, type NpTemplate, type ShipScenario } from '@/types/npTemplate'
 
 export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatOrderId, clientName, clientPhone, clientCityRef, clientCityName, clientWarehouseRef, clientWarehouseName, presetTemplateId, defaultCost, defaultCod, defaultFopId, onCreated }: {
   open: boolean
@@ -29,7 +29,7 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
   defaultCost?: number // оголошена вартість за замовчуванням (для замовлень — сума замовлення)
   defaultCod?: number // наложений платіж за замовчуванням (замовлення з методом 'cod', не оплачене)
   defaultFopId?: string // ФОП-відправник за замовчуванням (замовлення: ФОП методу 'cod')
-  onCreated: (ttn: string) => void
+  onCreated: (ttn: string, scenario: ShipScenario) => void // scenario — куди писати номер (до нас / клієнту)
 }) {
   const [templates, setTemplates] = useState<NpTemplate[]>([])
   const [templateId, setTemplateId] = useState('')
@@ -112,7 +112,7 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
       ...(recipientIsClient ? { clientName, clientPhone } : {}),
     })
     setBusy(false)
-    if (res.ok && res.data) { setDone(res.data.ttn); onCreated(res.data.ttn) }
+    if (res.ok && res.data) { setDone(res.data.ttn); onCreated(res.data.ttn, scenario) }
     else setErr([res.error, ...(res.npErrors || [])].filter(Boolean).join(' · '))
   }
 
@@ -122,7 +122,10 @@ export default function CreateTtnDialog({ open, onClose, serviceRequestId, boatO
       <DialogContent dividers>
         {done ? (
           <Alert severity="success">
-            ТТН створено: <b>{done}</b>. Номер збережено в заявці — тепер його можна надіслати клієнту.
+            ТТН створено: <b>{done}</b>.{' '}
+            {scenario === 'incoming'
+              ? 'Це накладна на відправку кораблика ДО НАС — збережена як «ТТН до нас». Клієнту повідомлення про відправку не надсилайте; номер потрібен йому, щоб здати посилку.'
+              : 'Номер збережено як ТТН відправлення клієнту — тепер можна натиснути «Повідомити про відправку».'}
           </Alert>
         ) : (
           <Stack spacing={2} sx={{ pt: 1 }}>

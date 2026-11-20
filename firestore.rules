@@ -104,9 +104,11 @@ service cloud.firestore {
     // Своё — читать можно; список — владелец. RBAC-поля (role/centers/active/createdBy) пишет
     // ТОЛЬКО владелец (или backend Admin SDK, минуя правила). Пользователь может писать СВОЙ
     // документ (легаси boats/settings/updatedAt), но НЕ трогая RBAC-поля — иначе self-escalation.
+    // pbxLine (внутренняя линия Binotel для звонков из приложения) — тоже только владелец: иначе
+    // сотрудник мог бы назначить себе чужую линию. Свой мобильный (pbxPhone) сотрудник пишет сам.
     function touchesRbacKeys() {
       return request.resource.data.diff(resource.data).affectedKeys()
-        .hasAny(['role', 'centers', 'active', 'createdBy']);
+        .hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine', 'calcVisibility']);
     }
     match /users/{userId} {
       allow get: if isPriceAdmin() || (request.auth != null && request.auth.uid == userId);
@@ -117,7 +119,7 @@ service cloud.firestore {
       // Создание: владелец — что угодно; сам пользователь — только БЕЗ RBAC-полей.
       allow create: if isPriceAdmin()
         || (request.auth != null && request.auth.uid == userId
-            && !request.resource.data.keys().hasAny(['role', 'centers', 'active', 'createdBy']));
+            && !request.resource.data.keys().hasAny(['role', 'centers', 'active', 'createdBy', 'pbxLine', 'calcVisibility']));
       // Обновление: владелец — что угодно; сам пользователь — только не меняя RBAC-полей.
       allow update: if isPriceAdmin()
         || (request.auth != null && request.auth.uid == userId && !touchesRbacKeys());
@@ -147,6 +149,16 @@ service cloud.firestore {
 
     // Предложения клиенту (наборы вариантов сметы). Прямой доступ — только администратор; клиент
     // видит варианты и выбирает путь через backend (/api/offers/:id/public, /choose) — Admin SDK.
+    // Калькуляції майстрів (виконавців, у т.ч. партнерських центрів): пише ТІЛЬКИ бекенд (/api/master-estimates).
+    // Власник, директор, бухгалтер читають усі; майстер — лише свої (запит застосунку обов'язково фільтрує
+    // where('performerUid', '==', uid), інакше список відхиляється).
+    match /masterEstimates/{meId} {
+      allow get, list: if isPriceAdmin()
+        || (hasStaffDoc() && staffDoc().active == true && staffDoc().role in ['owner', 'director', 'accountant'])
+        || (isStaff() && resource.data.performerUid == request.auth.uid);
+      allow write: if false;
+    }
+
     match /estimateOffers/{offerId} {
       allow read, list: if isStaff();
       allow create, update: if isServiceStaff();
@@ -168,6 +180,22 @@ service cloud.firestore {
         allow read: if isStaff();
         allow write: if false;
       }
+      // Дзвінки по заявці через АТС (Binotel): стан, запис, розшифровка, резюме. Пише ТОЛЬКО
+      // backend (/api/calls/originate + конвейер). Персонал читает (телефон клиента уже в заявке).
+      match /calls/{callId} {
+        allow read, list: if isStaff();
+        allow write: if false;
+      }
+      // Роботи по заявці (хто що робить: доставка, прийом, ремонт, тест на воді). Пише ТІЛЬКИ бекенд
+      // (/api/service-requests/:id/works). Персонал читає (як і саму заявку).
+      match /works/{workId} {
+        allow read, list: if isStaff();
+        allow write: if false;
+      }
+    }
+    // Те же документы звонков через collection group (экран «мои дзвінки»/журнал владельца).
+    match /{path=**}/calls/{callId} {
+      allow read, list: if isStaff();
     }
 
     // Редактируемые тексты сервиса (соглашение и т.п.) — публичное чтение,
@@ -184,7 +212,9 @@ service cloud.firestore {
     match /chatSessions/{sessionId} {
       allow get: if true;
       allow list: if isPriceAdmin();
-      allow create: if true;
+      // Блок invite (беседа-приглашение, server/chatInvites.js) создаёт только сервер — клиент не может
+      // сам «назначить» себе приглашение и не меняет его тему (блок неизменяем и для сервера).
+      allow create: if !('invite' in request.resource.data);
       // Клиент дополняет свою сессию по знанию id, но не может подменить id/дату создания,
       // не может УКОРОТИТЬ историю (size только растёт) и не может менять серверо/менеджеро-
       // контролируемые поля: паузу бота и канал/адресата мессенджера. (aiUsage НЕ закрепляем —
@@ -197,8 +227,20 @@ service cloud.firestore {
             && request.resource.data.get('botPaused', false) == resource.data.get('botPaused', false)
             && request.resource.data.get('channel', '') == resource.data.get('channel', '')
             && request.resource.data.get('channelUserId', '') == resource.data.get('channelUserId', '')
-            && request.resource.data.get('businessConnectionId', '') == resource.data.get('businessConnectionId', ''));
+            && request.resource.data.get('businessConnectionId', '') == resource.data.get('businessConnectionId', '')
+            && request.resource.data.get('invite', null) == resource.data.get('invite', null));
       allow delete: if isPriceAdmin();
+    }
+
+    // Служебные записи приглашений в чат (тема, заметка для ИИ, кто пригласил, телефон, статус SMS, ссылка).
+    // Пишет только сервер (Admin SDK). Читают: владелец и директор — все; остальные сотрудники (мастер,
+    // оператор…) — только свои (запрос обязан фильтровать по by.uid). Ключи идемпотентности и счётчики
+    // лимитов (chatInviteKeys, chatInviteCounters) — без правил, т.е. клиентам закрыты полностью.
+    match /chatInvites/{sessionId} {
+      allow get, list: if isPriceAdmin()
+        || (hasStaffDoc() && staffDoc().active == true && staffDoc().role in ['owner', 'director'])
+        || (hasStaffDoc() && staffDoc().active == true && resource.data.by.uid == request.auth.uid);
+      allow write: if false;
     }
 
     // База знаний (консультации, самопомощь) — публичное чтение, запись администратору
