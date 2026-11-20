@@ -28,7 +28,7 @@ import { notificationApi } from '@/api/endpoints/notification'
 import { pricingService } from '@/api/pricingService'
 import { formatMoney } from '@/utils/pricing'
 import {
-  SERVICE_REQUEST_STATUS_LABELS, REPAIR_STAGE_LABELS, REPAIR_STAGE_ORDER, nextRepairStage,
+  SERVICE_REQUEST_STATUS_LABELS, REPAIR_STAGE_LABELS, REPAIR_STAGE_ORDER, nextRepairStage, isAwaitingBoat,
   type ServiceRequest, type ServiceRequestStatus, type RepairStage,
 } from '@/types/serviceRequest'
 import type { EstimateOffer, Estimate } from '@/types/pricing'
@@ -42,6 +42,7 @@ import { telegramLinkApi } from '@/api/endpoints/telegramLink'
 import NpAddressPicker from '@/components/NpAddressPicker'
 import type { NpAddress } from '@/types/npTemplate'
 import CreateTtnDialog from '@/components/CreateTtnDialog'
+import MasterWorksSection from '@/components/MasterWorksSection'
 import ViewAsButton from '@/components/ViewAsButton'
 import { canonicalPhone } from '@/utils/phone'
 import { secureId } from '@/utils/id'
@@ -326,8 +327,23 @@ export default function ServiceRequestPage() {
             )
           })}
         </Stack>
+        {/* Кораблик ще не в нас (власник 2026-10-18): з ТТН — чекаємо посилку; без ТТН — клієнт привезе сам, і коли
+            привіз, це відмічають кнопкою «Отримано — клієнт привіз сам». */}
+        {isAwaitingBoat(req) && (
+          <Alert severity={req.incomingDelivery?.notFound ? 'error' : 'warning'} sx={{ mb: 1.5 }}>
+            {req.waybillNumber
+              ? <>Кораблик ще не в нас: чекаємо посилку ТТН {req.waybillNumber}
+                  {req.incomingDelivery?.status ? ` — ${req.incomingDelivery.status}` : ''}.
+                  {req.incomingDelivery?.notFound ? ' Нова Пошта не знаходить номер — схоже, клієнт не відправив.' : ' Коли отримаєте — позначте «Отримано».'}</>
+              : <>Кораблик ще не в нас: ТТН немає, клієнт привезе сам. Коли привезе — натисніть «Отримано — клієнт привіз сам».</>}
+          </Alert>
+        )}
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} flexWrap="wrap" useFlexGap>
-          {nextRepairStage(req.stage) && (
+          {isAwaitingBoat(req) && !req.waybillNumber ? (
+            <Button variant="contained" disabled={saving} onClick={() => applyStage('received', 'привіз сам')}>
+              {REPAIR_STAGE_LABELS.received} — клієнт привіз сам
+            </Button>
+          ) : nextRepairStage(req.stage) && (
             <Button variant="contained" disabled={saving} onClick={() => applyStage(nextRepairStage(req.stage)!)}>
               Наступний етап: {REPAIR_STAGE_LABELS[nextRepairStage(req.stage)!]}
             </Button>
@@ -447,6 +463,15 @@ export default function ServiceRequestPage() {
       </Paper>
       )}
 
+      {/* Роботи і калькуляції майстрів (етап 1 — лише перегляд; складають у застосунку «RunFerry Сервіс»).
+          Майстер бачить лише свої калькуляції (правила), власник/директор/бухгалтер — усі. */}
+      {vis.internal && (
+        <MasterWorksSection serviceRequestId={id}
+          performerUid={access.role === 'master' ? user?.id || null : null}
+          offerId={req.offerId} actualEstimateId={req.actualEstimateId}
+          actualPaid={actual?.status === 'paid' || !!req.paymentId} />
+      )}
+
       {/* Крок 1: Предложение (предварительные калькуляции) */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="subtitle1" sx={{ mb: 1 }}>1 · Пропозиція клієнту (варіанти)</Typography>
@@ -490,6 +515,24 @@ export default function ServiceRequestPage() {
               Скласти факт{req.offerId ? ' напряму' : ' (без пропозиції)'}
             </Button>
           </Stack>
+        )}
+        {/* Додаткові витрати поза прайсом (вносить Telegram-бот співробітників або редактор факту) */}
+        {(req.extraExpenses || []).length > 0 && (
+          <Box sx={{ mt: 2 }}>
+            <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Додаткові витрати (поза прайсом)</Typography>
+            <Stack spacing={0.5}>
+              {(req.extraExpenses || []).map((x) => (
+                <Stack key={x.id} direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Typography variant="body2">{x.title} — <b>{formatMoney(x.amount)}</b></Typography>
+                  <Chip size="small" variant="outlined" color={x.appliedToEstimateId ? 'success' : 'warning'}
+                    label={x.appliedToEstimateId ? 'у фактичному кошторисі' : 'очікує складання факту'} />
+                  <Typography variant="caption" color="text.secondary">
+                    {x.source === 'telegram-bot' ? 'Telegram-бот' : x.source === 'app' ? 'застосунок' : 'портал'}{x.by ? ` · ${x.by}` : ''} · {new Date(x.at).toLocaleString('uk-UA')}{x.note ? ` · ${x.note}` : ''}
+                  </Typography>
+                </Stack>
+              ))}
+            </Stack>
+          </Box>
         )}
       </Paper>
 

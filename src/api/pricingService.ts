@@ -1,6 +1,7 @@
 import { db, auth } from './firebase'
-import { doc, getDoc, setDoc, collection, query, where, getDocs, limit, orderBy } from 'firebase/firestore'
+import { doc, getDoc, setDoc, collection, query, where, getDocs, limit, orderBy, runTransaction } from 'firebase/firestore'
 import type { Estimate, EstimateVersion, EstimateOffer, WorkCategory, Work, Kit, Material, Addon, PricingSettings } from '@/types/pricing'
+import type { ServiceRequest } from '@/types/serviceRequest'
 import { priceListSeed, defaultPricingSettings } from '@/data/priceListSeed'
 import { isAdminEmail } from '@/config/access'
 import { secureId } from '@/utils/id'
@@ -25,6 +26,11 @@ const PRICE_ARCHIVE_COLLECTION = 'priceArchive'
 const ESTIMATES_COLLECTION = 'priceEstimates'
 const OFFERS_COLLECTION = 'estimateOffers'
 
+// Итог сохранения прайса. conflict — в базе уже другая версия (кто и когда сохранил её).
+export type SavePriceListResult =
+  | { ok: true; updatedAt: string; updatedBy: string | null }
+  | { ok: false; conflict?: { updatedAt: string; updatedBy: string | null } }
+
 // Запись архива цен: снимок предыдущей версии каталога, сделанный перед перезаписью.
 export interface PriceArchiveEntry extends PriceListDoc {
   archiveId: string
@@ -44,6 +50,42 @@ export const seedPriceListDoc = (): PriceListDoc => ({
 // поэтому id не должен угадываться перебором.
 const generateId = (): string => secureId(16)
 
+// Документ кошторису для запису: при ЗМІНЕНОМУ змісті попередній стан іде в history (видно майстру і
+// клієнту, що змінювалося); backend-поля оплати/чека переносимо з наявного (setDoc замінює документ цілком,
+// тож інакше затерли б чек/оплату). Спільне для saveEstimate і транзакційного збереження факту.
+const buildEstimatePayload = (estimate: Estimate, existing: Estimate | null, id: string, email: string | null, now: string): Estimate => {
+  // Сигнатура содержания (позиции + сумма) — чтобы фиксировать версию только при реальном изменении.
+  const sig = (e: Pick<Estimate, 'lines' | 'total'>) =>
+    `${(e.lines || []).map((l) => `${l.refId}:${l.qty}:${l.lineTotal}`).sort().join('|')}#${e.total}`
+  let history: EstimateVersion[] = existing?.history || []
+  if (existing && sig(existing) !== sig(estimate)) {
+    history = [
+      ...history,
+      {
+        at: existing.updatedAt || existing.createdAt || now,
+        total: existing.total,
+        lines: existing.lines || [],
+        ...(existing.sections ? { sections: existing.sections } : {}),
+        editedBy: existing.createdBy || null,
+      },
+    ].slice(-20) // ограничиваем историю последними 20 версиями
+  }
+  return {
+    ...estimate,
+    id,
+    createdAt: estimate.createdAt || existing?.createdAt || now,
+    createdBy: estimate.createdBy || existing?.createdBy || email,
+    updatedAt: now,
+    history,
+    // backend-поля оплаты/чека — переносим из существующего, если новый payload их не задаёт.
+    paymentId: estimate.paymentId ?? existing?.paymentId ?? null,
+    paidAt: estimate.paidAt ?? existing?.paidAt ?? null,
+    taxUrl: estimate.taxUrl ?? existing?.taxUrl ?? null,
+    fiscalCode: estimate.fiscalCode ?? existing?.fiscalCode ?? null,
+    payInitiatedAt: estimate.payInitiatedAt ?? existing?.payInitiatedAt ?? null,
+  }
+}
+
 export const pricingService = {
   // Загрузить каталог. Возвращает null, если документа ещё нет в базе.
   loadPriceList: async (): Promise<PriceListDoc | null> => {
@@ -57,40 +99,43 @@ export const pricingService = {
     }
   },
 
-  // Сохранить каталог целиком (доступно только администратору — см. firestore.rules)
-  savePriceList: async (data: Omit<PriceListDoc, 'updatedAt' | 'updatedBy'>): Promise<boolean> => {
+  // Сохранить каталог целиком (доступно только администратору — см. firestore.rules).
+  // expectedUpdatedAt — updatedAt версии, от которой начата правка: если в базе другая (правка из
+  // другой вкладки или инструментом агента server/scripts/site-catalog.mjs), не перезаписываем — иначе
+  // документ целиком затёр бы чужие позиции. Сверка, архив прежней версии и запись — одна транзакция:
+  // без связи или при ошибке чтения не сохраняем вовсе (раньше запись уходила в очередь вслепую).
+  savePriceList: async (
+    data: Omit<PriceListDoc, 'updatedAt' | 'updatedBy'>,
+    expectedUpdatedAt?: string,
+  ): Promise<SavePriceListResult> => {
     if (!db || !auth?.currentUser) {
       console.error('Firestore not configured or user not authenticated')
-      return false
+      return { ok: false }
     }
+    const firestore = db
+    const email = auth.currentUser.email
     try {
-      // Архив: перед перезаписью снимаем снимок текущей версии (история цен).
-      // Ошибка архивирования не должна срывать основное сохранение — изолируем.
-      try {
-        const prev = await getDoc(doc(db, PRICE_COLLECTION, PRICE_DOC))
+      return await runTransaction(firestore, async (tx): Promise<SavePriceListResult> => {
+        const priceRef = doc(firestore, PRICE_COLLECTION, PRICE_DOC)
+        const prev = await tx.get(priceRef)
+        const now = new Date().toISOString()
         if (prev.exists()) {
-          const archiveId = generateId()
-          const entry: PriceArchiveEntry = {
-            ...(prev.data() as PriceListDoc),
-            archiveId,
-            archivedAt: new Date().toISOString(),
-            supersededBy: auth.currentUser.email,
+          const cur = prev.data() as PriceListDoc
+          if (expectedUpdatedAt !== undefined && cur.updatedAt !== expectedUpdatedAt) {
+            return { ok: false, conflict: { updatedAt: cur.updatedAt, updatedBy: cur.updatedBy ?? null } }
           }
-          await setDoc(doc(db, PRICE_ARCHIVE_COLLECTION, archiveId), entry)
+          // Архив: снимок вытесняемой версии (история цен)
+          const archiveId = generateId()
+          const entry: PriceArchiveEntry = { ...cur, archiveId, archivedAt: now, supersededBy: email }
+          tx.set(doc(firestore, PRICE_ARCHIVE_COLLECTION, archiveId), entry)
         }
-      } catch (archiveErr) {
-        console.error('Error archiving previous price list:', archiveErr)
-      }
-      const payload: PriceListDoc = {
-        ...data,
-        updatedAt: new Date().toISOString(),
-        updatedBy: auth.currentUser.email,
-      }
-      await setDoc(doc(db, PRICE_COLLECTION, PRICE_DOC), payload)
-      return true
+        const payload: PriceListDoc = { ...data, updatedAt: now, updatedBy: email }
+        tx.set(priceRef, payload)
+        return { ok: true, updatedAt: payload.updatedAt, updatedBy: payload.updatedBy }
+      })
     } catch (error) {
       console.error('Error saving price list:', error)
-      return false
+      return { ok: false }
     }
   },
 
@@ -134,47 +179,59 @@ export const pricingService = {
     try {
       const id = estimate.id || generateId()
       const ref = doc(db, ESTIMATES_COLLECTION, id)
-      const now = new Date().toISOString()
       const existingSnap = await getDoc(ref)
       const existing = existingSnap.exists() ? (existingSnap.data() as Estimate) : null
-
-      // Сигнатура содержания (позиции + сумма) — чтобы фиксировать версию только при реальном изменении.
-      const sig = (e: Pick<Estimate, 'lines' | 'total'>) =>
-        `${(e.lines || []).map((l) => `${l.refId}:${l.qty}:${l.lineTotal}`).sort().join('|')}#${e.total}`
-
-      let history: EstimateVersion[] = existing?.history || []
-      if (existing && sig(existing) !== sig(estimate)) {
-        history = [
-          ...history,
-          {
-            at: existing.updatedAt || existing.createdAt || now,
-            total: existing.total,
-            lines: existing.lines || [],
-            ...(existing.sections ? { sections: existing.sections } : {}),
-            editedBy: existing.createdBy || null,
-          },
-        ].slice(-20) // ограничиваем историю последними 20 версиями
-      }
-
-      const payload: Estimate = {
-        ...estimate,
-        id,
-        createdAt: estimate.createdAt || existing?.createdAt || now,
-        createdBy: estimate.createdBy || existing?.createdBy || auth.currentUser.email,
-        updatedAt: now,
-        history,
-        // backend-поля оплаты/чека — переносим из существующего, если новый payload их не задаёт.
-        paymentId: estimate.paymentId ?? existing?.paymentId ?? null,
-        paidAt: estimate.paidAt ?? existing?.paidAt ?? null,
-        taxUrl: estimate.taxUrl ?? existing?.taxUrl ?? null,
-        fiscalCode: estimate.fiscalCode ?? existing?.fiscalCode ?? null,
-        payInitiatedAt: estimate.payInitiatedAt ?? existing?.payInitiatedAt ?? null,
-      }
-      await setDoc(ref, payload)
+      await setDoc(ref, buildEstimatePayload(estimate, existing, id, auth.currentUser.email, new Date().toISOString()))
       return { id }
     } catch (error) {
       console.error('Error saving estimate:', error)
       return null
+    }
+  },
+
+  // Зберегти ФАКТ і пов'язану заявку ОДНІЄЮ транзакцією (редактор факту). check виконується на даних,
+  // прочитаних У транзакції (SDK повторить його, якщо документи змінилися до коміту — бот/застосунок
+  // дописали витрату): повертає abort — нічого не пишемо; інакше пишемо кошторис (історія і поля оплати —
+  // як saveEstimate) і merge-патч заявки. Так кошторис і журнал витрат не можуть розійтися на півдорозі.
+  saveEstimateWithRequest: async <A>(p: {
+    estimate: Estimate
+    requestId: string | null
+    check: (ctx: { id: string; freshEst: Estimate | null; freshReq: ServiceRequest | null }) =>
+      { abort: A } | { requestPatch: Partial<ServiceRequest> | null }
+  }): Promise<{ ok: true; id: string; requestPatch: Partial<ServiceRequest> | null } | { ok: false; abort?: A; error?: string }> => {
+    if (!db || !auth?.currentUser) return { ok: false, error: 'Немає підключення до бази або входу' }
+    const database = db
+    const email = auth.currentUser.email
+    const id = p.estimate.id || generateId()
+    const estRef = doc(database, ESTIMATES_COLLECTION, id)
+    const reqRef = p.requestId ? doc(database, 'serviceRequests', p.requestId) : null
+    try {
+      const r = await runTransaction(database, async (tx) => {
+        const es = await tx.get(estRef)
+        const rs = reqRef ? await tx.get(reqRef) : null
+        const existing = es.exists() ? (es.data() as Estimate) : null
+        const freshReq = rs && rs.exists() ? (rs.data() as ServiceRequest) : null
+        const c = p.check({ id, freshEst: existing, freshReq })
+        if ('abort' in c) return { abort: c.abort }
+        const now = new Date().toISOString()
+        tx.set(estRef, buildEstimatePayload(p.estimate, existing, id, email, now))
+        if (reqRef && c.requestPatch) {
+          const patch: Record<string, unknown> = { ...c.requestPatch, id: p.requestId, updatedAt: now }
+          // Як serviceRequestService.save: час справжньої зміни статусу (doneAt — при «Виконано»).
+          if (c.requestPatch.status && c.requestPatch.status !== freshReq?.status) {
+            patch.statusChangedAt = now
+            if (c.requestPatch.status === 'done') patch.doneAt = now
+          }
+          if (!freshReq) { patch.createdAt = now; patch.createdBy = email }
+          tx.set(reqRef, patch, { merge: true })
+        }
+        return { requestPatch: c.requestPatch }
+      })
+      if ('abort' in r) return { ok: false, abort: r.abort as A }
+      return { ok: true, id, requestPatch: r.requestPatch }
+    } catch (error) {
+      console.error('Error saving estimate with request:', error)
+      return { ok: false, error: error instanceof Error ? error.message : 'Не вдалося зберегти кошторис' }
     }
   },
 

@@ -1,3 +1,4 @@
+import type { MasterLineRef } from './pricing'
 // Заявка на обслуживание — НАША локальная сущность-хаб (система-источник на сайте).
 // Формируется из обращения (ChatSession) и связывает предварительные калькуляции (предложение
 // с вариантами), фактическую калькуляцию и оплату. Ссылка на 1С — через externalRequestId
@@ -59,6 +60,12 @@ export const nextRepairStage = (stage?: RepairStage | null): RepairStage | null 
   }
 }
 
+// Кораблик ще не в нас (власник 2026-10-18): заявка жива, етапу немає ні разу, вхідну посилку не отримано і клієнту
+// нічого не відправляли. З ТТН чекаємо посилку, без ТТН клієнт привезе сам і це відмічають кнопкою «Отримано».
+export const isAwaitingBoat = (r: Pick<ServiceRequest, 'status' | 'stage' | 'stageHistory' | 'incomingDelivery' | 'returnTtn' | 'returnDelivery'>): boolean =>
+  !['done', 'cancelled'].includes(r.status) && !r.stage && !(r.stageHistory?.length) && !r.incomingDelivery?.arrivedAt
+  && !String(r.returnTtn || '').replace(/\D/g, '').replace(/^0+$/, '') && !r.returnDelivery
+
 // Запис історії етапів. at — ISO з клієнта (усередині arrayUnion серверний час неможливий);
 // by — email/uid співробітника або технічний маркер ('1c-sync', 'np-ttn', 'backfill').
 export interface StageHistoryItem {
@@ -73,6 +80,24 @@ export interface StageHistoryItem {
 export interface RequestSpecialist {
   uid: string
   name: string
+}
+
+// Додаткова витрата поза прайсом (доставка, запчастина, послуга третьої сторони). Вноситься
+// Telegram-ботом співробітників або редактором факту. Якщо є фактичний кошторис — рядок
+// type='addon' refId 'extra:<id>' (extra=true) додається в нього і appliedToEstimateId вказує
+// на кошторис; інакше витрата чекає складання факту (редактор підставить її автоматично).
+export interface ExtraExpense {
+  id: string
+  title: string
+  amount: number // грн
+  note?: string
+  at: string
+  by: string | null // email співробітника
+  byUid?: string
+  source: 'telegram-bot' | 'portal' | 'app' | 'master' // бот / редактор факту / застосунок / калькуляція майстра
+  masterRef?: MasterLineRef // для source='master': який рядок якої калькуляції майстра (зеркало EstimateLine.fromMaster)
+  appliedToEstimateId?: string | null
+  clientKey?: string // ключ ідемпотентності застосунку (повтор запиту не додає другий витрату)
 }
 
 export interface ServiceRequest {
@@ -110,10 +135,16 @@ export interface ServiceRequest {
   stageSince?: string | null
   stageHistory?: StageHistoryItem[]
   waitingParts?: { note?: string; since: string } | null // деталі етапу «Чекаємо запчастини»
+  // Вхідна посилка (клієнт → ми): статус Нової Пошти, коли кораблик ще не в нас. Пише сервер — синхронізація 1С
+  // (source '1c') або щоденне опитування НП (source 'np'); notFound — «Номер не знайдено», клієнт не відправив.
+  incomingDelivery?: { ttn: string | null; status?: string | null; statusCode?: string | null; statusAt?: string | null; arrivedAt?: string | null; notFound?: boolean; source?: '1c' | 'np'; checkedAt?: string } | null
+  // Зворотна посилка (ми → клієнт) з історії НП у 1С: дата відправки й отримання клієнтом (пише синхронізація 1С).
+  returnDelivery?: { ttn: string | null; shippedAt: string | null; deliveredAt: string | null } | null
   // Telegram deep-link: стабильный токен ссылки t.me/<бот>?start=<токен> и привязанная
   // Telegram-сессия клиента (пишет бот при клике; оповещения идут в неё приоритетно).
   tgLinkToken?: string | null
   tgSessionId?: string | null
+  extraExpenses?: ExtraExpense[] // додаткові витрати поза прайсом (бот/редактор факту)
   // Привязанные калькуляции и оплата:
   aiEstimateId?: string | null // материализованная предварительная оценка ИИ (stage='ai')
   offerId?: string | null // предложение с вариантами (предварительные калькуляции)

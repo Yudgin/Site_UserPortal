@@ -20,6 +20,24 @@ const seedFromEnv = () => {
 // In-memory кэш полных конфигов (payments.js читает синхронно). Обновляется refreshFops().
 let FOPS = seedFromEnv()
 
+// Полный конфиг ФОП из документов Firestore: мета (fops) + секреты (fopSecrets).
+const mergeFop = (id, m, s) => ({
+  id,
+  name: m.name || id,
+  active: m.active !== false,
+  methods: m.methods || {}, // включённые методы (намерение владельца)
+  novaPoshta: { ...(m.novaPoshta || {}), ...(s.novaPoshta || {}) }, // refs (мета) + apiKey (секрет)
+  liqpay: s.liqpay,
+  monoChast: s.monoChast,
+  monoAcquire: s.monoAcquire,
+  privatPaypart: s.privatPaypart, // ПриватБанк оплата частями
+  checkbox: s.checkbox,
+  // Банки ФОП, только чтение остатков и выписок (не приём оплат)
+  monoPersonal: s.monoPersonal, // личный токен monobank владельца ФОП
+  privatAutoclient: s.privatAutoclient, // «Автоклієнт» Приват24 для бізнесу
+  novaPay: s.novaPay, // API бизнес-кабинета NovaPay
+})
+
 // Перезагрузить ФОПы из Firestore (мета + секреты), смёржить в полный конфиг. Если в Firestore
 // нет ФОПов — оставляем ENV-сид (не ломаем текущие живые оплаты до миграции).
 export async function refreshFops(adminDb) {
@@ -31,22 +49,7 @@ export async function refreshFops(adminDb) {
     ])
     const secrets = {}
     secSnap.forEach((d) => { secrets[d.id] = d.data() || {} })
-    const merged = metaSnap.docs.map((d) => {
-      const m = d.data() || {}
-      const s = secrets[d.id] || {}
-      return {
-        id: d.id,
-        name: m.name || d.id,
-        active: m.active !== false,
-        methods: m.methods || {}, // включённые методы (намерение владельца)
-        novaPoshta: { ...(m.novaPoshta || {}), ...(s.novaPoshta || {}) }, // refs (мета) + apiKey (секрет)
-        liqpay: s.liqpay,
-        monoChast: s.monoChast,
-        monoAcquire: s.monoAcquire,
-        privatPaypart: s.privatPaypart, // ПриватБанк оплата частями
-        checkbox: s.checkbox,
-      }
-    })
+    const merged = metaSnap.docs.map((d) => mergeFop(d.id, d.data() || {}, secrets[d.id] || {}))
     // Мержим env-сид + Firestore: Firestore перекрывает/дополняет по id, но env-ФОПы НЕ теряются
     // (иначе создание первого ФОПа в UI обесточило бы живые env-оплаты). НЕактивные ФОПы тоже
     // держим в кэше — getFop должен резолвить их для УЖЕ созданных заказов (вебхуки/чеки/reconcile).
@@ -60,6 +63,17 @@ export async function refreshFops(adminDb) {
   return FOPS
 }
 
+// Один ФОП прямо из Firestore, минуя кэш: сразу после смены ключа запрос мог попасть на другой
+// экземпляр сервера. Ошибку Firestore НЕ глотаем: иначе вердикт был бы про старый ключ. ФОП только
+// из ENV (документа нет) берём из кэша.
+export async function loadFopFresh(adminDb, fopId) {
+  const [meta, sec] = await Promise.all([
+    adminDb.collection('fops').doc(fopId).get(),
+    adminDb.collection('fopSecrets').doc(fopId).get(),
+  ])
+  return meta.exists ? mergeFop(fopId, meta.data() || {}, (sec.exists && sec.data()) || {}) : getFop(fopId)
+}
+
 // Полный конфиг ФОП с секретами (для серверной логики). null, если не найден.
 export const getFop = (fopId) => FOPS.find((f) => f && f.id === fopId) || null
 
@@ -71,7 +85,7 @@ export const fopHas = (fop, path) => {
 }
 
 // Метод доступен, если ключ задан И владелец его не отключил в настройках (methods[key] !== false).
-const methodOn = (f, key, hasKey) => hasKey && (f.methods ? f.methods[key] !== false : true)
+export const methodOn = (f, key, hasKey) => hasKey && (f.methods ? f.methods[key] !== false : true)
 
 // Публичный список ФОП (БЕЗ секретов) — для UI и /api/fops: id, name и какие методы доступны.
 // НЕактивные ФОПы скрываем — они не должны предлагаться для НОВЫХ оплат (но getFop их резолвит).
@@ -90,6 +104,18 @@ export const listFopsPublic = () =>
     },
     novaPoshta: fopHas(f, 'novaPoshta.apiKey'), // может ли этот ФОП создавать ТТН
     receipts: fopHas(f, 'checkbox.licenseKey'), // может ли выдавать фискальные чеки
+  }))
+
+// ФОПы с ключом Новой Почты — С КЛЮЧОМ, только для серверной синхронизации журнала посылок (parcels.js).
+// Неактивные тоже: их посылки ещё могут быть в дороге. Наружу этот список не отдавать.
+export const listNpFops = () =>
+  FOPS.filter((f) => f && f.novaPoshta && f.novaPoshta.apiKey).map((f) => ({
+    id: f.id,
+    name: f.name || f.id,
+    active: f.active !== false,
+    apiKey: f.novaPoshta.apiKey,
+    senderRef: f.novaPoshta.senderRef || '',
+    senderPhone: f.novaPoshta.senderPhone || '',
   }))
 
 export const hasAnyFop = () => FOPS.length > 0

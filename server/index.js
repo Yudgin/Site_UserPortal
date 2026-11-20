@@ -9,6 +9,9 @@ import { getFirestore } from 'firebase-admin/firestore'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { registerTelegramBot } from './telegram.js'
+import { createMessengerCore } from './messengerCore.js'
+import { registerChatInvites } from './chatInvites.js'
+import { inviteSystemBlock, withInviteLead } from './chatInvitePrompt.js'
 import { registerViberBot } from './viber.js'
 import { registerManagerReply } from './managerReply.js'
 import { registerServiceRequests } from './serviceRequests.js'
@@ -22,12 +25,15 @@ import { registerCalls } from './calls.js'
 import { registerFmcCalls } from './fmcCalls.js'
 import { registerBinotelCalls } from './binotelCalls.js'
 import { registerBinotelWebhook } from './binotelWebhook.js'
+import { registerIncomingRefresh } from './incomingRefresh.js'
 import { registerOnecSync } from './onecSync.js'
 import { registerNpAccount } from './novaPoshtaAccount.js'
+import { registerParcels } from './parcels.js'
 import { registerVoiceTranscribe } from './voiceTranscribe.js'
 import { registerRequestLink } from './requestLink.js'
 import { registerReturnTracking } from './returnTracking.js'
 import { registerEstimates } from './estimates.js'
+import { registerMasterEstimates } from './masterEstimates.js'
 import { refreshFops } from './fops.js'
 import { registerClientProfiles } from './clientProfiles.js'
 import { registerUserProfiles } from './userProfiles.js'
@@ -700,6 +706,11 @@ app.post('/api/ai/improve-text', aiPublicOrStaffLimiter, async (req, res) => {
   }
 })
 
+// Приглашения в чат (server/chatInvites.js): регистрируются ниже, вместе с остальными модулями; здесь —
+// чтобы чаты оценки/консультации по sessionId подмешивали тему приглашения (из служебной записи, не от клиента).
+let chatInviteActions = null
+const inviteForSession = async (sessionId) => (sessionId && chatInviteActions ? chatInviteActions.inviteFor(String(sessionId)) : null)
+
 // Системный промпт диалогового консультанта (оценка стоимости с эскалацией)
 const CHAT_SYSTEM = [
   'Ти — консультант сервісного центру RunFerry, що обслуговує прикормочні рибальські кораблики.',
@@ -725,7 +736,7 @@ const CHAT_SYSTEM = [
 
 app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
   try {
-    const { messages = [], priceContext = '', knowledgeContext = '', corrections = [] } = req.body
+    const { messages = [], priceContext = '', knowledgeContext = '', corrections = [], sessionId = null } = req.body
 
     if (!anthropic) {
       return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
@@ -742,6 +753,9 @@ app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
         .slice(-40)
         .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text).slice(0, 8000) }))
     )
+    // Беседа-приглашение начинается с приветствия ИИ — перед ним служебная реплика «человек открыл приглашение».
+    const invite = await inviteForSession(sessionId)
+    if (invite) chatMessages = withInviteLead(chatMessages, invite)
     // После среза окно могло начаться с ответа ассистента — убираем ведущие assistant (Anthropic
     // требует, чтобы диалог начинался с user), иначе длинные диалоги ловили бы 400.
     while (chatMessages.length && chatMessages[0].role !== 'user') chatMessages = chatMessages.slice(1)
@@ -756,6 +770,7 @@ app.post('/api/ai/estimate-chat', aiPublicLimiter, async (req, res) => {
       ? `\n\nСАМОДОПОМОГА (безкоштовні рішення з бази знань). ЯКЩО проблема клієнта збігається з якимось матеріалом — СПЕРШУ доброзичливо запропонуй це безкоштовне рішення (стисло, по кроках), і лише потім платний ремонт:\n${knowledgeContext}`
       : ''
     const system = CHAT_SYSTEM + corrText + (priceContext ? `\n\nПРАЙС (лише ці позиції можна використовувати для оцінки):\n${priceContext}` : '') + selfHelp
+      + (invite ? inviteSystemBlock(invite) : '')
 
     const message = await anthropic.messages.create({
       model: AI_MODEL,
@@ -932,7 +947,7 @@ const KNOWLEDGE_SYSTEM = [
 
 app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
   try {
-    const { messages = [], knowledgeContext = '', corrections = [] } = req.body
+    const { messages = [], knowledgeContext = '', corrections = [], sessionId = null } = req.body
 
     if (!anthropic) {
       return res.status(503).json({ success: false, error: { code: 'AI_NOT_CONFIGURED', message: 'AI не налаштовано' } })
@@ -948,6 +963,8 @@ app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
         .slice(-40)
         .map((m) => ({ role: m.role === 'client' ? 'user' : 'assistant', content: String(m.text).slice(0, 8000) }))
     )
+    const invite = await inviteForSession(sessionId)
+    if (invite) chatMessages = withInviteLead(chatMessages, invite)
     while (chatMessages.length && chatMessages[0].role !== 'user') chatMessages = chatMessages.slice(1)
     if (chatMessages.length === 0) {
       return res.status(400).json({ success: false, error: { code: 'BAD_DIALOG', message: 'Діалог має починатися з повідомлення клієнта' } })
@@ -958,7 +975,7 @@ app.post('/api/ai/knowledge-chat', aiPublicLimiter, async (req, res) => {
       ? `\n\nДОДАТКОВІ ПРАВИЛА (корекції поведінки, дотримуйся їх):\n${corrections.map((c, i) => `${i + 1}. ${c}`).join('\n')}`
       : ''
     const knowledgeText = knowledgeContext ? `\n\nБАЗА ЗНАНЬ (використовуй лише ці матеріали):\n${knowledgeContext}` : ''
-    const system = KNOWLEDGE_SYSTEM + knowledgeText + correctionText
+    const system = KNOWLEDGE_SYSTEM + knowledgeText + correctionText + (invite ? inviteSystemBlock(invite) : '')
 
     const message = await anthropic.messages.create({
       model: AI_MODEL,
@@ -1215,7 +1232,7 @@ const MESSENGER_SYSTEM = MESSENGER_PREAMBLE + '\n' + CHAT_SYSTEM
 
 // Канальные отправители (заполняются транспортами) — для доставки ответа менеджера клиенту.
 const messengerSenders = {}
-const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM: MESSENGER_SYSTEM, mergeConsecutiveMessages, buildUsage, senders: messengerSenders }
+const messengerDeps = { adminDb, anthropic, AI_MODEL, CHAT_SYSTEM: MESSENGER_SYSTEM, mergeConsecutiveMessages, buildUsage, senders: messengerSenders, inviteFor: inviteForSession }
 registerTelegramBot(app, messengerDeps)
 registerViberBot(app, messengerDeps)
 // Ответ менеджера из веб-инбокса → доставка в канал + возврат бота при упоминании.
@@ -1231,9 +1248,18 @@ const { notifyClient } = registerNotifications(app, { adminDb, senders: messenge
 // Повторне посилання на сторінку заявки (/serviceshare/<GUID 1С>) через notifyClient: ШІ голосового шлюзу
 // (POST /api/voice-gateway/resend-link, Bearer VOICE_GATEWAY_TOKEN) і співробітник (POST /api/service-requests/:id/resend-link).
 registerRequestLink(app, { adminDb, notifyClient, siteUrl: SITE_URL })
+// Приглашение в чат с ИИ по теме: POST /api/chat-invites (персонал) — тема по-украински, первое сообщение ИИ,
+// ссылка ${SITE_URL}/c/<id> и SMS; POST /api/chat-invites/open — отметка «відкрито». Из бота — chatInviteActions.createInvite.
+chatInviteActions = registerChatInvites(app, {
+  // CHAT_INVITE_SITE_URL — сайт для ссылок в SMS-приглашениях, если не основной (тестовая копия сайта при проверке).
+  adminDb, notifyClient, siteUrl: (process.env.CHAT_INVITE_SITE_URL || SITE_URL).replace(/\/$/, ''), core: createMessengerCore(messengerDeps),
+  anthropic, AI_MODEL, KNOWLEDGE_SYSTEM, buildUsage,
+}).actions
 // Фактичний кошторис із застосунку сервісу: створити за обраним варіантом, витрата поза прайсом,
 // вилучити витрату (ядро розрахунків — estimateEngine.js, спільне з Telegram-ботом співробітників).
 registerEstimates(app, { adminDb, notifyClient })
+// Роботи по заявці і калькуляції майстра (виконавці, партнерські центри): «на основі» в обидва боки.
+registerMasterEstimates(app, { adminDb, notifyClient })
 
 // Оплаты (LiqPay/monobank Частини) + авто-чеки Checkbox, мульти-ФОП
 registerPayments(app, { adminDb })
@@ -1260,6 +1286,9 @@ if (process.env.BINOTEL_KEY && process.env.BINOTEL_SECRET) {
 // напрямую). Ответ {customerData, routeData} по нашей базе; маршрутизацию переключает Firestore
 // system/binotelRouting. Токен BINOTEL_WEBHOOK_TOKEN (Secret Manager binotel-webhook-token).
 registerBinotelWebhook(app, { adminDb, siteUrl: SITE_URL })
+// Статус вхідної посилки (клієнт → ми) для заявок, де кораблик ще не в нас: POST /api/service-requests/refresh-incoming
+// (x-admin-token, Cloud Scheduler раз на добу) — для фази «чекаємо кораблик» правила відкритої заявки.
+registerIncomingRefresh(app, { adminDb, npRequest })
 // Синхронизация картотеки ремонтов из 1С (admin/scheduler): upsert в serviceRequests.
 registerOnecSync(app, { adminDb })
 // «Клієнт отримав кораблик» прямим опитуванням НП (npDelivery — для isOpen): POST /api/np/return-tracking/reconcile
@@ -1271,6 +1300,9 @@ registerVoiceTranscribe(app, { adminDb })
 
 // Справочники НП по ключу конкретного ФОП (отправители/контакты + добавление) — owner-gated.
 registerNpAccount(app)
+// Журнал відправлень «Посилки» (§36): НП по всіх ФОП і особистих акаунтах, ручні записи, передачі водієві.
+// Синхронізація — POST /api/parcels/sync (x-admin-token, Cloud Scheduler) або кнопка власника.
+registerParcels(app, { adminDb })
 // Подгружаем ФОПы из Firestore на старте (перекрывают ENV-сид, если заданы).
 refreshFops(adminDb).catch((e) => console.error('initial refreshFops:', e?.message || e))
 // Периодический рефреш — чтобы ДРУГИЕ инстансы Cloud Run подхватили изменения ФОПов (кэш в памяти

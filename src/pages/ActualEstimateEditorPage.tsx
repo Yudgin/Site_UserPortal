@@ -4,7 +4,7 @@
 // видит отличие от предварительной (diff план/факт) и нужно ли повторное согласование клиентом,
 // выбирает ФОП (тот же выбьет чек), сохраняет фактическую смету и получает ссылку для клиента
 // (клиент по ней соглашается при необходимости и оплачивает — чек выбьется автоматически).
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Container, Box, Paper, Typography, Button, Alert, Snackbar, CircularProgress, Divider,
@@ -13,7 +13,9 @@ import {
 import {
   Home as HomeIcon, Save as SaveIcon, ArrowBack as BackIcon,
   ContentCopy as CopyIcon, Payment as PaymentIcon, Receipt as ReceiptIcon,
+  Delete as DeleteIcon, Add as AddIcon,
 } from '@mui/icons-material'
+import { IconButton } from '@mui/material'
 import { useAuthStore } from '@/store/authStore'
 import { usePricingStore } from '@/store/pricingStore'
 import { useAccess } from '@/store/accessStore'
@@ -34,11 +36,15 @@ import EstimateSectionsView from '@/components/EstimateSectionsView'
 import { PAY_METHOD_KEYS, PAY_METHOD_LABELS } from '@/types/pricing'
 import {
   buildMultiEstimate, estimate2goods, compareEstimates, needsReapproval, tName, formatMoney,
-  applyEstimateDiscount,
+  applyEstimateDiscount, appendExtraLines, extraExpenseLine,
 } from '@/utils/pricing'
 import { estimateToSections, toComplaintSections, type EditableSection } from '@/utils/estimateSections'
 import { buildPriceContext } from '@/utils/aiContext'
-import type { Estimate, SpecialistPayout, EstimatePayOption } from '@/types/pricing'
+import { secureId } from '@/utils/id'
+import {
+  grossExtraLine, unseenLines, requestSeedLines, incomingExtras, vanishedExtras, syncRequestExtras, parentExtraLines,
+} from '@/utils/extraExpenseSync'
+import type { Estimate, EstimateLine, SpecialistPayout, EstimatePayOption } from '@/types/pricing'
 import type { ServiceRequest } from '@/types/serviceRequest'
 import { cardVisibility, type ServiceCenter, type ViewRole } from '@/types/access'
 
@@ -66,6 +72,31 @@ export default function ActualEstimateEditorPage() {
   const [discountValue, setDiscountValue] = useState<number | ''>('')
   const [discountKind, setDiscountKind] = useState<'pct' | 'uah'>('uah')
   const [title, setTitle] = useState('')
+  // Додаткові витрати поза прайсом (доставка, запчастина…): рядки extra=true. Їх вносить
+  // Telegram-бот співробітників (на заявку або одразу в цей факт) або майстер тут. Під час
+  // пересборки з каталогу вони НЕ губляться — дописуються до зібраного кошторису до знижки.
+  const [extraLines, setExtraLines] = useState<EstimateLine[]>([])
+  // Доп. витрати, відомі редактору (з факту/журналу заявки при завантаженні або після збереження). Що
+  // з'явилося в базі поза цим набором — додано паралельно (бот, застосунок) і не має бути затерте.
+  const knownExtraRefs = useRef<Set<string>>(new Set())
+  // Стан факту/заявки засіваємо ОДИН раз на id: ефект ?edit= перезапускається при оновленні каталогу
+  // (ІІ-підбір викликає refreshSilent) і інакше молча відкочував би правки майстра до даних із бази.
+  const seededEditId = useRef('')
+  const seededRequestId = useRef('')
+  const seededParentId = useRef('')
+  // Рядки, перенесені з варіанта-батька: до першого збереження факту їх немає ні в журналі, ні у факті,
+  // тому звірка «зникло деінде» їх не стосується.
+  const parentExtraRefs = useRef<Set<string>>(new Set())
+  // Додати рядки, яких редактор ще не бачив. Відомий, але відсутній у редакторі рядок прибрав майстер —
+  // його не повертаємо (інакше пізніше завантаження заявки «воскресило» б видалене).
+  const seedExtras = (lines: EstimateLine[]) => {
+    const fresh = unseenLines(lines, knownExtraRefs.current)
+    if (!fresh.length) return
+    fresh.forEach((l) => knownExtraRefs.current.add(l.refId))
+    setExtraLines((prev) => [...prev, ...fresh.filter((l) => !prev.some((x) => x.refId === l.refId))])
+  }
+  const [extraTitle, setExtraTitle] = useState('')
+  const [extraAmount, setExtraAmount] = useState<number | ''>('')
 
   const [fops, setFops] = useState<FopPublic[]>([])
 
@@ -95,7 +126,15 @@ export default function ActualEstimateEditorPage() {
     pricingService.loadEstimate(parentId).then((est) => {
       if (!est) { notify('Попередній кошторис не знайдено', 'error'); return }
       setPrelim(est)
-      setTitle(est.title || '')
+      // Назву і рядки поза прайсом (калькуляції майстрів у варіанті) беремо з варіанта один раз на parent:
+      // повторний запуск (оновлення каталогу) не затирає введене і не повертає прибране майстром.
+      if (seededParentId.current !== parentId) {
+        seededParentId.current = parentId
+        setTitle(est.title || '')
+        const fromParent = parentExtraLines(est)
+        fromParent.forEach((l) => parentExtraRefs.current.add(l.refId))
+        setExtraLines((prev) => [...prev, ...fromParent.filter((l) => !prev.some((x) => x.refId === l.refId))])
+      }
       // Разрезы по требованиям наследуем из предварительной (её секции). Не затираем правки мастера
       // при повторном срабатывании (напр. когда догрузился каталог) — сеем только если ещё пусто.
       setSections((prev) => prev.length ? prev : estimateToSections(est, indexed))
@@ -108,12 +147,17 @@ export default function ActualEstimateEditorPage() {
     if (!editId) return
     pricingService.loadEstimate(editId).then((act) => {
       if (!act) { notify('Кошторис не знайдено', 'error'); return }
+      // Повторний запуск (догрузився/оновився каталог) — лише розрізи, якщо їх ще немає; решту не чіпаємо.
+      if (seededEditId.current === editId) { setSections((prev) => prev.length ? prev : estimateToSections(act, indexed)); return }
+      seededEditId.current = editId
       setSavedId(editId)
       setTitle(act.title || '')
       setPayouts(act.specialistPayouts || [])
       setPayOptions(act.payOptions || []) // старые сметы без payOptions — мастер выберет способы заново
       setEditSrId(act.serviceRequestId || '')
       setExcludedCommon(act.excludedCommonCodes || [])
+      // Рядки поза прайсом зберігаємо як є (без знижки: grossLineTotal — повна сума, якщо знижка була).
+      seedExtras((act.lines || []).filter((l) => l.extra).map(grossExtraLine))
       if (act.discount) { setDiscountValue(act.discount.value); setDiscountKind(act.discount.kind) }
       setSections((prev) => prev.length ? prev : estimateToSections(act, indexed)) // разрезы по требованиям
       if (act.parentEstimateId) {
@@ -131,9 +175,15 @@ export default function ActualEstimateEditorPage() {
     serviceRequestService.get(effRequestId).then((r) => {
       if (!r) return
       setRequest(r)
+      if (seededRequestId.current === effRequestId) return
+      seededRequestId.current = effRequestId
       if (!editId) {
         setPayouts((prev) => prev.length ? prev : (r.specialists || []).map((s) => ({ uid: s.uid, name: s.name, specialistAmount: 0, centerAdminAmount: 0 })))
       }
+      // Витрати заявки, що мають бути в цьому кошторисі: ще не застосовані (бот/застосунок записав до факту)
+      // і застосовані до ЦЬОГО факту (редагування) або до поточного факту заявки (створення нового факту —
+      // вони переходять у новий). Позначаємо відомими лише ПОКАЗАНІ: решту звірка при збереженні побачить.
+      seedExtras(requestSeedLines(r, editId))
     }).catch(() => {})
   }, [effRequestId, editId])
 
@@ -158,14 +208,16 @@ export default function ActualEstimateEditorPage() {
   }, [center, editId])
 
   // Живой расчёт фактической сметы из разрезов-требований (мульти-жалобы + авто общие работы).
+  // Факт БЕЗ позицій прайсу (лише рядки поза прайсом — з калькуляцій майстрів, бота чи застосунку) теж
+  // дозволений: тоді загальні роботи не додаються автоматично (вони супроводжують позиції прайсу).
   const actual: Estimate | null = useMemo(() => {
     const cs = toComplaintSections(sections, indexed)
-    if (!cs.length) return null
+    if (!cs.length && !extraLines.length) return null
     const built = buildMultiEstimate({
       sections: cs,
       catalog: indexed,
       settings: catalog.settings,
-      excludeCommonCodes: excludedCommon,
+      excludeCommonCodes: cs.length ? excludedCommon : (catalog.settings.commonWorkCodes ?? []),
       meta: {
         requestId: prelim?.requestId ?? null, // 1С-ссылка (унаследованная от предложения), если есть
         title: title || (prelim?.title ?? ''),
@@ -173,10 +225,20 @@ export default function ActualEstimateEditorPage() {
         createdBy: user?.email ?? null,
       },
     })
-    const withDiscount = applyEstimateDiscount(built,
+    const withDiscount = applyEstimateDiscount(appendExtraLines(built, extraLines),
       discountValue && Number(discountValue) > 0 ? { value: Number(discountValue), kind: discountKind } : null)
     return { ...withDiscount, excludedCommonCodes: excludedCommon }
-  }, [sections, indexed, catalog.settings, title, prelim, user, excludedCommon, discountValue, discountKind])
+  }, [sections, indexed, catalog.settings, title, prelim, user, excludedCommon, discountValue, discountKind, extraLines])
+
+  const addExtraLine = () => {
+    const t = extraTitle.trim()
+    const a = Number(extraAmount)
+    if (!t || !(a > 0)) return
+    setExtraLines((prev) => [...prev, extraExpenseLine({ id: secureId(8), title: t, amount: a })])
+    setExtraTitle(''); setExtraAmount('')
+  }
+  const removeExtraLine = (refId: string) => setExtraLines((prev) => prev.filter((l) => l.refId !== refId))
+
 
   const comparison = useMemo(() => (prelim && actual ? compareEstimates(prelim, actual) : null), [prelim, actual])
   const reapproval = useMemo(() => (prelim && actual ? needsReapproval(prelim, actual) : null), [prelim, actual])
@@ -229,20 +291,8 @@ export default function ActualEstimateEditorPage() {
     if (payOptions.some((o) => !o.fopId)) { notify('У кожного способу оплати має бути ФОП', 'error'); return null }
     setSaving(true)
     try {
-      // Защита от затирания оплаченной сметы: если её уже оплатили, редактировать нельзя
-      // (иначе можно сбросить status=paid/paymentId и открыть двойное списание).
-      if (savedId) {
-        const fresh = await pricingService.loadEstimate(savedId)
-        if (fresh && (fresh.status === 'paid' || fresh.paymentId)) {
-          notify('Кошторис уже оплачено — редагування заблоковано', 'error')
-          return null
-        }
-        // Клиент прямо сейчас на оплате (claim на ~3 хв): правка суммы разошлась бы с чеком → недоплата.
-        if (fresh && fresh.payInitiatedAt && Date.now() - Date.parse(fresh.payInitiatedAt) < 3 * 60 * 1000) {
-          notify('Клієнт зараз оплачує цей кошторис — зачекайте кілька хвилин перед редагуванням', 'error')
-          return null
-        }
-      }
+      // Захист від затирання оплаченого кошторису та від правки під час оплати клієнтом перевіряється
+      // В ТРАНЗАКЦІЇ збереження (check нижче) — разом зі звіркою витрат, на свіжих даних.
       // Если у факта ЕСТЬ родитель (из ?parent= или из загруженного факта), но предварительная
       // ещё не догрузилась — не сохраняем: иначе потеряем связь план/факт и проверку reapproval.
       const knownParentId = parentId || editParentId || null
@@ -251,7 +301,9 @@ export default function ActualEstimateEditorPage() {
         return null
       }
       const required = reapproval?.required ?? false
-      const srId = serviceRequestId || prelim?.serviceRequestId || null
+      // Заявка факту — з будь-якого джерела (?request=, попередній кошторис, сам факт у режимі ?edit=):
+      // інакше факт, відкритий без ?request=, затирав би serviceRequestId і не синхронізував журнал витрат.
+      const srId = effRequestId || null
       // Первичный ФОП (для чека по умолчанию/writeback) — ФОП первого способа. При оплате сервер
       // выберет ФОП по конкретному способу из payOptions.
       const primaryFopId = payOptions[0].fopId
@@ -267,12 +319,60 @@ export default function ActualEstimateEditorPage() {
         payOptions,
         fopId: primaryFopId,
       }
-      const res = await pricingService.saveEstimate(toSave)
-      if (!res) { notify('Не вдалося зберегти кошторис', 'error'); return null }
+      type SaveAbort =
+        | { kind: 'paid' } | { kind: 'paying' } | { kind: 'noRequest' }
+        | { kind: 'extras'; incoming: EstimateLine[]; vanished: EstimateLine[]; freshReq: ServiceRequest | null }
+      const known = knownExtraRefs.current
+      const parentExempt = parentExtraRefs.current
+      const lines = extraLines
+      // Звірка і запис — в одній транзакції: свіжі дані читаються в ній, тож витрата, яку бот/застосунок
+      // додав або вилучив посеред збереження, не загубиться і не «воскресне» (SDK перезапустить check).
+      const res = await pricingService.saveEstimateWithRequest<SaveAbort>({
+        estimate: toSave,
+        requestId: srId,
+        check: ({ id, freshEst, freshReq }) => {
+          if (savedId && freshEst && (freshEst.status === 'paid' || freshEst.paymentId)) return { abort: { kind: 'paid' } }
+          if (freshEst?.payInitiatedAt && Date.now() - Date.parse(freshEst.payInitiatedAt) < 3 * 60 * 1000) return { abort: { kind: 'paying' } }
+          if (srId && !freshReq) return { abort: { kind: 'noRequest' } }
+          const recon = { known, editorLines: lines, freshEst: savedId ? freshEst : null, freshReq }
+          const incoming = incomingExtras({ ...recon, estimateId: savedId })
+          const vanished = vanishedExtras({ ...recon, exempt: parentExempt })
+          if (incoming.length || vanished.length) return { abort: { kind: 'extras', incoming, vanished, freshReq } }
+          if (!srId) return { requestPatch: null }
+          const journal = freshReq?.extraExpenses
+          const extraExpenses = (journal?.length || lines.length)
+            ? syncRequestExtras({ existing: journal, editorLines: lines, estimateId: id, by: user?.email ?? null, shown: known })
+            : undefined
+          // Привязываем факт к заявке и двигаем её в «в роботі».
+          return { requestPatch: { actualEstimateId: id, status: 'in_work', ...(extraExpenses ? { extraExpenses } : {}) } }
+        },
+      })
+      if (!res.ok) {
+        const a = res.abort
+        if (!a) { notify(res.error || 'Не вдалося зберегти кошторис', 'error'); return null }
+        if (a.kind === 'paid') { notify('Кошторис уже оплачено — редагування заблоковано', 'error'); return null }
+        // Клиент прямо сейчас на оплате (claim на ~3 хв): правка суммы разошлась бы с чеком → недоплата.
+        if (a.kind === 'paying') { notify('Клієнт зараз оплачує цей кошторис — зачекайте кілька хвилин перед редагуванням', 'error'); return null }
+        if (a.kind === 'noRequest') { notify('Не вдалося завантажити заявку — спробуйте ще раз', 'error'); return null }
+        const gone = new Set(a.vanished.map((l) => l.refId))
+        a.incoming.forEach((l) => knownExtraRefs.current.add(l.refId))
+        gone.forEach((ref) => knownExtraRefs.current.delete(ref))
+        setExtraLines((prev) => [...prev.filter((l) => !gone.has(l.refId)), ...a.incoming.filter((l) => !prev.some((x) => x.refId === l.refId))])
+        if (a.freshReq) setRequest(a.freshReq)
+        const list = (ls: EstimateLine[]) => ls.map((l) => `${tName(l.name, 'uk')} — ${formatMoney(l.lineTotal)}`).join('; ')
+        notify('Поки ви редагували, витрати змінили в іншому місці.'
+          + (a.incoming.length ? ` Додано: ${list(a.incoming)}.` : '')
+          + (a.vanished.length ? ` Вилучено: ${list(a.vanished)}.` : '')
+          + ' Кошторис оновлено — перевірте суму і збережіть ще раз.', 'info')
+        return null
+      }
       setSavedId(res.id)
-      // Привязываем факт к заявке и двигаем её в «в роботі».
-      if (srId) {
-        await serviceRequestService.save({ id: srId, actualEstimateId: res.id, status: 'in_work' }).catch(() => {})
+      // Відомі редактору тепер — рівно показані рядки (журнал після запису = показані + записи чужих фактів).
+      knownExtraRefs.current = new Set(lines.map((l) => l.refId))
+      parentExtraRefs.current = new Set() // після збереження рядки з варіанта вже в журналі
+      if (srId && res.requestPatch) {
+        const patch = res.requestPatch
+        setRequest((r) => (r ? { ...r, ...patch } : r))
         // Авто-оповещение клиента: фактична калькуляція готова (канал выбирает сервер; идемпотентно).
         notificationApi.notify({ serviceRequestId: srId, event: 'actual' }).catch(() => {})
       }
@@ -359,6 +459,7 @@ export default function ActualEstimateEditorPage() {
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
           Зніміть галочку, щоб прибрати загальну позицію з цього кошторису. Знижка вшивається
           в рядки пропорційно — оплата і фіскальний чек збігаються копійка в копійку.
+          {!toComplaintSections(sections, indexed).length && ' Без позицій прайсу загальні роботи не додаються.'}
         </Typography>
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1.5 }}>
           {(catalog.settings.commonWorkCodes ?? []).map((code) => {
@@ -381,7 +482,7 @@ export default function ActualEstimateEditorPage() {
             <MenuItem value="uah">грн</MenuItem>
             <MenuItem value="pct">%</MenuItem>
           </TextField>
-          {actual?.discount && (
+          {actual?.discount && actual.discount.amount > 0 && (
             <>
               <Chip size="small" color="error" label={`-${formatMoney(actual.discount.amount)}`} />
               <Typography variant="body2" color="text.secondary">
@@ -389,6 +490,34 @@ export default function ActualEstimateEditorPage() {
               </Typography>
             </>
           )}
+        </Stack>
+      </Paper>
+
+      {/* Додаткові витрати поза прайсом (доставка, запчастина, послуга третьої сторони) */}
+      <Paper sx={{ p: 2, mb: 3 }}>
+        <Typography variant="subtitle1" sx={{ mb: 0.5 }}>Додаткові витрати (поза прайсом)</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          Окремі рядки кошторису без сезону (доставка, запчастина, послуга третьої сторони). Їх також
+          вносить Telegram-бот співробітників — записи на заявці підставляються сюди автоматично.
+        </Typography>
+        {extraLines.length > 0 && (
+          <Stack spacing={0.5} sx={{ mb: 1.5 }}>
+            {extraLines.map((l) => (
+              <Stack key={l.refId} direction="row" spacing={1} alignItems="center">
+                <Typography variant="body2" sx={{ flex: 1 }}>{tName(l.name, 'uk')}</Typography>
+                <Typography variant="body2"><b>{formatMoney(l.lineTotal)}</b></Typography>
+                <IconButton size="small" onClick={() => removeExtraLine(l.refId)} aria-label="Прибрати"><DeleteIcon fontSize="small" /></IconButton>
+              </Stack>
+            ))}
+          </Stack>
+        )}
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <TextField label="Назва витрати" size="small" sx={{ minWidth: 240, flex: 1 }} value={extraTitle}
+            onChange={(e) => setExtraTitle(e.target.value)} placeholder="Доставка Новою Поштою" />
+          <TextField label="Сума, грн" type="number" size="small" sx={{ width: 140 }} value={extraAmount}
+            onChange={(e) => setExtraAmount(e.target.value === '' ? '' : Number(e.target.value))} />
+          <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={addExtraLine}
+            disabled={!extraTitle.trim() || !(Number(extraAmount) > 0)}>Додати</Button>
         </Stack>
       </Paper>
 

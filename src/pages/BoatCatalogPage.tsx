@@ -1,6 +1,7 @@
 // Каталог продажів корабликів (власник): моделі → модельні ряди (роки, базова ціна) → кольори;
 // опції комплектації (сумки/ехолоти/глибиноміри/аксесуари) з ознакою сумісності по МОДЕЛІ;
-// довідник дропшиперів. Замовлення (картотека) — окрема сторінка (фаза 2).
+// довідник магазинів-партнерів (дропшиперів) з умовами: комісія по видах позицій, строк оплати,
+// хто створює накладну, платники (§26.1). Замовлення (картотека) — окрема сторінка.
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -17,11 +18,48 @@ import { isAdminEmail } from '@/config/access'
 import { boatModelService, boatOptionService, dropshipperService } from '@/api/boatCatalogService'
 import {
   BOAT_OPTION_KINDS, BOAT_OPTION_KIND_LABELS, discountPct,
+  SHOP_LINE_KINDS, SHOP_LINE_KIND_LABELS, SHOP_PAY_TERM_DAYS,
   type BoatModel, type BoatModelRow, type BoatOption, type BoatOptionKind, type Dropshipper,
+  type ShopLineKind, type ShopPayer, type ShopTerms,
 } from '@/types/boats'
 import { secureId } from '@/utils/id'
 
 const fmtUah = (n: number) => `${(n || 0).toLocaleString('uk-UA')} грн`
+
+// Умови магазину перед збереженням: відсотки 0..100 по кожному виду (порожньо = 0), строк оплати, типові вибори.
+const cleanTerms = (t?: ShopTerms): ShopTerms => {
+  const commissionByKind: Partial<Record<ShopLineKind, number>> = {}
+  for (const k of SHOP_LINE_KINDS) {
+    const v = Number(t?.commissionByKind?.[k])
+    commissionByKind[k] = Number.isFinite(v) && v > 0 ? Math.min(v, 100) : 0
+  }
+  const days = Number(t?.payTermDays)
+  return {
+    commissionByKind,
+    payTermDays: Number.isFinite(days) && days > 0 ? Math.round(days) : SHOP_PAY_TERM_DAYS,
+    ttnBy: t?.ttnBy === 'shop' ? 'shop' : 'us',
+    collectBy: t?.collectBy === 'us' ? 'us' : 'shop',
+  }
+}
+const cleanPayers = (p?: ShopPayer[]): ShopPayer[] =>
+  (p || [])
+    .map((x) => ({ name: (x.name || '').trim(), taxId: (x.taxId || '').trim(), iban: (x.iban || '').replace(/\s+/g, '').toUpperCase() }))
+    .filter((x) => x.name || x.taxId || x.iban)
+
+// Короткий опис умов для списку магазинів.
+const termsSummary = (d: Dropshipper): string[] => {
+  const t = d.terms
+  if (!t) return ['умови не задано']
+  const out: string[] = []
+  for (const k of SHOP_LINE_KINDS) {
+    const v = Number(t.commissionByKind?.[k]) || 0
+    if (v > 0) out.push(`${SHOP_LINE_KIND_LABELS[k].toLowerCase()} ${v}%`)
+  }
+  if (!out.length) out.push('без комісії')
+  out.push(`оплата ${t.payTermDays || SHOP_PAY_TERM_DAYS} дн.`)
+  out.push(t.ttnBy === 'shop' ? 'ТТН магазину' : 'ТТН наша')
+  return out
+}
 
 export default function BoatCatalogPage() {
   const navigate = useNavigate()
@@ -86,9 +124,13 @@ export default function BoatCatalogPage() {
   const saveDropper = async () => {
     if (!editDropper?.name?.trim()) return
     setSaving(true)
-    const res = await dropshipperService.save({ active: true, ...editDropper, name: editDropper.name.trim() })
+    const res = await dropshipperService.save({
+      active: true, ...editDropper, name: editDropper.name.trim(),
+      legalName: (editDropper.legalName || '').trim(), taxId: (editDropper.taxId || '').trim(),
+      terms: cleanTerms(editDropper.terms), payers: cleanPayers(editDropper.payers),
+    })
     setSaving(false)
-    if (res) { setEditDropper(null); notify('Дропшипера збережено'); load() } else notify('Не вдалося зберегти', 'error')
+    if (res) { setEditDropper(null); notify('Магазин збережено'); load() } else notify('Не вдалося зберегти', 'error')
   }
 
   const removeEntity = async (svc: { remove: (id: string) => Promise<boolean> }, id: string, what: string) => {
@@ -113,14 +155,14 @@ export default function BoatCatalogPage() {
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         Моделі з модельними рядами (роки випуску, базова ціна) та кольорами; опції комплектації
-        з сумісністю по моделі; довідник дропшиперів. Замовлення — окрема картотека.
+        з сумісністю по моделі; довідник магазинів-партнерів з умовами. Замовлення — окрема картотека.
       </Typography>
 
       <Paper sx={{ mb: 2 }}>
         <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="fullWidth">
           <Tab label={`Моделі (${models.length})`} />
           <Tab label={`Опції (${options.length})`} />
-          <Tab label={`Дропшипери (${droppers.length})`} />
+          <Tab label={`Магазини (${droppers.length})`} />
         </Tabs>
       </Paper>
 
@@ -210,18 +252,21 @@ export default function BoatCatalogPage() {
       ) : (
         <Stack spacing={1.5}>
           <Box>
-            <Button variant="contained" startIcon={<AddIcon />} onClick={() => setEditDropper({ name: '', phone: '', note: '', active: true })}>
-              Додати дропшипера
+            <Button variant="contained" startIcon={<AddIcon />} onClick={() => setEditDropper({ name: '', phone: '', note: '', active: true, terms: cleanTerms() })}>
+              Додати магазин
             </Button>
           </Box>
-          {droppers.length === 0 && <Alert severity="info">Дропшиперів поки немає.</Alert>}
+          {droppers.length === 0 && <Alert severity="info">Магазинів-партнерів поки немає.</Alert>}
           {droppers.map((d) => (
             <Paper key={d.id} sx={{ p: 2, opacity: d.active ? 1 : 0.55 }}>
               <Stack direction="row" alignItems="center" spacing={1}>
                 <Typography variant="subtitle2" sx={{ flexGrow: 1 }}>{d.name}{!d.active && ' (неактивний)'}</Typography>
                 {d.phone && <Typography variant="body2" color="text.secondary">{d.phone}</Typography>}
                 <IconButton size="small" onClick={() => setEditDropper({ ...d })}><EditIcon fontSize="small" /></IconButton>
-                <IconButton size="small" color="error" onClick={() => removeEntity(dropshipperService, d.id, `дропшипера «${d.name}»`)}><DeleteIcon fontSize="small" /></IconButton>
+                <IconButton size="small" color="error" onClick={() => removeEntity(dropshipperService, d.id, `магазин «${d.name}»`)}><DeleteIcon fontSize="small" /></IconButton>
+              </Stack>
+              <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
+                {termsSummary(d).map((t) => <Chip key={t} size="small" variant="outlined" color={d.terms ? 'default' : 'warning'} label={t} />)}
               </Stack>
               {d.note && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{d.note}</Typography>}
             </Paper>
@@ -299,18 +344,79 @@ export default function BoatCatalogPage() {
         </DialogActions>
       </Dialog>
 
-      {/* ---- Діалог дропшипера ---- */}
-      <Dialog open={!!editDropper} onClose={() => setEditDropper(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>{editDropper?.id ? 'Дропшипер' : 'Новий дропшипер'}</DialogTitle>
+      {/* ---- Діалог магазину-партнера: контакти, умови, платники ---- */}
+      <Dialog open={!!editDropper} onClose={() => setEditDropper(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>{editDropper?.id ? 'Магазин-партнер' : 'Новий магазин-партнер'}</DialogTitle>
         <DialogContent dividers>
-          {editDropper && (
-            <Stack spacing={2} sx={{ pt: 1 }}>
-              <TextField label="Назва / імʼя" value={editDropper.name || ''} onChange={(e) => setEditDropper({ ...editDropper, name: e.target.value })} size="small" fullWidth autoFocus />
-              <TextField label="Телефон" value={editDropper.phone || ''} onChange={(e) => setEditDropper({ ...editDropper, phone: e.target.value })} size="small" fullWidth />
-              <TextField label="Нотатка" value={editDropper.note || ''} onChange={(e) => setEditDropper({ ...editDropper, note: e.target.value })} size="small" fullWidth multiline minRows={2} />
-              <FormControlLabel control={<Switch checked={editDropper.active !== false} onChange={(e) => setEditDropper({ ...editDropper, active: e.target.checked })} />} label="Активний" />
-            </Stack>
-          )}
+          {editDropper && (() => {
+            const terms = editDropper.terms || {}
+            const setTerms = (p: Partial<ShopTerms>) => setEditDropper({ ...editDropper, terms: { ...terms, ...p } })
+            const payers = editDropper.payers || []
+            const setPayer = (idx: number, p: Partial<ShopPayer>) =>
+              setEditDropper({ ...editDropper, payers: payers.map((x, i) => (i === idx ? { ...x, ...p } : x)) })
+            return (
+              <Stack spacing={2} sx={{ pt: 1 }}>
+                <TextField label="Назва / імʼя" value={editDropper.name || ''} onChange={(e) => setEditDropper({ ...editDropper, name: e.target.value })} size="small" fullWidth autoFocus />
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                  <TextField label="Телефон" value={editDropper.phone || ''} onChange={(e) => setEditDropper({ ...editDropper, phone: e.target.value })} size="small" fullWidth />
+                  <TextField label="Юридична назва" value={editDropper.legalName || ''} onChange={(e) => setEditDropper({ ...editDropper, legalName: e.target.value })} size="small" fullWidth />
+                  <TextField label="ЄДРПОУ / РНОКПП" value={editDropper.taxId || ''} onChange={(e) => setEditDropper({ ...editDropper, taxId: e.target.value })} size="small" fullWidth />
+                </Stack>
+
+                <Divider>Комісія магазину, % від роздрібної ціни</Divider>
+                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                  {SHOP_LINE_KINDS.map((k) => (
+                    <TextField key={k} label={SHOP_LINE_KIND_LABELS[k]} type="number" size="small" sx={{ width: 118 }}
+                      value={terms.commissionByKind?.[k] || ''} placeholder="0"
+                      inputProps={{ min: 0, max: 100, step: 0.5 }}
+                      onChange={(e) => setTerms({ commissionByKind: { ...(terms.commissionByKind || {}), [k]: Number(e.target.value) || 0 } })} />
+                  ))}
+                </Stack>
+                <Typography variant="caption" color="text.secondary">
+                  Задається на кожен вид позиції окремо; порожньо — без комісії. У замовленні відсоток підставляється в рядок, його можна поправити.
+                </Typography>
+
+                <Divider>Умови</Divider>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                  <TextField label="Строк оплати, днів" type="number" size="small" sx={{ minWidth: 150 }}
+                    value={terms.payTermDays || ''} placeholder={String(SHOP_PAY_TERM_DAYS)} inputProps={{ min: 1, max: 365 }}
+                    onChange={(e) => setTerms({ payTermDays: Number(e.target.value) || undefined })}
+                    helperText="після отримання посилки" />
+                  <TextField select label="Накладну зазвичай створює" size="small" fullWidth
+                    value={terms.ttnBy === 'shop' ? 'shop' : 'us'} onChange={(e) => setTerms({ ttnBy: e.target.value as 'us' | 'shop' })}>
+                    <MenuItem value="us">Ми (наша ТТН)</MenuItem>
+                    <MenuItem value="shop">Магазин (дає свій номер ТТН)</MenuItem>
+                  </TextField>
+                  <TextField select label="Гроші клієнта зазвичай отримує" size="small" fullWidth
+                    value={terms.collectBy === 'us' ? 'us' : 'shop'} onChange={(e) => setTerms({ collectBy: e.target.value as 'us' | 'shop' })}>
+                    <MenuItem value="shop">Магазин</MenuItem>
+                    <MenuItem value="us">Ми (наложка в нашій ТТН)</MenuItem>
+                  </TextField>
+                </Stack>
+
+                <Divider>Платники</Divider>
+                <Typography variant="caption" color="text.secondary">
+                  З яких рахунків і від чийого імені магазин платить нам — за цим його платіж упізнається у виписці. Можна кілька.
+                </Typography>
+                {payers.map((x, idx) => (
+                  <Stack key={idx} direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }}>
+                    <TextField label="Назва платника" value={x.name || ''} onChange={(e) => setPayer(idx, { name: e.target.value })} size="small" sx={{ flex: 1 }} />
+                    <TextField label="ЄДРПОУ / РНОКПП" value={x.taxId || ''} onChange={(e) => setPayer(idx, { taxId: e.target.value })} size="small" sx={{ width: { sm: 150 } }} />
+                    <TextField label="IBAN" value={x.iban || ''} onChange={(e) => setPayer(idx, { iban: e.target.value })} size="small" sx={{ flex: 1.3 }} placeholder="UA…" />
+                    <IconButton size="small" color="error" onClick={() => setEditDropper({ ...editDropper, payers: payers.filter((_, i) => i !== idx) })}><DeleteIcon fontSize="small" /></IconButton>
+                  </Stack>
+                ))}
+                <Box>
+                  <Button size="small" startIcon={<AddIcon />} onClick={() => setEditDropper({ ...editDropper, payers: [...payers, { name: '', taxId: '', iban: '' }] })}>
+                    Додати платника
+                  </Button>
+                </Box>
+
+                <TextField label="Нотатка" value={editDropper.note || ''} onChange={(e) => setEditDropper({ ...editDropper, note: e.target.value })} size="small" fullWidth multiline minRows={2} />
+                <FormControlLabel control={<Switch checked={editDropper.active !== false} onChange={(e) => setEditDropper({ ...editDropper, active: e.target.checked })} />} label="Активний" />
+              </Stack>
+            )
+          })()}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditDropper(null)}>Скасувати</Button>

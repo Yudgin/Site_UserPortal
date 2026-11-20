@@ -3,14 +3,16 @@
 // GET возвращает лишь флаги «задано/не задано», значения ключей наружу НЕ отдаются. PUT
 // перезаписывает только НЕПУСТЫЕ переданные ключи (пустые оставляют прежние).
 import { verifyFirebaseAdmin } from './adminAuth.js'
-import { getFop } from './fops.js'
-import { sellReceipt } from './checkbox.js'
+import { getFop, loadFopFresh } from './fops.js'
+import { signin, sellReceipt, returnReceipt, getReceipt } from './checkbox.js'
+import { checkFopKeys } from './fopKeyCheck.js'
+import { runDailyKeyCheck, saveKeyCheck, forgetKeyCheck, loadKeyChecks, ownerTelegram, RUNS } from './fopKeyCheckDaily.js'
 
 const nowIso = () => new Date().toISOString()
 const clip = (v, n = 200) => (v == null ? '' : String(v).slice(0, n))
 
 // Оставить только непустые строковые ключи по группам секретов (write-only).
-const SECRET_GROUPS = ['liqpay', 'monoChast', 'monoAcquire', 'privatPaypart', 'checkbox', 'novaPoshta']
+const SECRET_GROUPS = ['liqpay', 'monoChast', 'monoAcquire', 'privatPaypart', 'checkbox', 'novaPoshta', 'monoPersonal', 'privatAutoclient', 'novaPay']
 const pickSecrets = (secrets = {}) => {
   const out = {}
   for (const g of SECRET_GROUPS) {
@@ -27,21 +29,30 @@ const pickSecrets = (secrets = {}) => {
 }
 
 export function registerFopsAdmin(app, deps) {
-  const { adminDb, refreshFops } = deps
+  const {
+    adminDb, refreshFops, verifyAdmin = verifyFirebaseAdmin, loadFop = loadFopFresh, checkKeys = checkFopKeys,
+    receipts = { signin, sellReceipt, returnReceipt, getReceipt }, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    // Тот же общий токен, что у других заданий Cloud Scheduler (pay-reconcile, calls-reconcile): заголовок x-admin-token.
+    cronToken = process.env.PAYMENTS_ADMIN_TOKEN || '', notify = ownerTelegram(),
+  } = deps
   const gate = async (req, res) => {
-    if (await verifyFirebaseAdmin(req)) return true
+    if (await verifyAdmin(req)) return true
     res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Доступ лише для власника' } })
     return false
   }
+  // Ключи или настройки ФОП поменялись — прежний результат проверки уже не про них: метки станут серыми до новой проверки.
+  const forgetCheck = (id) => forgetKeyCheck(adminDb, id).catch((e) => console.error(`fops ${id}: скидання перевірки:`, e?.message))
 
   // Список ФОП для админки: мета + ФЛАГИ наличия секретов (без значений).
   app.get('/api/fops/admin', async (req, res) => {
     if (!(await gate(req, res))) return
     if (!adminDb) return res.status(503).json({ success: false })
     try {
-      const [metaSnap, secSnap] = await Promise.all([
+      const [metaSnap, secSnap, checks] = await Promise.all([
         adminDb.collection('fops').get(),
         adminDb.collection('fopSecrets').get(),
+        // Без результатов проверок список всё равно нужен: метки будут серыми.
+        loadKeyChecks(adminDb).catch((e) => { console.error('fops admin list: перевірки:', e.message); return {} }),
       ])
       const secrets = {}
       secSnap.forEach((d) => { secrets[d.id] = d.data() || {} })
@@ -61,7 +72,12 @@ export function registerFopsAdmin(app, deps) {
             privatPaypart: !!(s.privatPaypart && s.privatPaypart.storeId),
             checkbox: !!(s.checkbox && s.checkbox.licenseKey),
             novaPoshtaApiKey: !!(s.novaPoshta && s.novaPoshta.apiKey),
+            monoPersonal: !!(s.monoPersonal && s.monoPersonal.token),
+            privatAutoclient: !!(s.privatAutoclient && s.privatAutoclient.token),
+            novaPay: !!(s.novaPay && s.novaPay.refreshToken),
           },
+          // Последняя проверка ключей (вручную или ежедневно): от неё цвет меток в списке.
+          lastCheck: checks[d.id] || null,
         }
       }).sort((a, b) => a.name.localeCompare(b.name))
       res.json({ success: true, data: items })
@@ -111,6 +127,7 @@ export function registerFopsAdmin(app, deps) {
       if (Object.keys(secretPatch).length) {
         await adminDb.collection('fopSecrets').doc(id).set(secretPatch, { merge: true })
       }
+      await forgetCheck(id)
 
       if (typeof refreshFops === 'function') await refreshFops(adminDb)
       res.json({ success: true, data: { id } })
@@ -129,6 +146,7 @@ export function registerFopsAdmin(app, deps) {
     if (!id || !SECRET_GROUPS.includes(group)) return res.status(400).json({ success: false })
     try {
       await adminDb.collection('fopSecrets').doc(id).set({ [group]: null }, { merge: true })
+      await forgetCheck(id)
       if (typeof refreshFops === 'function') await refreshFops(adminDb)
       res.json({ success: true })
     } catch (e) {
@@ -147,6 +165,7 @@ export function registerFopsAdmin(app, deps) {
       await Promise.all([
         adminDb.collection('fops').doc(id).delete(),
         adminDb.collection('fopSecrets').doc(id).delete(),
+        forgetCheck(id),
       ])
       if (typeof refreshFops === 'function') await refreshFops(adminDb)
       res.json({ success: true })
@@ -156,27 +175,135 @@ export function registerFopsAdmin(app, deps) {
     }
   })
 
-  // Тестовый фискальный чек: РЕАЛЬНЫЙ чек продажи на 10 грн кредами ЭТОГО ФОП (Checkbox), чтобы
-  // проверить, что данные кассы внесены верно. Открывает реальную смену. Ошибку Checkbox отдаём
-  // текстом — по ней видно причину (неверный licenseKey/PIN, каса не активна и т.п.).
+  // Проверка ключей без денег (см. fopKeyCheck.js): ключи читаем из Firestore, наружу — только вердикты.
+  app.post('/api/fops/admin/:id/check-keys', async (req, res) => {
+    if (!(await gate(req, res))) return
+    if (!adminDb) return res.status(503).json({ success: false })
+    const id = clip(req.params.id, 64).replace(/[^\w-]/g, '')
+    if (!id) return res.status(400).json({ success: false, error: { code: 'BAD_ID', message: 'Некоректний id' } })
+    try {
+      const fop = await loadFop(adminDb, id)
+      if (!fop) return res.status(404).json({ success: false, error: { code: 'NO_FOP', message: 'ФОП не знайдено' } })
+      const startedAt = nowIso()
+      const data = await checkKeys(fop)
+      // Результат — в список (цвет меток). Не записался — проверка всё равно отдаётся владельцу.
+      try {
+        await saveKeyCheck(adminDb, id, data, 'manual', nowIso(), startedAt)
+      } catch (e) {
+        console.error(`fops check-keys ${id}: запис результату:`, e?.message)
+      }
+      return res.json({ success: true, data })
+    } catch (e) {
+      console.error(`fops check-keys ${id}:`, e?.message)
+      return res.status(500).json({ success: false, error: { code: 'CHECK_FAILED', message: 'Не вдалося перевірити ключі' } })
+    }
+  })
+
+  // Ежедневная проверка ключей всех активных ФОП (Cloud Scheduler с x-admin-token) или по кнопке владельца.
+  app.post('/api/fops/checks/daily', async (req, res) => {
+    const byCron = !!cronToken && req.get('x-admin-token') === cronToken
+    if (!byCron && !(await gate(req, res))) return
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const run = await runDailyKeyCheck({ adminDb, loadFop, checkKeys, notify })
+      if (run.busy) return res.status(409).json({ success: false, error: { code: 'BUSY', message: 'Перевірка вже йде: спробуйте за хвилину' } })
+      return res.json({ success: true, data: { at: run.at, checked: run.checked, failed: run.failed, issues: run.issues, sent: run.sent, telegram: run.telegram } })
+    } catch (e) {
+      console.error('fops daily check:', e?.message)
+      return res.status(500).json({ success: false, error: { code: 'DAILY_FAILED', message: 'Щоденна перевірка не виконалась' } })
+    }
+  })
+
+  // Для страницы /fops: подключены ли сообщения в Telegram и чем закончилась последняя ежедневная проверка.
+  app.get('/api/fops/admin/checks-status', async (req, res) => {
+    if (!(await gate(req, res))) return
+    if (!adminDb) return res.status(503).json({ success: false })
+    try {
+      const snap = await adminDb.collection(RUNS).doc('last').get()
+      const run = snap.exists ? snap.data() : null
+      return res.json({
+        success: true,
+        data: {
+          telegram: notify.configured,
+          lastRun: run ? { at: run.at, checked: run.checked, failed: run.failed, issues: run.issues || 0, sent: run.sent } : null,
+        },
+      })
+    } catch (e) {
+      console.error('fops checks-status:', e?.message)
+      return res.status(500).json({ success: false })
+    }
+  })
+
+  // Тестовый фискальный чек: РЕАЛЬНЫЙ чек продажи на 10 грн кассой ЭТОГО ФОП (Checkbox) и сразу чек возврата на ту
+  // же сумму, чтобы в кассе не оставалось продажи. Деньги не двигаются: это только фискальные записи. Открывает
+  // реальную смену. Ошибку Checkbox отдаём текстом — по ней видно причину (неверный licenseKey/PIN, касса не активна).
+  const TEST_GOODS = [{ name: 'Ремонт (тестовий чек)', price: 10, qty: 1, code: 'TEST-REPAIR' }]
+  const SETTLED = new Set(['DONE', 'ERROR', 'CANCELLED'])
+  const checkboxText = (e) => {
+    const d = e.response && e.response.data
+    if (!d) return e.message || 'невідома помилка'
+    if (typeof d === 'string') return d
+    // Обычный ответ Checkbox {code, message}: человеку — текст, в скобках — код для поиска.
+    if (typeof d.message === 'string' && d.message) return typeof d.code === 'string' && d.code ? `${d.message} (${d.code})` : d.message
+    return JSON.stringify(d)
+  }
+  // Регистрация чека в ДПС асинхронная (CREATED → DONE): ждём до ~20 с, дальше отдаём то, что есть.
+  const settle = async (fop, r) => {
+    let cur = r
+    for (let i = 0; i < 13 && !SETTLED.has(cur?.status); i++) {
+      await sleep(1500)
+      try {
+        cur = { ...cur, ...(await receipts.getReceipt(fop, r.receiptId)) }
+      } catch (e) {
+        console.warn(`fops test-receipt ${fop.id}: статус чека:`, e?.response?.status || e?.message)
+      }
+    }
+    return cur
+  }
+
   app.post('/api/fops/admin/:id/test-receipt', async (req, res) => {
     if (!(await gate(req, res))) return
     const id = clip(req.params.id, 64).replace(/[^\w-]/g, '')
-    const fop = getFop(id)
+    let fop
+    try {
+      // Прямо из Firestore: ключ кассы могли только что сменить, а запрос попасть на другой экземпляр сервера.
+      fop = adminDb ? await loadFop(adminDb, id) : getFop(id)
+    } catch (e) {
+      console.error(`fops test-receipt ${id}: читання ФОП:`, e?.message)
+      return res.status(500).json({ success: false, error: { code: 'LOAD_FAILED', message: 'Не вдалося прочитати ФОП' } })
+    }
     if (!fop) return res.status(404).json({ success: false, error: { code: 'NO_FOP', message: 'ФОП не знайдено' } })
     if (!fop.checkbox || !fop.checkbox.licenseKey) {
       return res.status(400).json({ success: false, error: { code: 'NO_CHECKBOX', message: 'У ФОП не заданий Checkbox (ключ каси/PIN). Спочатку збережіть дані каси.' } })
     }
+    let sale
     try {
-      const r = await sellReceipt(fop, { goods: [{ name: 'Ремонт (тестовий чек)', price: 10, qty: 1, code: 'TEST-REPAIR' }], paymentLabel: 'Оплата (тест)' })
-      return res.json({ success: true, data: r })
+      await receipts.signin(fop) // свежий вход: токен в кэше мог остаться от прежнего ключа кассы
+      sale = await receipts.sellReceipt(fop, { goods: TEST_GOODS, paymentLabel: 'Оплата (тест)' })
     } catch (e) {
-      const detail = (e.response && e.response.data)
-        ? (typeof e.response.data === 'string' ? e.response.data : JSON.stringify(e.response.data))
-        : (e.message || 'невідома помилка')
+      const detail = checkboxText(e)
       console.error(`fops test-receipt ${id}:`, detail)
       return res.status(502).json({ success: false, error: { code: 'CHECKBOX_ERROR', message: `Checkbox: ${detail}` } })
     }
+    sale = await settle(fop, sale)
+    // Возврат — только к продаже, которую ДПС уже приняла: возврат к незарегистрированной продаже Checkbox может принять,
+    // а продажа потом упасть в ERROR — останется возврат без продажи. Продажа не прошла — возвращать нечего; ещё в
+    // очереди — возврат делает владелец в кабинете Checkbox, когда она зарегистрируется.
+    let refund
+    if (sale.status === 'ERROR' || sale.status === 'CANCELLED') {
+      refund = { skipped: 'not_registered' }
+    } else if (sale.status !== 'DONE') {
+      refund = { skipped: 'sale_pending' }
+    } else {
+      try {
+        refund = await settle(fop, await receipts.returnReceipt(fop, { goods: TEST_GOODS, paymentLabel: 'Повернення (тест)', relatedReceiptId: sale.receiptId }))
+      } catch (e) {
+        const detail = checkboxText(e)
+        console.error(`fops test-receipt ${id}: повернення:`, detail)
+        refund = { error: `Checkbox: ${detail}` }
+      }
+    }
+    return res.json({ success: true, data: { ...sale, refund } })
   })
 }
 

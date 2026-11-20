@@ -11,22 +11,31 @@ import {
 } from '@mui/material'
 import {
   Home as HomeIcon, Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Payments as FopIcon,
-  Receipt as ReceiptIcon,
+  Receipt as ReceiptIcon, VpnKey as KeyIcon, FactCheck as CheckAllIcon,
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
-import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs } from '@/api/endpoints/fopsAdmin'
+import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs, type FopKeyCheck, type FopChecksStatus } from '@/api/endpoints/fopsAdmin'
 import NpFopDirectory from '@/components/NpFopDirectory'
+import KeyCheckDialog from '@/components/KeyCheckDialog'
+import BankHowTo from '@/components/BankHowTo'
+import TestReceiptDialog, { type TestReceiptResult } from '@/components/TestReceiptDialog'
+import FopKeyChips from '@/components/FopKeyChips'
 
 const emptyEdit = () => ({
   id: '', name: '', active: true, isNew: true,
   methods: { liqpayCard: false, liqpayPaypart: false, monoChast: false, monoAcquire: false, privatPaypart: false, cod: false },
   np: { senderRef: '', senderName: '', contactRef: '', contactName: '', senderPhone: '', cityRef: '', cityName: '', settlementRef: '', warehouseRef: '', warehouseName: '' } as FopNovaPoshtaRefs,
-  secretsSet: { liqpay: false, monoChast: false, monoAcquire: false, privatPaypart: false, checkbox: false, novaPoshtaApiKey: false },
+  secretsSet: {
+    liqpay: false, monoChast: false, monoAcquire: false, privatPaypart: false, checkbox: false, novaPoshtaApiKey: false,
+    monoPersonal: false, privatAutoclient: false, novaPay: false,
+  },
   // секретные поля (write-only, пустые = не менять)
   s: {
     liqpayPublic: '', liqpayPrivate: '', monoStoreId: '', monoStoreSecret: '', monoAcquireToken: '',
     privatStoreId: '', privatPassword: '', cbLicense: '', cbPin: '', cbCashier: '', npApiKey: '',
+    // банки ФОП: остатки и выписки
+    monoPersonalToken: '', privatAcToken: '', privatAcId: '', novaPayLogin: '', novaPayRefresh: '', novaPayCert: '',
   },
 })
 type EditState = ReturnType<typeof emptyEdit>
@@ -39,19 +48,43 @@ export default function FopsAdminPage() {
   const [edit, setEdit] = useState<EditState | null>(null)
   const [saving, setSaving] = useState(false)
   const [receiptBusy, setReceiptBusy] = useState('') // id ФОПа, по которому выбивается тестовый чек
-  const [receipt, setReceipt] = useState<{ fopName: string; ok: boolean; fiscalCode?: string | null; taxUrl?: string | null; status?: string | null; error?: string } | null>(null)
+  const [receipt, setReceipt] = useState<TestReceiptResult | null>(null)
+  const [keyBusy, setKeyBusy] = useState('') // id ФОПа, у которого проверяются ключи
+  const [keyCheck, setKeyCheck] = useState<{ fopName: string; data?: FopKeyCheck; error?: string } | null>(null)
   const [snack, setSnack] = useState<{ open: boolean; msg: string; sev: 'success' | 'error' }>({ open: false, msg: '', sev: 'success' })
   const notify = (msg: string, sev: 'success' | 'error' = 'success') => setSnack({ open: true, msg, sev })
 
+  const [checks, setChecks] = useState<FopChecksStatus | null>(null) // ежедневная проверка и Telegram
+  const [allBusy, setAllBusy] = useState(false)
   const load = useCallback(async () => { setLoading(true); setFops(await fopsAdminApi.list()); setLoading(false) }, [])
-  useEffect(() => { load() }, [load])
+  // Без спиннера: после проверки обновить цвет меток, не пряча список.
+  const refresh = useCallback(async () => {
+    const [list, status] = await Promise.all([fopsAdminApi.list(), fopsAdminApi.checksStatus()])
+    setFops(list)
+    setChecks(status)
+  }, [])
+  useEffect(() => { load(); fopsAdminApi.checksStatus().then(setChecks) }, [load])
+
+  const checkAll = async () => {
+    setAllBusy(true)
+    const r = await fopsAdminApi.runAllChecks()
+    setAllBusy(false)
+    if (!r.ok || !r.data) { notify(r.error || 'Не вдалося перевірити', 'error'); return }
+    const d = r.data
+    const tg = d.sent === true
+      ? ', повідомлення надіслано в Telegram'
+      : d.sent === false ? (d.telegram ? ', Telegram не доставив повідомлення' : ', Telegram не підключено') : ''
+    const failed = d.failed ? `, не вдалося перевірити: ${d.failed}` : ''
+    notify(`Перевірено ФОП: ${d.checked}${failed}, проблем: ${d.issues}${tg}`, d.issues || d.failed ? 'error' : 'success')
+    refresh()
+  }
 
   const openNew = () => setEdit(emptyEdit())
   const openEdit = (f: FopAdmin) => setEdit({
     id: f.id, name: f.name, active: f.active, isNew: false,
     methods: { ...emptyEdit().methods, ...f.methods },
     np: { ...emptyEdit().np, ...f.novaPoshta },
-    secretsSet: f.secretsSet,
+    secretsSet: { ...emptyEdit().secretsSet, ...f.secretsSet },
     s: emptyEdit().s,
   })
 
@@ -70,6 +103,11 @@ export default function FopsAdminPage() {
     if (s.privatStoreId || s.privatPassword) secrets.privatPaypart = { storeId: s.privatStoreId || undefined, password: s.privatPassword || undefined }
     if (s.cbLicense || s.cbPin || s.cbCashier) secrets.checkbox = { licenseKey: s.cbLicense || undefined, pinCode: s.cbPin || undefined, cashierName: s.cbCashier || undefined }
     if (s.npApiKey) secrets.novaPoshta = { apiKey: s.npApiKey }
+    if (s.monoPersonalToken) secrets.monoPersonal = { token: s.monoPersonalToken }
+    if (s.privatAcToken || s.privatAcId) secrets.privatAutoclient = { token: s.privatAcToken || undefined, id: s.privatAcId || undefined }
+    if (s.novaPayLogin || s.novaPayRefresh || s.novaPayCert) {
+      secrets.novaPay = { login: s.novaPayLogin || undefined, refreshToken: s.novaPayRefresh || undefined, certificate: s.novaPayCert || undefined }
+    }
 
     const payload: FopSavePayload = {
       name: edit.name.trim(), active: edit.active, methods: edit.methods, novaPoshta: edit.np,
@@ -81,11 +119,19 @@ export default function FopsAdminPage() {
   }
 
   const testReceipt = async (f: FopAdmin) => {
-    if (!window.confirm(`Виписати РЕАЛЬНИЙ тестовий фіскальний чек на 10 грн для «${f.name}»?\n\nБуде відкрито реальну зміну на касі та створено справжній чек у ДПС (не пісочниця).`)) return
+    if (!window.confirm(`Виписати РЕАЛЬНИЙ тестовий фіскальний чек на 10 грн для «${f.name}» і одразу чек повернення на ту саму суму?\n\nБуде відкрито реальну зміну на касі, обидва чеки підуть у ДПС (не пісочниця). Гроші не списуються.`)) return
     setReceiptBusy(f.id)
     const r = await fopsAdminApi.testReceipt(f.id)
     setReceiptBusy('')
-    setReceipt({ fopName: f.name, ok: r.ok, fiscalCode: r.data?.fiscalCode, taxUrl: r.data?.taxUrl, status: r.data?.status, error: r.error })
+    setReceipt({ fopName: f.name, ok: r.ok, sale: r.data, refund: r.data?.refund, error: r.error })
+  }
+
+  const checkKeys = async (f: FopAdmin) => {
+    setKeyBusy(f.id)
+    const r = await fopsAdminApi.checkKeys(f.id)
+    setKeyBusy('')
+    setKeyCheck({ fopName: f.name, data: r.data, error: r.ok ? undefined : r.error })
+    if (r.ok) refresh() // результат сохранён на сервере: метки перекрасятся
   }
 
   const remove = async (f: FopAdmin) => {
@@ -114,7 +160,11 @@ export default function FopsAdminPage() {
     <Container maxWidth="md" sx={{ py: 4 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h4">ФОПи та ключі</Typography>
-        <Stack direction="row" spacing={1}>
+        <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
+          <Button variant="outlined" disabled={allBusy || fops.length === 0} onClick={checkAll}
+            startIcon={allBusy ? <CircularProgress size={16} /> : <CheckAllIcon />}>
+            Перевірити всі
+          </Button>
           <Button variant="contained" startIcon={<AddIcon />} onClick={openNew}>Додати ФОП</Button>
           <Button startIcon={<HomeIcon />} onClick={() => navigate('/')}>На головну</Button>
         </Stack>
@@ -123,6 +173,18 @@ export default function FopsAdminPage() {
         Секретні ключі зберігаються лише на сервері (у браузер не потрапляють). Показуємо «задано / не
         задано»; щоб змінити ключ — введіть нове значення, порожнє поле не перезаписує наявне.
       </Typography>
+      {checks && (
+        <Alert severity={checks.telegram ? 'info' : 'warning'} sx={{ mb: 3 }}>
+          Колір міток — за останньою перевіркою: зелена — гаразд, червона — проблема, помаранчева — не вдалося перевірити,
+          сіра — ще не перевірено. Ключі всіх активних ФОП перевіряються щодня о 9:05
+          {checks.lastRun
+            ? ` (останній раз ${new Date(checks.lastRun.at).toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}, проблем: ${checks.lastRun.issues}${checks.lastRun.failed ? `, не вдалося перевірити ФОП: ${checks.lastRun.failed}` : ''}).`
+            : '.'}
+          {checks.telegram
+            ? ' Про проблеми й кінець підписки Checkbox приходить повідомлення в Telegram.'
+            : ' Повідомлення в Telegram ще не підключені: проблеми видно лише тут.'}
+        </Alert>
+      )}
 
       {loading ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}><CircularProgress /></Box>
@@ -139,7 +201,11 @@ export default function FopsAdminPage() {
                   <Chip size="small" label={f.id} variant="outlined" />
                   {!f.active && <Chip size="small" color="default" label="вимкнено" />}
                 </Stack>
-                <Stack direction="row" spacing={0.5} alignItems="center">
+                <Stack direction="row" alignItems="center" sx={{ flexWrap: 'wrap', gap: 0.5 }}>
+                  <Button size="small" variant="outlined" disabled={!!keyBusy} onClick={() => checkKeys(f)}
+                    startIcon={keyBusy === f.id ? <CircularProgress size={14} /> : <KeyIcon fontSize="small" />}>
+                    Перевірити ключі
+                  </Button>
                   {f.secretsSet.checkbox && (
                     <Button size="small" variant="outlined" disabled={receiptBusy === f.id} onClick={() => testReceipt(f)}
                       startIcon={receiptBusy === f.id ? <CircularProgress size={14} /> : <ReceiptIcon fontSize="small" />}>
@@ -150,17 +216,7 @@ export default function FopsAdminPage() {
                   <IconButton size="small" color="error" onClick={() => remove(f)}><DeleteIcon fontSize="small" /></IconButton>
                 </Stack>
               </Stack>
-              <Stack direction="row" spacing={0.5} sx={{ flexWrap: 'wrap', gap: 0.5 }}>
-                {f.secretsSet.liqpay && <Chip size="small" color="success" label="LiqPay" />}
-                {f.secretsSet.monoChast && <Chip size="small" color="success" label="mono Частини" />}
-                {f.secretsSet.monoAcquire && <Chip size="small" color="success" label="mono еквайринг" />}
-                {f.secretsSet.privatPaypart && <Chip size="small" color="success" label="ПриватБанк Частини" />}
-                {f.secretsSet.checkbox && <Chip size="small" color="info" label="Checkbox (чеки)" />}
-                {f.secretsSet.novaPoshtaApiKey && <Chip size="small" color="warning" label="Нова Пошта" />}
-                {!f.secretsSet.liqpay && !f.secretsSet.monoChast && !f.secretsSet.monoAcquire && !f.secretsSet.privatPaypart && !f.secretsSet.checkbox && !f.secretsSet.novaPoshtaApiKey && (
-                  <Typography variant="caption" color="text.secondary">ключі не задані</Typography>
-                )}
-              </Stack>
+              <FopKeyChips fop={f} />
             </Paper>
           ))}
         </Stack>
@@ -221,6 +277,30 @@ export default function FopsAdminPage() {
               <TextField label="Назва касира (для чека)" value={edit.s.cbCashier} onChange={(e) => setEdit({ ...edit, s: { ...edit.s, cbCashier: e.target.value } })} size="small" fullWidth
                 placeholder={edit.secretsSet.checkbox ? 'задано (залиште порожнім)' : ''} />
 
+              <Divider textAlign="left"><Typography variant="caption">Банки ФОП: залишки та виписки</Typography></Divider>
+              <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+                Ці ключі потрібні, щоб портал бачив залишки на рахунках ФОП і надходження. Портал лише читає: платежів
+                не створює. Після збереження натисніть «Перевірити ключі»: буде видно рахунки і залишки.
+              </Typography>
+
+              <Typography variant="caption" color="text.secondary">monobank: рахунок ФОП</Typography>
+              {secretField('Особистий токен monobank власника ФОП', edit.s.monoPersonalToken, (v) => setEdit({ ...edit, s: { ...edit.s, monoPersonalToken: v } }), edit.secretsSet.monoPersonal)}
+              <BankHowTo bank="mono" />
+
+              <Typography variant="caption" color="text.secondary">ПриватБанк: Автоклієнт</Typography>
+              {secretField('Автоклієнт token', edit.s.privatAcToken, (v) => setEdit({ ...edit, s: { ...edit.s, privatAcToken: v } }), edit.secretsSet.privatAutoclient)}
+              <TextField label="Автоклієнт id (лише якщо банк видав пару id і token)" type="password" value={edit.s.privatAcId} size="small" fullWidth
+                onChange={(e) => setEdit({ ...edit, s: { ...edit.s, privatAcId: e.target.value } })} autoComplete="new-password" placeholder="необовʼязково" />
+              <BankHowTo bank="privat" />
+
+              <Typography variant="caption" color="text.secondary">NovaPay: бізнес-кабінет</Typography>
+              <TextField label="Логін бізнес-кабінету NovaPay" value={edit.s.novaPayLogin} onChange={(e) => setEdit({ ...edit, s: { ...edit.s, novaPayLogin: e.target.value } })} size="small" fullWidth
+                autoComplete="off" placeholder={edit.secretsSet.novaPay ? 'задано (залиште порожнім)' : 'не задано'} />
+              {secretField('NovaPay Refresh Token', edit.s.novaPayRefresh, (v) => setEdit({ ...edit, s: { ...edit.s, novaPayRefresh: v } }), !!edit.secretsSet.novaPay)}
+              <TextField label="NovaPay сертифікат" value={edit.s.novaPayCert} onChange={(e) => setEdit({ ...edit, s: { ...edit.s, novaPayCert: e.target.value } })} size="small" fullWidth
+                multiline minRows={2} maxRows={4} autoComplete="off" placeholder={edit.secretsSet.novaPay ? 'задано (залиште порожнім)' : 'не задано'} />
+              <BankHowTo bank="novapay" />
+
               <Divider textAlign="left"><Typography variant="caption">Нова Пошта (відправник для ТТН)</Typography></Divider>
               {secretField('API-ключ Нової Пошти', edit.s.npApiKey, (v) => setEdit({ ...edit, s: { ...edit.s, npApiKey: v } }), edit.secretsSet.novaPoshtaApiKey)}
               <NpFopDirectory fopId={edit.id} np={edit.np}
@@ -235,26 +315,10 @@ export default function FopsAdminPage() {
         </DialogActions>
       </Dialog>
 
-      {/* Результат тестового чека Checkbox */}
-      <Dialog open={!!receipt} onClose={() => setReceipt(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>Тестовий чек · {receipt?.fopName}</DialogTitle>
-        <DialogContent dividers>
-          {receipt?.ok ? (
-            <Stack spacing={1}>
-              <Alert severity="success">Фіскальний чек виписано (реальний, на 10 грн).</Alert>
-              {receipt.fiscalCode && <Typography variant="body2">Фіскальний код: <b>{receipt.fiscalCode}</b></Typography>}
-              {receipt.status && <Typography variant="body2" color="text.secondary">Статус: {receipt.status}</Typography>}
-              {receipt.taxUrl && <Typography variant="body2"><a href={receipt.taxUrl} target="_blank" rel="noreferrer">Переглянути чек</a></Typography>}
-              <Typography variant="caption" color="text.secondary">Це реальна продажа на касі. За потреби зробіть чек повернення у кабінеті Checkbox.</Typography>
-            </Stack>
-          ) : (
-            <Alert severity="error"><Box sx={{ whiteSpace: 'pre-wrap' }}>{receipt?.error}</Box></Alert>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setReceipt(null)}>Закрити</Button>
-        </DialogActions>
-      </Dialog>
+      <KeyCheckDialog open={!!keyCheck} fopName={keyCheck?.fopName} data={keyCheck?.data} error={keyCheck?.error} onClose={() => setKeyCheck(null)} />
+
+      {/* Результат тестового чека Checkbox и чека возврата к нему */}
+      <TestReceiptDialog result={receipt} onClose={() => setReceipt(null)} />
 
       <Snackbar open={snack.open} autoHideDuration={4000} onClose={() => setSnack({ ...snack, open: false })} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
         <Alert severity={snack.sev} onClose={() => setSnack({ ...snack, open: false })}>{snack.msg}</Alert>

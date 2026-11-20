@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import express from 'express'
 import {
   parseNestedForm, parseBinotelBody, normalizeRouting, decideCallSettings, buildCustomerData, pickRequests,
-  clip, NAME_MAX, DESC_MAX, registerBinotelWebhook, clientCategory, isOpen, lastActivityMs, DEFAULT_ROUTING, currentDelivery, handedOverMs,
+  clip, NAME_MAX, DESC_MAX, registerBinotelWebhook, clientCategory, isOpen, lastActivityMs, DEFAULT_ROUTING, currentDelivery, handedOverMs, boatArrived,
 } from './binotelWebhook.js'
 
 const FORM = 'requestType=apiCallSettings&externalNumber=0675499555&pbxNumber=0443338049&companyID=12345&callType=0'
@@ -711,4 +711,39 @@ test('карточка: «Видано клієнту ДД.ММ» для від�
     stageHistory: [{ stage: 'handed_over', at: daysAgo(90), by: 'm' }] })] })
   assert.ok(closed.description.startsWith('Останній ремонт №1234 · Видано клієнту'), closed.description)
   assert.ok(closed.description.length <= DESC_MAX)
+})
+
+test('фаза «чекаємо кораблик» (власник 2026-10-18): з ТТН — поки посилка жива; «не знайдено» — закрита; без ТТН — до ручної відмітки', () => {
+  const awaiting = (o) => SR({ status: 'new', stage: null, stageHistory: [], createdAt: daysAgo(10), ...o })
+  assert.equal(boatArrived(awaiting({})), false)
+  // з ТТН, посилка в дорозі → відкрита
+  assert.equal(isOpen(awaiting({ waybillNumber: '2045', incomingDelivery: { ttn: '2045', status: 'Прямує до міста', notFound: false } }), NOW), true)
+  // «Номер не знайдено» → клієнт не відправив → закрита
+  assert.equal(isOpen(awaiting({ waybillNumber: '2045', incomingDelivery: { ttn: '2045', status: 'Номер не знайдено', notFound: true } }), NOW), false)
+  // без ТТН → клієнт привезе сам → відкрита (до відмітки «Отримано»)
+  assert.equal(isOpen(awaiting({}), NOW), true)
+  // страховка 90 днів від останньої дії
+  assert.equal(isOpen(awaiting({ createdAt: daysAgo(90) }), NOW), true)
+  assert.equal(isOpen(awaiting({ createdAt: daysAgo(91) }), NOW), false)
+  assert.equal(isOpen(awaiting({ createdAt: daysAgo(80) }), NOW, normalizeRouting({ awaitingMaxDays: 30 })), false)
+  // посилка отримана (НП) — кораблик у нас, хоч етапу ще немає → правило 180
+  const arrivedNp = awaiting({ waybillNumber: '2045', createdAt: daysAgo(120), incomingDelivery: { ttn: '2045', arrivedAt: daysAgo(100) } })
+  assert.equal(boatArrived(arrivedNp), true)
+  assert.equal(isOpen(arrivedNp, NOW), true)
+  // відмітили «Отримано» (привіз сам) → кораблик у нас
+  assert.equal(boatArrived(awaiting({ stage: 'received', stageHistory: [{ stage: 'received', at: daysAgo(1), by: 'm', note: 'привіз сам' }] })), true)
+  // 1С поставила етап 'received' (1c-sync) — теж уже приїхав
+  assert.equal(boatArrived(awaiting({ stage: 'received', stageHistory: [{ stage: 'received', at: daysAgo(3), by: '1c-sync' }] })), true)
+  // скасована — закрита завжди
+  assert.equal(isOpen(awaiting({ status: 'cancelled' }), NOW), false)
+  // категорія для дзвінка: чекаємо → S2; «не знайдено» без інших заявок → S1 (історія є — заявка не скасована без ТТН)
+  assert.equal(clientCategory({ requests: [awaiting({})] }, NOW), 'openRequest')
+})
+
+test('карточка: «Чекаємо посилку» / «Чекаємо кораблик (привезе сам)»', () => {
+  const withTtn = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'new', stage: null, stageHistory: [], waybillNumber: '2045', createdAt: daysAgo(5) })] })
+  assert.ok(withTtn.description.startsWith('Ремонт №1234 · Чекаємо посилку'), withTtn.description)
+  const walkIn = buildCustomerData({ nowMs: NOW, phone: '+380675499555', requests: [SR({ status: 'new', stage: null, stageHistory: [], createdAt: daysAgo(5) })] })
+  assert.ok(walkIn.description.startsWith('Ремонт №1234 · Чекаємо кораблик (привезе сам)'), walkIn.description)
+  assert.ok(walkIn.description.length <= DESC_MAX)
 })

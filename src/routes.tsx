@@ -48,6 +48,7 @@ import OwnerDashboardPage from '@/pages/OwnerDashboardPage'
 import MasterPage from '@/pages/MasterPage'
 import FirmwareAccessAdminPage from '@/pages/FirmwareAccessAdminPage'
 import FopsAdminPage from '@/pages/FopsAdminPage'
+import ParcelsPage from '@/pages/ParcelsPage'
 import NpTemplatesAdminPage from '@/pages/NpTemplatesAdminPage'
 import AccessAdminPage from '@/pages/AccessAdminPage'
 import ServiceRequestPage from '@/pages/ServiceRequestPage'
@@ -183,6 +184,8 @@ export const AppRoutes = () => {
       {/* Client AI chat - public (session protected by unguessable id) */}
       <Route path="/chat" element={<ClientChatPage />} />
       <Route path="/chat/:sessionId" element={<ClientChatPage />} />
+      {/* Короткая ссылка из SMS-приглашения в чат (server/chatInvites.js) */}
+      <Route path="/c/:sessionId" element={<ClientChatPage />} />
 
       {/* Manager inbox (escalated chats) - requires auth (email-gated inside) */}
       <Route
@@ -230,6 +233,16 @@ export const AppRoutes = () => {
         element={
           <AuthenticatedRoute>
             <FopsAdminPage />
+          </AuthenticatedRoute>
+        }
+      />
+
+      {/* Parcels journal: Nova Poshta across all accounts, pickup, bus, driver transfers (role-gated inside) */}
+      <Route
+        path="/parcels"
+        element={
+          <AuthenticatedRoute>
+            <ParcelsPage />
           </AuthenticatedRoute>
         }
       />

@@ -26,10 +26,13 @@ const customLimiter = combine(
 const NP_TRACK_URL = 'https://novaposhta.ua/tracking/?cargo_number='
 // Події, які приймає /api/notify. Невідоме імʼя раніше проходило як «вільний текст» повз cap/ліміт.
 const ALLOWED_EVENTS = ['offer', 'actual', 'ttn', 'custom']
-// 'link' (повторне посилання на сторінку заявки) — лише через /api/voice-gateway/resend-link і
-// /api/service-requests/:id/resend-link (requestLink.js): там ліміт на заявку за добу, тут його немає.
-// Події, ідемпотентні за ключем виклику (clientKey), а не одна на заявку.
-const KEYED_EVENTS = ['custom', 'link']
+// Події з готовим текстом, ідемпотентні лише за clientKey (а не «одна на заявку»): custom — текст майстра,
+// chat-invite — SMS-запрошення в чат (server/chatInvites.js, лише внутрішній виклик, не через /api/notify),
+// link — повторне посилання на сторінку заявки (лише через /api/voice-gateway/resend-link і
+// /api/service-requests/:id/resend-link, requestLink.js: там ліміт на заявку за добу, тут його немає).
+const KEYED_EVENTS = ['custom', 'chat-invite', 'link']
+// З них текст приходить готовим (custom, chat-invite); у link — шаблон, як в авто-подій.
+const TEXT_EVENTS = ['custom', 'chat-invite']
 // ТТН Нової Пошти — 14 цифр; приймаємо 8–20 цифр після очищення (інші формати перевізників).
 const normTtn = (v) => { const d = String(v ?? '').replace(/\D/g, ''); return d && d !== '0' ? d : '' }
 const TTN_RE = /^\d{8,20}$/
@@ -94,8 +97,10 @@ export function registerNotifications(app, deps) {
 
   // Основной вызов: отправить оповещение клиенту. Авто-выбор канала (мессенджер → иначе SMS).
   // Идемпотентно по (serviceRequestId, event) для авто-событий (offer/actual/ttn) — не задваивает.
+  // journal — что записать в журнал вместо фактических текста/сессии (chat-invite: ссылка на чат — это доступ к нему,
+  // а журнал читает весь персонал; клиенту уходит полный текст).
   // meta — необов'язкові службові поля в запис журналу (напр. {source: 'voice-gateway', gcid}), без PII.
-  async function notifyClient({ serviceRequestId = null, sessionId = null, phone = null, text = null, event = 'custom', link = null, ttn = null, by = null, clientKey = null, meta = null }) {
+  async function notifyClient({ serviceRequestId = null, sessionId = null, phone = null, text = null, event = 'custom', link = null, ttn = null, by = null, clientKey = null, journal = null, meta = null }) {
     // Подтягиваем заявку (получатель, ссылки).
     let req = null
     if (serviceRequestId) {
@@ -120,7 +125,7 @@ export function registerNotifications(app, deps) {
     const resolvedTtn = event === 'ttn' ? (normTtn(ttn) || normTtn(req?.returnTtn) || null) : null
     if (event === 'ttn' && !resolvedTtn) throw Object.assign(new Error('Вкажіть ТТН відправлення клієнту'), { code: 'NO_TTN', status: 400 })
     if (!resolvedLink && event === 'ttn' && resolvedTtn) resolvedLink = `${NP_TRACK_URL}${resolvedTtn}`
-    const body = event === 'custom' ? (text || '') : template(event, { link: resolvedLink, ttn: resolvedTtn, text })
+    const body = TEXT_EVENTS.includes(event) ? (text || '') : template(event, { link: resolvedLink, ttn: resolvedTtn, text })
     if (!body || !body.trim()) throw new Error('empty notification body')
 
     // Идемпотентность авто-событий (offer/actual/ttn): детерминированный id + ТРАНЗАКЦИОННЫЙ захват,
@@ -131,11 +136,14 @@ export function registerNotifications(app, deps) {
     // custom — ідемпотентний за clientKey (ключ генерує клієнт на кожне нове повідомлення; формат
     // валідовано вище), без ключа — як раніше, окремий документ на кожну відправку.
     const ttnSlug = String(resolvedTtn || 'none').replace(/[^\w-]+/g, '').slice(0, 40)
+    // chat-invite ідемпотентний за ключем (= id запрошення) і без заявки: запрошення зазвичай ще без заявки.
     const keyed = KEYED_EVENTS.includes(event)
     const customKey = keyed && clientKey && CLIENT_KEY_RE.test(String(clientKey)) ? String(clientKey) : null
-    const autoId = serviceRequestId && (!keyed || customKey)
-      ? (event === 'ttn' ? `ntf-${serviceRequestId}-ttn-${ttnSlug}` : keyed ? `ntf-${serviceRequestId}-${event}-${customKey}` : `ntf-${serviceRequestId}-${event}`)
-      : null
+    const autoId = event === 'chat-invite' && customKey
+      ? `ntf-${serviceRequestId || 'na'}-chat-invite-${customKey}`
+      : serviceRequestId && (!keyed || customKey)
+        ? (event === 'ttn' ? `ntf-${serviceRequestId}-ttn-${ttnSlug}` : keyed ? `ntf-${serviceRequestId}-${event}-${customKey}` : `ntf-${serviceRequestId}-${event}`)
+        : null
     const ref = autoId ? adminDb.collection('notifications').doc(autoId) : adminDb.collection('notifications').doc()
     if (autoId) {
       const claim = await adminDb.runTransaction(async (tx) => {
@@ -194,14 +202,14 @@ export function registerNotifications(app, deps) {
       createdAt: nowIso(),
       serviceRequestId: serviceRequestId || null,
       serviceCenterId: req?.serviceCenterId || null, // розріз по центрах для стрічки «Увага»
-      sessionId: sid,
+      sessionId: journal && journal.sessionId !== undefined ? journal.sessionId : sid,
       phone: toPhone || null,
       event,
       channel,
       via,
       status: ok ? 'sent' : 'failed',
       error: error || null,
-      text: body,
+      text: journal && typeof journal.text === 'string' ? journal.text : body,
       by: by || null,
       ...(meta && typeof meta === 'object' ? { meta } : {}),
     }

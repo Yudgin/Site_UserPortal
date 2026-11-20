@@ -1,7 +1,7 @@
 // Оповещение клиента (журнал информирования). Пишется сервером (/api/notify) в коллекцию
 // notifications; фронт читает историю и инициирует отправку. Канал выбирается автоматически:
 // мессенджер (если окно доставки открыто) или SMS.
-export type NotificationEvent = 'offer' | 'actual' | 'ttn' | 'custom'
+export type NotificationEvent = 'offer' | 'actual' | 'ttn' | 'custom' | 'chat-invite'
 
 export interface ClientNotification {
   id: string
@@ -23,4 +23,5 @@ export const NOTIFICATION_EVENT_LABELS: Record<NotificationEvent, string> = {
   actual: 'Фактична калькуляція',
   ttn: 'Відправлення (ТТН)',
   custom: 'Повідомлення',
+  'chat-invite': 'Запрошення в чат',
 }

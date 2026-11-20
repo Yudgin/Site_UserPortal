@@ -5,7 +5,7 @@
 import axios from 'axios'
 import { db, auth } from './firebase'
 import { doc, getDoc, collection, getDocs, setDoc, query, orderBy, where } from 'firebase/firestore'
-import type { UserProfile, Role, CenterAccess } from '@/types/access'
+import type { UserProfile, Role, CenterAccess, CalcVisibility } from '@/types/access'
 
 const COLLECTION = 'users'
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3002'
@@ -73,8 +73,9 @@ export const userProfileService = {
     }
   },
 
-  // Назначить роль/центры/активность (ТОЛЬКО владелец; запись гейтится правилами по email).
-  setAccess: async (uid: string, patch: { role?: Role; centers?: CenterAccess[]; active?: boolean }): Promise<boolean> => {
+  // Назначить роль/центры/активность/отметки видимости калькуляций (ТОЛЬКО владелец; запись гейтится правилами).
+  // merge-запись: calcVisibility передаём только когда владелец её менял (иначе действуют умолчания).
+  setAccess: async (uid: string, patch: { role?: Role; centers?: CenterAccess[]; active?: boolean; calcVisibility?: CalcVisibility }): Promise<boolean> => {
     if (!db || !auth?.currentUser) return false
     try {
       await setDoc(doc(db, COLLECTION, uid), { ...patch, updatedAt: new Date().toISOString() }, { merge: true })
