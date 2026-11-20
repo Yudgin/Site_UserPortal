@@ -1,4 +1,4 @@
-// Управление ФОПами (владелец): название, включённые методы оплаты, реквизиты отправителя
+// Управление ФОПами (владелец): название, включённые методы оплаты, реквизиты продавца и отправителя
 // Новой Почты, и СЕКРЕТНЫЕ ключи (LiqPay, monobank Частини/эквайринг, ПриватБанк Частини,
 // Checkbox, ключ НП). Секреты write-only: показываем «задано/не задано», значения не отдаются;
 // пустые поля при сохранении не перезаписывают существующие.
@@ -15,7 +15,7 @@ import {
 } from '@mui/icons-material'
 import { useAuthStore } from '@/store/authStore'
 import { isAdminEmail } from '@/config/access'
-import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs, type FopKeyCheck, type FopChecksStatus } from '@/api/endpoints/fopsAdmin'
+import { fopsAdminApi, type FopAdmin, type FopSavePayload, type FopSecretsPayload, type FopNovaPoshtaRefs, type FopSeller, type FopKeyCheck, type FopChecksStatus } from '@/api/endpoints/fopsAdmin'
 import NpFopDirectory from '@/components/NpFopDirectory'
 import KeyCheckDialog from '@/components/KeyCheckDialog'
 import BankHowTo from '@/components/BankHowTo'
@@ -26,6 +26,7 @@ const emptyEdit = () => ({
   id: '', name: '', active: true, isNew: true,
   methods: { liqpayCard: false, liqpayPaypart: false, monoChast: false, monoAcquire: false, privatPaypart: false, cod: false },
   np: { senderRef: '', senderName: '', contactRef: '', contactName: '', senderPhone: '', cityRef: '', cityName: '', settlementRef: '', warehouseRef: '', warehouseName: '' } as FopNovaPoshtaRefs,
+  seller: { displayName: '', ipn: '', address: '', actualAddress: '', email: '', phone: '' } as FopSeller,
   secretsSet: {
     liqpay: false, monoChast: false, monoAcquire: false, privatPaypart: false, checkbox: false, novaPoshtaApiKey: false,
     monoPersonal: false, privatAutoclient: false, novaPay: false,
@@ -84,6 +85,7 @@ export default function FopsAdminPage() {
     id: f.id, name: f.name, active: f.active, isNew: false,
     methods: { ...emptyEdit().methods, ...f.methods },
     np: { ...emptyEdit().np, ...f.novaPoshta },
+    seller: { ...emptyEdit().seller, ...f.seller },
     secretsSet: { ...emptyEdit().secretsSet, ...f.secretsSet },
     s: emptyEdit().s,
   })
@@ -110,7 +112,7 @@ export default function FopsAdminPage() {
     }
 
     const payload: FopSavePayload = {
-      name: edit.name.trim(), active: edit.active, methods: edit.methods, novaPoshta: edit.np,
+      name: edit.name.trim(), active: edit.active, methods: edit.methods, novaPoshta: edit.np, seller: edit.seller,
       ...(Object.keys(secrets).length ? { secrets } : {}),
     }
     const ok = await fopsAdminApi.save(id, payload)
@@ -306,6 +308,23 @@ export default function FopsAdminPage() {
               <NpFopDirectory fopId={edit.id} np={edit.np}
                 onChange={(patch) => setEdit({ ...edit, np: { ...edit.np, ...patch } })}
                 apiKeySet={edit.secretsSet.novaPoshtaApiKey} typedApiKey={edit.s.npApiKey} />
+
+              <Divider textAlign="left"><Typography variant="caption">Продавець (магазин на сайті)</Typography></Divider>
+              <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+                Покупці бачать ці дані в договорі-оферті та на сторінці замовлення, крім фактичної адреси. Поки не заповнені
+                назва, РНОКПП, адреса реєстрації, e-mail і телефон, цей ФОП не може продавати на сайті.
+              </Typography>
+              {([
+                ['displayName', 'Назва для покупця'],
+                ['ipn', 'РНОКПП'],
+                ['address', 'Адреса реєстрації'],
+                ['actualAddress', 'Фактична адреса (за потреби)'],
+                ['email', 'E-mail'],
+                ['phone', 'Телефон'],
+              ] as const).map(([k, label]) => (
+                <TextField key={k} label={label} value={edit.seller[k] || ''} size="small" fullWidth
+                  onChange={(e) => setEdit({ ...edit, seller: { ...edit.seller, [k]: e.target.value } })} />
+              ))}
             </Stack>
           )}
         </DialogContent>

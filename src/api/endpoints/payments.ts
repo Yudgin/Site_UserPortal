@@ -55,6 +55,21 @@ export interface PayCreateResult {
   pageUrl?: string
 }
 
+// Оплата «гроші є, чек ні» из /api/pay/unfiscalized: сервер смотрит все оплаченные, а не только новейшие.
+export interface UnfiscalizedPayment {
+  orderId: string
+  fopId: string
+  amount: number
+  status: string
+  provider: string | null
+  method: string | null
+  estimateId: string | null
+  shopOrderId: string | null
+  receiptStatus: string | null
+  receiptError: string | null
+  createdAt: string
+}
+
 export interface PayStatus {
   status: string
   receiptStatus: string | null
@@ -187,6 +202,12 @@ export const paymentsApi = {
   refiscalize: async (orderId: string): Promise<{ receiptStatus: string | null; taxUrl: string | null; receiptId: string | null }> => {
     const { data } = await client.post<ApiEnvelope<{ receiptStatus: string | null; taxUrl: string | null; receiptId: string | null }>>(
       `/api/pay/${orderId}/refiscalize`, {}, { headers: await adminHeaders() })
+    return unwrap(data)
+  },
+
+  // Все оплаты без чека (для мониторинга владельца и бухгалтера)
+  unfiscalized: async (): Promise<UnfiscalizedPayment[]> => {
+    const { data } = await client.get<ApiEnvelope<UnfiscalizedPayment[]>>('/api/pay/unfiscalized', { headers: await adminHeaders() })
     return unwrap(data)
   },
 

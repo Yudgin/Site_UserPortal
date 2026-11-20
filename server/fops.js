@@ -26,6 +26,7 @@ const mergeFop = (id, m, s) => ({
   name: m.name || id,
   active: m.active !== false,
   methods: m.methods || {}, // включённые методы (намерение владельца)
+  seller: m.seller, // реквизиты продавца для магазина на сайте (публичные)
   novaPoshta: { ...(m.novaPoshta || {}), ...(s.novaPoshta || {}) }, // refs (мета) + apiKey (секрет)
   liqpay: s.liqpay,
   monoChast: s.monoChast,

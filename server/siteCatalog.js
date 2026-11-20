@@ -134,7 +134,7 @@ export function buildDraftDoc(spec, { nowIso, existingDraft } = {}) {
 const materialsOf = (priceList) => (priceList && Array.isArray(priceList.materials) ? priceList.materials : [])
 
 // Материал с этим артикулом; дубликаты кода — ошибка (код вводится руками и не проверяется на странице).
-function findMaterial(priceList, sku, errors) {
+export function findMaterial(priceList, sku, errors) {
   const all = materialsOf(priceList)
   const exact = all.filter((m) => m.code === sku)
   if (exact.length > 1) errors.push(`в прайсе ${exact.length} материала с кодом ${sku} — оставьте один на странице прайса`)

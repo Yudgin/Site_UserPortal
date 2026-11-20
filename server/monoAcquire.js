@@ -52,6 +52,14 @@ export const invoiceStatus = async (fop, invoiceId) => {
   return r.data
 }
 
+// Снять ещё не оплаченный счёт. Статус в payments пишет вызывающий и только после успеха: отказ банка приходит ошибкой.
+export const removeInvoice = async (fop, invoiceId) => {
+  const r = await axios.post(`${BASE}/api/merchant/invoice/remove`, { invoiceId }, {
+    headers: { 'X-Token': tokenOf(fop), 'Content-Type': 'application/json' }, timeout: 15000,
+  })
+  return r.data
+}
+
 // Данные мерчанта {merchantId, merchantName, edrpou}: только чтение, для проверки токена на /fops.
 export const merchantDetails = async (fop) => {
   const r = await axios.get(`${BASE}/api/merchant/details`, { headers: { 'X-Token': tokenOf(fop) }, timeout: 15000 })
@@ -91,4 +99,4 @@ export const verifyWebhook = async (fop, rawBody, xSign) => {
   }
 }
 
-export default { createInvoice, invoiceStatus, getPubKey, verifyWebhook, toKop }
+export default { createInvoice, invoiceStatus, removeInvoice, getPubKey, verifyWebhook, toKop }

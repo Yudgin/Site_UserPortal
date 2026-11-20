@@ -18,12 +18,13 @@ import crypto from 'crypto'
 import axios from 'axios'
 import { getAuth } from 'firebase-admin/auth'
 import { verifyFirebaseStaff } from './adminAuth.js'
-import { getFop, fopHas, listFopsPublic, hasAnyFop } from './fops.js'
+import { getFop, fopHas, listFopsPublic, hasAnyFop, loadFopFresh } from './fops.js'
 import * as liqpay from './liqpay.js'
 import * as monoChast from './monoChast.js'
 import * as monoAcquire from './monoAcquire.js'
 import * as checkbox from './checkbox.js'
 import { statusTimes, paidRequestPatch } from './statusTimes.js'
+import { withGuideStep } from './shopCore.js'
 import { boatPayGate } from './boatShop.js'
 
 const nowIso = () => new Date().toISOString()
@@ -45,16 +46,29 @@ const validateGoods = (goods) => {
 
 // Детерминированный uuid чека из orderId: sha256(rcpt-<orderId>) → байты в форме uuid v4.
 // Один и тот же заказ всегда даёт один id → повторная фискализация не создаст дубль чека.
-const receiptUuidFor = (orderId) => {
-  const h = crypto.createHash('sha256').update(`rcpt-${orderId}`).digest()
+// attempt: новый номер после осознанного повтора владельца (/receipt-retry магазина); у ремонтов его нет, id прежний.
+const receiptUuidFor = (orderId, attempt = 0) => {
+  const h = crypto.createHash('sha256').update(`rcpt-${orderId}${attempt ? `-${attempt}` : ''}`).digest()
   h[6] = (h[6] & 0x0f) | 0x40
   h[8] = (h[8] & 0x3f) | 0x80
   const x = h.subarray(0, 16).toString('hex')
   return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`
 }
 
+const STATUS_PAGE = 200
+// Захват кассы старше этого считается зависшим (процесс упал у кассы), как в сверке магазина: был ли чек, неизвестно.
+const RECEIPT_CLAIM_LIVE_MS = 10 * 60 * 1000
+// Обращений к банку за проход сверки по документам pending.
+const PENDING_POLLS = 50
+// Статусы банка, при которых оплаченный счёт просто живёт дальше: всё прочее по нему владелец должен увидеть.
+const BANK_WAITING = new Set(['created', 'processing', 'hold'])
+
+const CARD_LABEL = 'Оплата карткою (monobank)'
+// Подпись оплаты в повторном чеке для документов без своей paymentLabel (ремонты, заказы лодок, старые оплаты).
+const labelByProvider = (o) => (o.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : o.provider === 'mono-acquire' ? CARD_LABEL : 'Оплата частинами (monobank)')
+
 export function registerPayments(app, deps) {
-  const { adminDb } = deps
+  const { adminDb, mono = monoAcquire, cbx = checkbox } = deps
   const PUBLIC = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '')
   const SANDBOX = process.env.PAYMENTS_SANDBOX === 'true'
   const ADMIN_TOKEN = process.env.PAYMENTS_ADMIN_TOKEN || ''
@@ -69,16 +83,44 @@ export function registerPayments(app, deps) {
     const q = await col().where('providerOrderId', '==', String(providerOrderId)).limit(1).get()
     return q.empty ? null : q.docs[0].data()
   }
+  // Все оплаты с этим статусом. Без orderBy limit() берёт первых по id: чужие документы вытесняли бы нужные.
+  const readByStatus = async (status) => {
+    const docs = []
+    let page = await col().where('status', '==', status).limit(STATUS_PAGE).get()
+    docs.push(...page.docs)
+    while (page.docs.length === STATUS_PAGE) {
+      page = await col().where('status', '==', status).limit(STATUS_PAGE).startAfter(page.docs[STATUS_PAGE - 1]).get()
+      docs.push(...page.docs)
+    }
+    return docs.map((d) => d.data())
+  }
+  // FOPS стартует пустым, а refreshFops никто не ждёт: на новом экземпляре ФОП заказа читаем напрямую.
+  // null, если его нет или база не ответила: ошибка здесь не должна обрывать сверку или колбэк.
+  const resolveFop = async (fopId) => {
+    const cached = getFop(fopId)
+    if (cached) return cached
+    try {
+      return await loadFopFresh(adminDb, fopId)
+    } catch (e) {
+      console.error(`payments: ФОП ${fopId} не прочитан:`, e.message)
+      return null
+    }
+  }
 
   // Атомарно «застолбить» право выбить чек. true → фискализируем МЫ; false → уже выбит/в процессе.
   // Закрывает гонку двух параллельных success-колбэков (иначе оба прошли бы проверку receiptId).
-  const claimFiscalization = async (orderId) =>
+  // attempt: номер попытки из снимка, с которым поток пойдёт к кассе.
+  const claimFiscalization = async (orderId, attempt) =>
     adminDb.runTransaction(async (tx) => {
       const ref = col().doc(orderId)
       const snap = await tx.get(ref)
       if (!snap.exists) return false
       const d = snap.data()
       if (d.receiptId || d.fiscalizeClaimedAt) return false
+      // Магазин: деньги вернули или сумма не сошлась, пока этот поток шёл к кассе.
+      if (d.shopOrderId && (d.status === 'reversed' || d.receiptStatus === 'amount-mismatch')) return false
+      // Магазин: владелец начал новую попытку, а снимок старый: его чек вышел бы с прежним id, который касса уже знает.
+      if (d.shopOrderId && (d.receiptAttempt || 0) !== (attempt || 0)) return false
       tx.set(ref, { fiscalizeClaimedAt: nowIso() }, { merge: true })
       return true
     })
@@ -103,11 +145,13 @@ export function registerPayments(app, deps) {
 
   // Уведомление владельцу в Telegram (для «гроші є, чек ні»). Один раз на заказ (ownerNotified).
   const notifyOwner = async (text) => {
-    if (!OWNER_CHAT || !TG_TOKEN) return
+    if (!OWNER_CHAT || !TG_TOKEN) return false
     try {
       await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, { chat_id: OWNER_CHAT, text }, { timeout: 8000 })
+      return true
     } catch (e) {
       console.error('notifyOwner:', e.message)
+      return false
     }
   }
   const notifyOwnerNoReceipt = async (order, reason) => {
@@ -128,7 +172,8 @@ export function registerPayments(app, deps) {
       return
     }
     if (!claimed) return
-    await notifyOwner(`⚠️ RunFerry: оплата ${order.orderId} на ${order.amount} грн пройшла, але ЧЕК НЕ ВИБИТО (${reason}). ФОП ${order.fopId}. Перевірте в адмінці оплат.`)
+    const text = `⚠️ RunFerry: оплата ${order.orderId} на ${order.amount} грн пройшла, але ЧЕК НЕ ВИБИТО (${reason}). ФОП ${order.fopId}. Перевірте в адмінці оплат.`
+    await notifyOwner(order.shopOrderId ? withGuideStep('receipt-failed', text) : text)
   }
 
   // Обратная запись «деньги пришли» в документ-источник оплаты: фактическую смету
@@ -178,11 +223,37 @@ export function registerPayments(app, deps) {
     }
   }
 
+  // Хуки заказа магазина (shopPayments.js). Сбой хука не останавливает ни оплату, ни чек: хук повторит сверка по метке bankRecheck.
+  let shopHooks = {}
+  const setShopHooks = (hooks) => { shopHooks = hooks || {} }
+  const runShopHook = async (name, order, ctx) => {
+    try {
+      if (!shopHooks[name]) throw new Error('хук не підключено')
+      await shopHooks[name](order, ctx)
+      return true
+    } catch (e) {
+      console.error(`payments: ${name} ${order.orderId}, замовлення ${order.shopOrderId}:`, e.message)
+      return false
+    }
+  }
+
+  // Почта покупателя магазина лежит только в закрытом заказе: payments читает весь персонал. Не прочиталась: чек важнее письма.
+  const receiptEmail = async (order) => {
+    if (!order.shopOrderId) return order.deliveryEmail || undefined
+    try {
+      return (shopHooks.receiptEmail && (await shopHooks.receiptEmail(order))) || undefined
+    } catch (e) {
+      console.error(`payments: пошта для чека ${order.orderId}:`, e.message)
+      return undefined
+    }
+  }
+
   // ЕДИНЫЙ модуль фискализации: чек выбивает ФОП из order.fopId (идемпотентно + атомарный claim).
+  // Подпись с документа оплаты важнее переданной: первый чек и все повторы выходят с одной подписью.
   const fiscalize = async (order, paymentLabel) => {
     if (!order || order.receiptId) return // уже выбит
-    const fop = getFop(order.fopId)
-    if (!fop) return
+    const fop = await resolveFop(order.fopId)
+    if (!fop) return console.warn(`payments: ⚠️ ФОП ${order.fopId} не загружен, чек не выбит для ${order.orderId}`)
     if (!fopHas(fop, 'checkbox.licenseKey')) {
       await saveOrder({ orderId: order.orderId, receiptStatus: 'no-checkbox' })
       await markEstimatePaid(order, null) // деньги есть, чека не будет (ФОП без ПРРО)
@@ -190,18 +261,31 @@ export function registerPayments(app, deps) {
       console.warn(`payments: ⚠️ ФОП ${order.fopId} без Checkbox — ГРОШІ Є, ЧЕК НЕ ВИБИТО для ${order.orderId}`)
       return
     }
-    const claimed = await claimFiscalization(order.orderId)
+    const claimed = await claimFiscalization(order.orderId, order.receiptAttempt)
     if (!claimed) return // другой колбэк/поток уже фискализирует или чек выбит
+    const deliveryEmail = await receiptEmail(order)
+    const sell = (email) => cbx.sellReceipt(fop, {
+      goods: order.goods,
+      paymentLabel: order.paymentLabel || paymentLabel,
+      // Checkbox требует body.id строго в формате uuid («Невірне значення uuid» на
+      // rcpt-<orderId>). Детерминированно выводим uuid из orderId (sha256 → форма v4):
+      // идемпотентность у Checkbox сохраняется, формат валиден.
+      receiptId: receiptUuidFor(order.orderId, order.receiptAttempt),
+      deliveryEmail: email,
+    })
     try {
-      const res = await checkbox.sellReceipt(fop, {
-        goods: order.goods,
-        paymentLabel,
-        // Checkbox требует body.id строго в формате uuid («Невірне значення uuid» на
-        // rcpt-<orderId>). Детерминированно выводим uuid из orderId (sha256 → форма v4):
-        // идемпотентность у Checkbox сохраняется, формат валиден.
-        receiptId: receiptUuidFor(order.orderId),
-        deliveryEmail: order.deliveryEmail || undefined,
-      })
+      let res
+      let emailDropped = false
+      try {
+        res = await sell(deliveryEmail)
+      } catch (e) {
+        // Магазин: необязательная почта покупателя не должна оставить оплаченный заказ без чека. id тот же, дубля не будет.
+        const status = e.response && e.response.status
+        if (!order.shopOrderId || !deliveryEmail || !(status >= 400 && status < 500)) throw e
+        console.warn(`payments: каса відхилила чек ${order.orderId} (${status}), повтор без пошти`)
+        res = await sell(undefined)
+        emailDropped = true
+      }
       await saveOrder({
         orderId: order.orderId,
         receiptId: res.receiptId,
@@ -210,6 +294,7 @@ export function registerPayments(app, deps) {
         receiptError: null, // прежняя ошибка неактуальна — чек создан
         receiptStatus: res.status || 'done',
         receiptAt: nowIso(),
+        ...(emailDropped ? { receiptEmailDropped: true } : {}),
       })
       await markEstimatePaid(order, res)
       console.log(`payments: чек выписан ${order.orderId} (ФОП ${order.fopId}) fiscal=${res.fiscalCode}`)
@@ -227,14 +312,124 @@ export function registerPayments(app, deps) {
     }
   }
 
+  // Сходится ли ответ банка с оплатой: копейки с копейками, гривна, наш номер оплаты. Чего банк не прислал, то не расхождение.
+  const amountAudit = (order, st) => {
+    const expected = cbx.toKop(order.amount)
+    const mismatch = []
+    const missing = []
+    if (st.amount == null) missing.push('amount')
+    else if (Number(st.amount) !== expected) mismatch.push(`сума ${st.amount} коп. замість ${expected}`)
+    if (st.ccy == null) missing.push('ccy')
+    else if (Number(st.ccy) !== 980) mismatch.push(`валюта ${st.ccy} замість 980`)
+    if (st.reference && String(st.reference) !== order.orderId) mismatch.push(`reference ${st.reference}`)
+    return { mismatch, missing }
+  }
+
+  // Счёт магазина. st здесь всегда ответ банка, а не тело колбэка.
+  // Метка bankRecheck: сверка снова проведёт платёж через банк. Ставится вместе со статусом и снимается, когда хуки и чек
+  // дошли до конца: банк второго колбэка не шлёт, а сбой хука или падение сервера между шагами иначе потерялись бы.
+  const settleShopInvoice = async (order, st, source) => {
+    const finalKop = st && st.finalAmount != null && st.finalAmount !== '' ? Number(st.finalAmount) : NaN
+    const paidKop = st && st.amount != null ? Number(st.amount) : cbx.toKop(order.amount)
+    // Успех с нулём денег на счёте: что из этого реально, банк не описал, поэтому это полный возврат.
+    const status = st && st.status === 'success' && finalKop <= 0 ? 'reversed' : st && st.status
+    let marked = order.bankRecheck === true
+    const finishRecheck = async (done) => {
+      if (done ? !marked : marked) return
+      await saveOrder({ orderId: order.orderId, bankRecheck: done ? null : true })
+      marked = !done
+    }
+
+    if (status === 'reversed' || (order.status === 'reversed' && marked)) {
+      const wasPaid = order.status === 'paid' || order.reversedAfterPaid === true
+      const refund = finalKop > 0 && finalKop < paidKop ? { amount: (paidKop - finalKop) / 100, at: nowIso() } : null
+      // Первой записью: дальше повтор чека, кнопка и выручка закрыты, что бы ни случилось с заказом.
+      if (order.status !== 'reversed') {
+        await saveOrder({
+          orderId: order.orderId, status: 'reversed',
+          ...(wasPaid ? { reversedAfterPaid: true, reversedAt: nowIso(), bankRecheck: true, ...(refund ? { partialRefund: refund } : {}) } : {}),
+        })
+        if (wasPaid) marked = true
+      }
+      // Живой захват: чек, скорее всего, выходит прямо сейчас. Зависший ничего не доказывает: владельцу текст «проверьте кабинет Checkbox».
+      const claimLive = !!order.fiscalizeClaimedAt && Date.now() - Date.parse(order.fiscalizeClaimedAt) < RECEIPT_CLAIM_LIVE_MS
+      if (wasPaid) await finishRecheck(await runShopHook('onShopReversed', order, { hadReceipt: !!order.receiptId || claimLive, source, refunded: refund ? refund.amount : null }))
+      else await finishRecheck(true)
+      return
+    }
+    if (order.status === 'reversed') return // возврат конечен, чек после него не выходит
+    if (order.status !== 'paid' && (status === 'failure' || status === 'expired')) {
+      await saveOrder({ orderId: order.orderId, status, ...(marked ? { bankRecheck: null } : {}) })
+      return
+    }
+    if (status !== 'success') {
+      if (order.status !== 'paid') {
+        if (status) await finishRecheck(true) // банк ответил, денег по этому счёту нет
+      } else if (status && !BANK_WAITING.has(status)) {
+        // Чарджбэк и прочее, чего мы не знаем: деньги могли уйти, а чек и накладная ещё впереди.
+        console.warn(`mono acquire ${source}: статус ${status} за оплаченим рахунком ${order.orderId}`)
+        await runShopHook('onShopUnknownStatus', order, { status, source })
+      }
+      return
+    }
+
+    const first = order.status !== 'paid'
+    const { mismatch, missing } = amountAudit(order, st)
+    const amountIssue = first ? mismatch.join('; ') : order.receiptStatus === 'amount-mismatch' ? order.receiptError || 'сума не збіглася' : ''
+    if (first) {
+      await saveOrder({ orderId: order.orderId, status: 'paid', paytype: 'mono-acquire', bankRecheck: true, ...(amountIssue ? { receiptStatus: 'amount-mismatch', receiptError: amountIssue } : {}) })
+      marked = true
+    }
+    // Вне условия first: падение между записью оплаты и хуком лечится повтором.
+    let hooksDone = await runShopHook('onShopPaid', order, { source, mismatch: amountIssue, missing })
+
+    const refundedKop = paidKop - finalKop
+    if (refundedKop > 0) {
+      const refunded = refundedKop / 100
+      if (!order.partialRefund || order.partialRefund.amount !== refunded) await saveOrder({ orderId: order.orderId, partialRefund: { amount: refunded, at: nowIso() } })
+      hooksDone = (await runShopHook('onShopPartialRefund', order, { amount: refunded, source })) && hooksDone
+    }
+
+    if (amountIssue) console.warn(`mono acquire ${source}: сума не збіглася, чек НЕ вибито ${order.orderId}: ${amountIssue}`)
+    else await fiscalize({ ...order, status: 'paid' }, CARD_LABEL)
+    await finishRecheck(hooksDone)
+  }
+
+  // Единый исход счёта monobank для колбэка и сверки. У ремонта st в колбэке это его тело, в сверке ответ банка.
+  const settleMonoAcquire = async (order, st, source) => {
+    if (order.shopOrderId) return settleShopInvoice(order, st, source)
+    const status = st && st.status
+    if (status === 'success') {
+      let mismatch = []
+      if (order.status !== 'paid') {
+        await saveOrder({ orderId: order.orderId, status: 'paid', paytype: 'mono-acquire' })
+        // Ремонт: расхождение идёт только в журнал и владельцу, оплата и чек остаются как были.
+        mismatch = amountAudit(order, st).mismatch
+        if (mismatch.length) console.warn(`mono acquire ${source}: дані банку не збігаються ${order.orderId}: ${mismatch.join('; ')}`)
+      }
+      // Алерт после чека: зависший Telegram не должен задерживать кассу.
+      try {
+        await fiscalize({ ...order, status: 'paid' }, CARD_LABEL)
+      } finally {
+        if (mismatch.length) await notifyOwner(`⚠️ RunFerry: оплата ${order.orderId} на ${order.amount} грн: дані банку не збігаються (${mismatch.join('; ')}). Чек виписується як звичайно. Звірте суму в кабінеті monobank.`)
+      }
+    } else if (order.status !== 'paid' && (status === 'failure' || status === 'expired' || status === 'reversed')) {
+      await saveOrder({ orderId: order.orderId, status }) // терминальный не-paid не откатываем
+    }
+  }
+
   // Публичный список ФОП + доступные методы (для UI выбора, без секретов)
   app.get('/api/fops', (req, res) => res.json({ success: true, data: listFopsPublic() }))
 
   // Ядро создания оплаты (переиспользуется HTTP-роутом и оплатой из сметы).
   // Возвращает { ok:true, data } или { ok:false, status, code, message }. Деньги — server-authoritative:
   // amount обязан точно совпадать с суммой позиций (в копейках), иначе чек и списание разойдутся.
-  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId, serviceRequestId, boatOrderId }) => {
-    const fop = getFop(fopId)
+  // Только для кода магазина, телом запроса не задаются: shopOrderId; validitySec (у ремонтов и лодок срока нет:
+  // ссылку лодки владелец пересылает покупателю); webHookBase (PUBLIC_BASE_URL включил бы колбэки и ремонтам);
+  // fopOverride (ФОП, прошедший гейт магазина, а не копия из кэша). Чек выбивается по fopId, поэтому id обязан совпасть.
+  // deliveryEmail у счёта магазина не хранится: чек берёт почту из заказа (receiptEmail).
+  const createPayment = async ({ fopId, amount, goods, method = 'liqpay-card', description, clientPhone, resultUrl, deliveryEmail, estimateId, serviceRequestId, boatOrderId, paymentLabel, shopOrderId, validitySec, webHookBase, fopOverride }) => {
+    const fop = fopOverride ? (fopOverride.id === fopId ? fopOverride : null) : getFop(fopId)
     if (!fop) return { ok: false, status: 400, code: 'BAD_FOP', message: 'Невідомий ФОП' }
     // Новую оплату НЕ принимаем на выключенный ФОП (но getFop его резолвит для старых заказов).
     if (fop.active === false) return { ok: false, status: 400, code: 'FOP_INACTIVE', message: 'ФОП вимкнено' }
@@ -242,8 +437,8 @@ export function registerPayments(app, deps) {
     const gErr = validateGoods(goods)
     if (gErr) return { ok: false, status: 400, code: 'BAD_GOODS', message: gErr }
 
-    const amountKop = checkbox.toKop(amount)
-    const goodsKop = checkbox.goodsTotalKop(goods)
+    const amountKop = cbx.toKop(amount)
+    const goodsKop = cbx.goodsTotalKop(goods)
     if (!Number.isFinite(amountKop) || amountKop <= 0) return { ok: false, status: 400, code: 'BAD_AMOUNT', message: 'Невірна сума' }
     if (amountKop !== goodsKop) {
       return { ok: false, status: 400, code: 'AMOUNT_MISMATCH', message: `Сума (${(amountKop / 100).toFixed(2)}) не збігається з позиціями (${(goodsKop / 100).toFixed(2)})` }
@@ -252,9 +447,11 @@ export function registerPayments(app, deps) {
     const orderId = newOrderId()
     const order = {
       orderId, fopId, amount: amountKop / 100, goods, method, status: 'pending', createdAt: nowIso(),
-      ...(deliveryEmail ? { deliveryEmail } : {}), ...(estimateId ? { estimateId: String(estimateId) } : {}),
+      ...(deliveryEmail && !shopOrderId ? { deliveryEmail } : {}), ...(estimateId ? { estimateId: String(estimateId) } : {}),
       ...(serviceRequestId ? { serviceRequestId: String(serviceRequestId) } : {}),
       ...(boatOrderId ? { boatOrderId: String(boatOrderId) } : {}),
+      ...(paymentLabel ? { paymentLabel: String(paymentLabel) } : {}),
+      ...(shopOrderId ? { shopOrderId: String(shopOrderId) } : {}),
     }
 
     if (method.startsWith('liqpay')) {
@@ -294,9 +491,11 @@ export function registerPayments(app, deps) {
       const lineKop = (priceUah, qty) => Math.round((Math.round(Number(priceUah) * 100) * Math.round((qty || 1) * 1000)) / 1000)
       const basket = goods.map((g) => ({ name: String(g.name), qty: Number(g.qty) || 1, sumKop: lineKop(g.price, Number(g.qty) || 1), code: g.code }))
       const amountKop = basket.reduce((s, b) => s + b.sumKop, 0)
-      const inv = await monoAcquire.createInvoice(fop, {
+      const hookBase = webHookBase ? String(webHookBase).replace(/\/$/, '') : PUBLIC
+      const inv = await mono.createInvoice(fop, {
         amountKop, reference: orderId, destination: description || `Оплата RunFerry #${orderId}`, goods: basket,
-        redirectUrl: resultUrl, webHookUrl: PUBLIC ? `${PUBLIC}/api/mono/acquire/callback` : undefined,
+        redirectUrl: resultUrl, webHookUrl: hookBase ? `${hookBase}/api/mono/acquire/callback` : undefined,
+        ...(validitySec ? { validitySec } : {}),
       })
       order.provider = 'mono-acquire'
       order.providerOrderId = String(inv.invoiceId || orderId)
@@ -318,7 +517,9 @@ export function registerPayments(app, deps) {
     if (!adminDb) return res.status(503).json({ success: false, error: { code: 'NO_DB', message: 'Firestore не настроен' } })
     if (!hasAnyFop()) return res.status(503).json({ success: false, error: { code: 'NO_FOPS', message: 'ФОП не настроены (FOPS_CONFIG)' } })
     try {
-      const r = await createPayment(req.body || {})
+      // Сюда идёт всё тело, а подпись в чеке и параметры счёта магазина телом запроса не задаются.
+      const { paymentLabel: _label, shopOrderId: _shop, validitySec: _validity, webHookBase: _hook, fopOverride: _fop, ...body } = req.body || {}
+      const r = await createPayment(body)
       if (!r.ok) return res.status(r.status).json({ success: false, error: { code: r.code, message: r.message } })
       return res.json({ success: true, data: r.data })
     } catch (e) {
@@ -731,8 +932,8 @@ export function registerPayments(app, deps) {
       if (decoded.status !== 'success') return // wait_accept и т.п. — ждём финального success
 
       // Сверка суммы/валюты/песочницы перед выдачей ФИСКАЛЬНОГО чека (защита от рассинхронизации и тестовых денег).
-      const paidKop = checkbox.toKop(decoded.amount)
-      const okAmount = Number.isFinite(paidKop) && paidKop === checkbox.toKop(order.amount)
+      const paidKop = cbx.toKop(decoded.amount)
+      const okAmount = Number.isFinite(paidKop) && paidKop === cbx.toKop(order.amount)
       const okCurrency = !decoded.currency || decoded.currency === 'UAH'
       const okSandbox = SANDBOX || !(decoded.sandbox === 1 || decoded.sandbox === '1' || decoded.sandbox === true)
       if (!okAmount || !okCurrency || !okSandbox) {
@@ -790,20 +991,32 @@ export function registerPayments(app, deps) {
       if (!invoiceId) return
       const order = await findByProviderOrderId(invoiceId)
       if (!order) return console.warn('mono acquire callback: заказ не найден', invoiceId)
-      const fop = getFop(order.fopId)
-      if (!(await monoAcquire.verifyWebhook(fop, req.rawBody, req.get('X-Sign')))) return console.warn('mono acquire callback: неверная подпись', order.orderId)
+      const fop = await resolveFop(order.fopId)
+      if (!fop) return console.warn('mono acquire callback: ФОП не загружен', order.fopId, order.orderId)
+      if (!(await mono.verifyWebhook(fop, req.rawBody, req.get('X-Sign')))) return console.warn('mono acquire callback: неверная подпись', order.orderId)
 
-      const status = body.status
-      if (status === 'success') {
-        if (order.status !== 'paid') await saveOrder({ orderId: order.orderId, status: 'paid', paytype: 'mono-acquire' })
-        await fiscalize({ ...order, status: 'paid' }, 'Оплата карткою (monobank)')
-      } else if (order.status !== 'paid' && (status === 'failure' || status === 'expired' || status === 'reversed')) {
-        await saveOrder({ orderId: order.orderId, status }) // терминальный не-paid не откатываем
+      // Магазин верит ответу банка, а не телу колбэка. Банк не ответил: pending закроет опрос, остальные опрос не берёт,
+      // поэтому метка. Подписанное тело о возврате ничего не решает, но владелец должен узнать о нём сразу.
+      let st = body
+      if (order.shopOrderId) {
+        try {
+          st = await mono.invoiceStatus(fop, invoiceId)
+        } catch (e) {
+          console.warn('mono acquire callback: статус не прочитано, чекаємо опитування', order.orderId, e.message)
+          if (order.status !== 'pending' && order.bankRecheck !== true) await saveOrder({ orderId: order.orderId, bankRecheck: true })
+          if (order.status === 'paid' && body.status === 'reversed') await runShopHook('onShopReversalSignal', order, { source: 'webhook' })
+          return
+        }
       }
+      await settleMonoAcquire(order, st, 'webhook')
     } catch (e) {
       console.error('mono acquire callback error:', e.message)
     }
   })
+
+  // Шаги других модулей (магазин) идут в конце сверки, отдельного задания Scheduler им не нужно. Шаг возвращает { checked }.
+  const reconcileSteps = []
+  const addReconcileStep = (fn) => { reconcileSteps.push(fn) }
 
   // Реконсиляция: колбэки банков не гарантированы → добиваем застрявшие monobank-заявки опросом
   // order/state и повторяем непробитые чеки (paid без receiptId). Транзакционный claim делает это
@@ -834,15 +1047,34 @@ export function registerPayments(app, deps) {
         } catch (e) { console.error('reconcile mono', o.orderId, e.message) }
       }
     } catch (e) { console.error('reconcile stuck query:', e.message) }
+    // 1б) платёж магазина с меткой bankRecheck: не дочитали банк или не довели заказ (см. settleShopInvoice).
+    const settledFromBank = new Set()
+    const settleFromBank = async (o) => {
+      settledFromBank.add(o.orderId)
+      const fop = await resolveFop(o.fopId)
+      if (!fop) return console.warn(`reconcile shop: ФОП ${o.fopId} не завантажено, платіж ${o.orderId} чекає`)
+      checked++
+      try {
+        await settleMonoAcquire(o, await mono.invoiceStatus(fop, o.providerOrderId), 'reconcile')
+      } catch (e) { console.error('reconcile shop', o.orderId, e?.response?.status || e.message) }
+    }
+    try {
+      const marked = await col().where('bankRecheck', '==', true).limit(50).get()
+      for (const doc of marked.docs) await settleFromBank(doc.data())
+    } catch (e) { console.error('reconcile recheck query:', e.message) }
     // 2) деньги есть, чек не выбит (error) — повторить фискализацию.
+    // Магазин: только после ответа банка. Пока чека не было, деньги могли вернуть, а колбэк о возврате не гарантирован.
     try {
       const failed = await col().where('receiptStatus', '==', 'error').limit(50).get()
       for (const doc of failed.docs) {
         const o = doc.data()
         if (o.status !== 'paid' || o.receiptId) continue
+        if (o.shopOrderId) {
+          if (!settledFromBank.has(o.orderId)) await settleFromBank(o)
+          continue
+        }
         checked++
-        const lbl = o.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : o.provider === 'mono-acquire' ? 'Оплата карткою (monobank)' : 'Оплата частинами (monobank)'
-        await fiscalize(o, lbl)
+        await fiscalize(o, labelByProvider(o))
       }
     } catch (e) { console.error('reconcile failed query:', e.message) }
     // 2б) чек создан (CREATED), но фискальный код/ссылка ДПС ещё не дописаны — опросить Checkbox.
@@ -855,7 +1087,7 @@ export function registerPayments(app, deps) {
         if (!fop) continue
         checked++
         try {
-          const r = await checkbox.getReceipt(fop, o.receiptId)
+          const r = await cbx.getReceipt(fop, o.receiptId)
           if (r.fiscalCode || r.taxUrl || (r.status && r.status !== 'CREATED')) {
             await saveOrder({ orderId: o.orderId, receiptStatus: r.status || o.receiptStatus, fiscalCode: r.fiscalCode, taxUrl: r.taxUrl, receiptError: null })
           }
@@ -864,16 +1096,21 @@ export function registerPayments(app, deps) {
     } catch (e) { console.error('reconcile created query:', e.message) }
     // 3) LiqPay «pending» дольше 5 минут — спросить статус напрямую (потерянный success-колбэк:
     // деньги списаны, вебхук не дошёл → оплата зависла без чека). Свежие не трогаем (клиент ещё платит).
+    // Лимит только на обращения к банку. Ремонты и лодки первыми: без PUBLIC_BASE_URL у них нет колбэка,
+    // сверка для них единственный путь к оплате и чеку, и счета магазина не должны их вытеснять.
     try {
       const cutoff = Date.now() - 5 * 60 * 1000
-      const pend = await col().where('status', '==', 'pending').limit(50).get()
-      for (const doc of pend.docs) {
-        const o = doc.data()
+      const pend = await readByStatus('pending')
+      const queue = [...pend.filter((o) => !o.shopOrderId), ...pend.filter((o) => o.shopOrderId)]
+      let polls = 0
+      for (const o of queue) {
+        if (polls >= PENDING_POLLS) break
         if (o.createdAt && Date.parse(o.createdAt) > cutoff) continue
         const fop = getFop(o.fopId)
         if (!fop) continue
         if (o.provider === 'liqpay') {
           checked++
+          polls++
           try {
             const st = await liqpay.queryStatus(fop, o.orderId)
             const s = st && st.status
@@ -893,20 +1130,20 @@ export function registerPayments(app, deps) {
           } catch (e) { console.error('reconcile liqpay', o.orderId, e.message) }
         } else if (o.provider === 'mono-acquire' && o.providerOrderId) {
           checked++
+          polls++
           try {
-            const st = await monoAcquire.invoiceStatus(fop, o.providerOrderId)
-            const s = st && st.status
-            if (s === 'success') {
-              await saveOrder({ orderId: o.orderId, status: 'paid', paytype: 'mono-acquire' })
-              await fiscalize({ ...o, status: 'paid' }, 'Оплата карткою (monobank)')
-            } else if (s === 'failure' || s === 'expired' || s === 'reversed') {
-              await saveOrder({ orderId: o.orderId, status: s })
-            }
+            await settleMonoAcquire(o, await mono.invoiceStatus(fop, o.providerOrderId), 'reconcile')
             // created/processing/hold — оставляем pending
           } catch (e) { console.error('reconcile mono-acquire', o.orderId, e.message) }
         }
       }
     } catch (e) { console.error('reconcile liqpay pending query:', e.message) }
+    for (const step of reconcileSteps) {
+      try {
+        const r = await step()
+        checked += (r && r.checked) || 0
+      } catch (e) { console.error('reconcile step:', e?.response?.status || e.message) }
+    }
     return { checked }
   }
 
@@ -921,9 +1158,13 @@ export function registerPayments(app, deps) {
   app.get('/api/pay/unfiscalized', async (req, res) => {
     if (!(await isPayStaffReq(req))) return res.status(403).json({ success: false })
     if (!adminDb) return res.status(503).json({ success: false })
-    const q = await col().where('status', '==', 'paid').limit(200).get()
-    const items = q.docs.map((d) => d.data()).filter((o) => !o.receiptId)
-      .map((o) => ({ orderId: o.orderId, fopId: o.fopId, amount: o.amount, receiptStatus: o.receiptStatus || null, receiptError: o.receiptError || null, createdAt: o.createdAt }))
+    const paid = await readByStatus('paid')
+    const items = paid.filter((o) => !o.receiptId)
+      .map((o) => ({
+        orderId: o.orderId, fopId: o.fopId, amount: o.amount, status: o.status, provider: o.provider || null, method: o.method || null,
+        estimateId: o.estimateId || null, shopOrderId: o.shopOrderId || null,
+        receiptStatus: o.receiptStatus || null, receiptError: o.receiptError || null, createdAt: o.createdAt,
+      }))
     res.json({ success: true, data: items })
   })
 
@@ -936,8 +1177,24 @@ export function registerPayments(app, deps) {
       if (!order) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Оплату не знайдено' } })
       if (order.receiptId) return res.status(409).json({ success: false, error: { code: 'ALREADY_FISCAL', message: 'Чек вже виписано' } })
       if (order.status !== 'paid') return res.status(409).json({ success: false, error: { code: 'NOT_PAID', message: 'Оплата не завершена' } })
-      const label = order.provider === 'liqpay' ? 'Оплата частинами (LiqPay)' : 'Оплата частинами (monobank)'
-      await fiscalize(order, label)
+      // Чек магазина на сумму, с которой банк не сошёлся, выбил бы чек на другие деньги: решает страница заказа.
+      if (order.shopOrderId && order.receiptStatus === 'amount-mismatch') {
+        return res.status(409).json({ success: false, error: { code: 'AMOUNT_REVIEW', message: 'Сума не збіглася з банком: рішення на сторінці замовлення', shopOrderId: order.shopOrderId } })
+      }
+      if (order.shopOrderId) {
+        // Как в сверке: чек магазина только после ответа банка, деньги могли вернуть.
+        const fop = await resolveFop(order.fopId)
+        let st = null
+        try {
+          if (fop) st = await mono.invoiceStatus(fop, order.providerOrderId)
+        } catch (e) {
+          console.warn('refiscalize: статус не прочитано', order.orderId, e?.response?.status || e.message)
+        }
+        if (!st) return res.status(502).json({ success: false, error: { code: 'BANK_UNAVAILABLE', message: 'Банк не відповів, чек не виписано. Спробуйте пізніше' } })
+        await settleMonoAcquire(order, st, 'refiscalize')
+      } else {
+        await fiscalize(order, labelByProvider(order))
+      }
       const after = await loadOrder(String(req.params.orderId))
       return res.json({ success: true, data: { receiptStatus: after?.receiptStatus || null, taxUrl: after?.taxUrl || null, receiptId: after?.receiptId || null } })
     } catch (e) {
@@ -953,6 +1210,8 @@ export function registerPayments(app, deps) {
     const t = setInterval(() => { reconcile().catch((e) => console.error('reconcile loop:', e.message)) }, everyMs)
     if (t.unref) t.unref()
   }
+
+  return { createPayment, loadOrder, saveOrder, readByStatus, settleMonoAcquire, amountAudit, notifyOwner, fiscalize, resolveFop, setShopHooks, addReconcileStep, receiptUuidFor }
 }
 
 export default registerPayments
