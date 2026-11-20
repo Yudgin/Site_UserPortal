@@ -43,7 +43,8 @@ cd "$(git rev-parse --show-toplevel)" || { echo "Не git-репозиторий
 # ---------- 1. Git ----------
 git fetch -q origin --prune || fail "git fetch не прошёл — нет связи с GitHub"
 BRANCH=$(git branch --show-current)
-NEWEST=$(git for-each-ref --sort=-committerdate --format='%(refname:short)' 'refs/remotes/origin/deploy/' | head -1)
+# Новейшая deploy-ветка, не считая саму ветку выпуска (после push она тоже лежит в origin/deploy/*).
+NEWEST=$(git for-each-ref --sort=-committerdate --format='%(refname:short)' 'refs/remotes/origin/deploy/' | grep -vx "origin/${BRANCH:-<none>}" | head -1)
 echo "Ветка выпуска:        ${BRANCH:-<нет, HEAD отсоединён>} @ $(git rev-parse --short HEAD)"
 echo "Новейшая deploy:      ${NEWEST:-<нет>} @ $(git rev-parse --short "${NEWEST:-HEAD}" 2>/dev/null)"
 if [[ -z "$NEWEST" ]]; then
