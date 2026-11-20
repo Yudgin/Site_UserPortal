@@ -1880,9 +1880,10 @@ SMS), запись в журнал `notifications` с `meta.source` (`voice-gate
 заданы сознательно), кандидат под тегом `rc-mac-resend-link`: `/api/voice-gateway/resend-link` → 503 `NOT_CONFIGURED`,
 `/api/service-requests/x/resend-link` → 403, `/api/np/return-tracking/reconcile` без токена → 403, с `x-admin-token` и
 `?dryRun=1` → 200: `withReturnTtn` 21, `tracked` 7, `received` 2 (даты доставки 23.09 и 23.10, `approx` false), у пяти код НП 3,
-`written` 0, ошибок нет. Переменные — те же 38. Тесты сервера 271/271. **Задания Cloud Scheduler `return-tracking` нет** —
-без него опрос НП не идёт, `isOpen` работает как раньше; задание (`0 8-21/3 * * *` Europe/Kyiv, `x-admin-token`) — по слову
-владельца. Секрет `voice-gateway-token` не создан — создаётся при включении `VG_AI_RESEND_URL` в шлюзе.
+`written` 0, ошибок нет. Переменные — те же 38. Тесты сервера 271/271. Задание Cloud Scheduler `return-tracking` **создано 2026-11-20** по слову
+владельца «Давай расписание раз в час с 8 утра до 9 вечера»: `0 8-21 * * *` Europe/Kyiv, `POST /api/np/return-tracking/reconcile`,
+`x-admin-token` (как у `pay-reconcile`), срок 300 с. Первый запуск вручную 13:36 UTC: `tracked` 7, `received` 2, `written` 7,
+ошибок нет. Секрет `voice-gateway-token` не создан — создаётся при включении `VG_AI_RESEND_URL` в шлюзе.
 
 
 ## Звонки клиента по открытой заявке: учёт и тарификация (2026-10-16, обновлено 2026-11-20)
