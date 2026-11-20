@@ -625,8 +625,9 @@ Cloud Scheduler нет. Ревизия сначала развёрнута бе�
   - Бэкенд (боты + AI + Нова Пошта + SMS + настройки) → **Google Cloud Run**, сервис `runferry-backend`,
     регион europe-west3, URL `https://runferry-backend-98000160958.europe-west3.run.app`. Публичный,
     `--no-cpu-throttling` (важно: обработка ИИ идёт после `res.sendStatus(200)`), 512Mi, min-instances 0.
-    Секреты — как env Cloud Run (из server/.env, в контейнер `.env` не попадает; firebase-admin через ADC
-    рантайм-аккаунта). Артефакты: `server/Dockerfile`, `.gcloudignore`, `.dockerignore`.
+    Секреты — как env Cloud Run (значения живут только на ревизиях Cloud Run, в репозитории их нет; в контейнер
+    `.env` не попадает; firebase-admin через ADC рантайм-аккаунта). Артефакты: `server/Dockerfile`, `.gcloudignore`,
+    `.dockerignore`.
   - Фронтенд → **Firebase Hosting** `https://droidmaps-runferry.web.app`. `.env.production`:
     `VITE_BACKEND_URL` → Cloud Run (сервис-центр), `VITE_API_BASE_URL` → Render (мок-данные карты-портала,
     не трогали). CORS `*` разрешает вызовы с сайта на Cloud Run.
@@ -634,9 +635,12 @@ Cloud Scheduler нет. Ревизия сначала развёрнута бе�
     работают постоянно (временный cloudflared-туннель снят). Проверено на проде: сообщение→сессия в
     Firestore + ответ ИИ; NP-прокси (Львів); CORS. amoCRM у Viber `arm-fishing` восстановлен; SalesDrive
     отключён от `runferry` (restore-URL сохранён в комментарии server/.env).
-  - Деплой-команды: бэкенд `gcloud run deploy runferry-backend --source server --region europe-west3
-    --no-cpu-throttling --env-vars-file <env> --allow-unauthenticated`; фронт `npm run build` +
-    `firebase deploy --only hosting`. Redeploy бэкенда — та же команда (env берётся из server/.env обоих репо).
+  - Деплой-команды: **только по §39** (сессия выпусков портала своего компьютера, скрипт-страж
+    `scripts/portal-release-guard.sh`, ревизия под тегом без трафика). **Никогда** `--env-vars-file` и
+    `--set-env-vars`: они заменяют ВСЕ переменные ревизии содержимым файла, а локальные `server/.env` неполные
+    (на 2026-11-20 в них 7–9 имён из 38) — портал потерял бы боты, оплаты, телефонию и 1С. Переменные переходят
+    с последней созданной ревизии сами; новая — только `--update-env-vars` / `--update-secrets`. (Исправлено
+    2026-11-20: раньше здесь стояла команда с `--env-vars-file <env>` «из server/.env».)
 
 - ТРИ СТАДИИ калькуляции (уточнение владельца от 2026-07-09):
   - **1 · Оцінка ІІ** (`stage='ai'`, source='ai') — черновик, внутренний, заготовка мастеру.
@@ -890,7 +894,7 @@ Cloud Scheduler нет. Ревизия сначала развёрнута бе�
 Далі»); отказы `no_answer` (с `failedParty`), `failed`, `skipped` (< 8 с), `no_recording`, `error`. Конвейер гонит таймер
 в процессе + `POST /api/calls/reconcile` от Cloud Scheduler (`calls-reconcile`, раз в 2 мин, `x-admin-token`).
 `GET /api/calls/:srId/:callId/recording` отдаёт mp3 персоналу. Запросы к Binotel — одна очередь, ≤ 1 запрос в 3 с.
-Секреты `BINOTEL_KEY/SECRET`, `ELEVENLABS_API_KEY` — в Secret Manager (`--set-secrets`).
+Секреты `BINOTEL_KEY/SECRET`, `ELEVENLABS_API_KEY` — в Secret Manager (`--update-secrets`; не `--set-secrets`: он снимает с ревизии все остальные секреты).
 
 **Правила/индексы.** `firestore.rules`: подколлекция `calls` читается `isStaff()`, запись запрещена; collection-group
 `match /{path=**}/calls`. `firestore.indexes.json`: `fieldOverrides` для `calls.nextCheckAt` (COLLECTION_GROUP ASC) и
@@ -1556,3 +1560,49 @@ Checkbox заблокировал за неоплату: продажу он о�
   выпуска — живой сервер отвечает (`/api/fops` 200, закрытые маршруты 403), живой сайт отдаёт сборку с блоком банков.
   **Не проверено под входом владельца и на настоящих ключах** — первое нажатие «Перевірити ключі» за владельцем; по его
   ответам банков уточняются разбор счетов monobank (`type: 'fop'` и `managedClients`) и поля остатков ПриватБанка.
+
+## 39. Выпуск портала: кто выпускает, страж, переменные, откат (2026-11-20)
+
+**Слово владельца 20.11:** «надо чтобы каждый компютер тоже мог віпускать», «Главная опасность — переменные - исправь».
+Опись боя и обоснование — `runferry-briefs/portal/release-process-2026-11-20.md`; строки журнала решений от 2026-11-20.
+
+**Кто.** Портал (Cloud Run `runferry-backend`, хостинг `droidmaps-runferry` = my.runferry.com, правила и индексы Firestore,
+задания Cloud Scheduler) на каждом компьютере выпускает **одна** сессия выпусков портала этого компьютера (на Mac владельца —
+«Портал: главная сессия выпусков»). Остальные сессии присылают ей заявку (шаблон — записка, §5.2): что и зачем, слово
+владельца, ветка на GitHub, новые переменные (имена, не значения), записи в базу, тесты, проверка после выпуска. С компьютера,
+где сессии выпусков нет, заявка — запросом на слияние в новейшую `deploy/*` с заголовком `Заявка на выпуск портала: …`.
+
+**Порядок.**
+1. Ветка `deploy/backend-ГГГГ-ММ-ДД-<имя>` от новейшей `origin/deploy/*`, в неё вливаются ветки заявок; `npm ci`,
+   `npm test` в `server/`, `npm run build` в корне; ветка отправлена на GitHub (репозиторий публичный — секретов нет).
+2. `scripts/portal-release-guard.sh [--new-env …] [--optional-env …] [--rules] [--indexes]` — должен ответить «МОЖНО».
+   Страж отказывает, если: в HEAD нет новейшей deploy-ветки; есть незакоммиченное; HEAD не на GitHub; имя ветки не по
+   образцу; трафик разделён, висит тег или последняя созданная ревизия не та, что с трафиком (**тег — замок**: пока висит
+   чужой кандидат, второй выпуск не начать); имена переменных в бою ≠ шаблону сервиса; в бою есть имя, которого нет в
+   `server/.env.example`; ветка добавила имя, не заявленное в `--new-env`/`--optional-env`; правила в ветке ≠ правил в бою
+   без `--rules`; при `--indexes` в бою есть индексы не из файла.
+3. Сервер — **без трафика под тегом** (тег латиницей, напр. `rc-mac-<имя>`):
+   `gcloud run deploy runferry-backend --project droidmaps-runferry --region europe-west3 --source server --no-traffic --tag <тег>`
+   (+ только заявленные `--update-env-vars` / `--update-secrets`). **Никогда** `--env-vars-file`, `--set-env-vars`,
+   `--set-secrets`, `--clear-*`: они заменяют или снимают все переменные ревизии. `--project` — в каждой команде
+   (`gcloud config` на Mac смотрит в `runferry-eu`).
+4. Проверка кандидата: `scripts/portal-release-guard.sh --allow-tag <тег> [--new-env …]` (переменные кандидата = бой +
+   заявленные), `/health` и проверки заявки по адресу тега.
+5. Трафик: `gcloud run services update-traffic runferry-backend --project droidmaps-runferry --region europe-west3
+   --to-revisions <ревизия>=100`, затем `--remove-tags <тег>`.
+6. Хостинг после сервера: `npm run build`, `firebase hosting:channel:deploy rc-<имя> --project droidmaps-runferry`,
+   проверка, затем ровно эта сборка в бой: `firebase hosting:clone droidmaps-runferry:rc-<имя> droidmaps-runferry:live`.
+7. Правила, индексы, Scheduler — только по заявке, отдельными командами; индексы — никогда с `--force`.
+8. Запись: раздел выпуска в этом файле (ревизия, хостинг, ветка, откат, что не проверено вживую), строка в журнал решений,
+   память, ответ заказчику.
+
+**Переменные.** Значения живут только на ревизиях Cloud Run; в репозитории — только имена (`server/.env.example`, с
+2026-11-20 полный список боя: дописаны 15 имён операторского бота и звонков). Новая ревизия берёт переменные с последней
+**созданной** ревизии. Откат на ревизию старше `00099-xor` теряет `OWNER_TELEGRAM_CHAT_ID`.
+
+**Индексы.** В `firestore.indexes.json` дописаны три индекса операторского бота (`bot_tasks`, `bot_reminders`,
+`bot_prompts`), созданные в бою вручную 06.10, — теперь файл совпадает с боем (9 индексов).
+
+**Откат.** Сервер: `update-traffic --to-revisions <точка отката>=100` (не старше `00099-xor`). Хостинг: консоль Firebase →
+Hosting → история выпусков → «Rollback» у нужной версии (или выпуск хостинга из ветки точки отката).
+Записи в базу откатом трафика не возвращаются.
